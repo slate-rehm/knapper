@@ -50,7 +50,7 @@ rename, and delete notes.
 
 ```bash
 npm run acceptance  # 23 checks over the critical seams
-npm run e2e         # 78 checks: vault round-trips, UI, telemetry, dev cycle, errors
+npm run e2e         # 79 checks: vault round-trips, UI, telemetry, dev cycle, errors
 ```
 
 `npm run check && npm run typecheck && npm test && npm run acceptance` is the

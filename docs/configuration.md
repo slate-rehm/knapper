@@ -82,9 +82,8 @@ table and the reasoning behind the defaults.
 ```json
 {
   "mcpServers": {
-    "obsidian": {
-      "command": "npx",
-      "args": ["-y", "knapper@latest"],
+    "knapper": {
+      "command": "knap",
       "env": {
         "OBSIDIAN_VAULT": "uob-test-vault",
         "OBSIDIAN_TARGET_MATCH": "uob-test-vault",
@@ -94,3 +93,6 @@ table and the reasoning behind the defaults.
   }
 }
 ```
+
+Swap `"command": "knap"` for `"command": "npx", "args": ["-y", "github:slate-rehm/knapper"]`
+if you installed from the default branch rather than a release tarball.

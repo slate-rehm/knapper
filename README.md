@@ -249,6 +249,7 @@ Browser tools are **snapshot-first**: call `browser_snapshot` (or the cheaper sc
 
 Also:
 
+- **Every CLI call fails with `Cannot find module 'electron'`** — something set `ELECTRON_RUN_AS_NODE=1` in the environment knapper inherited, which makes the Obsidian binary start as a bare Node process. Electron-based MCP clients (Claude Code, Cursor, VS Code, Claude Desktop) set it for their child processes. knapper strips it before spawning, so if you still see this, a wrapper script or shell profile is re-adding it downstream.
 - **Missing `browser_*` tools** — most of the UI toolset is proxied from `@playwright/mcp` and can only be enumerated while Obsidian is reachable. If the server starts first, your client caches a short tool list. Start Obsidian (or run `obsidian_launch`), then reconnect the MCP server.
 - **`VAULT_NOT_FOUND`** — vault name not in the `obsidian.json` registry.
 - **Stale UI refs** — `STALE_REF`; take a new `browser_snapshot`.

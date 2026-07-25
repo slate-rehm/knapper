@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { obsidianUserDataDir } from "../config.js";
+import { childEnv } from "./cli/exec.js";
 import { probeCdp } from "./cdp/discover.js";
 import { isObsidianRunning } from "./health.js";
 import { UobError } from "../util/errors.js";
@@ -176,6 +177,9 @@ export async function launchObsidian(opts: LaunchOptions): Promise<LaunchResult>
   const child = spawn(opts.obsidianBin, launchArgs, {
     detached: true,
     stdio: "ignore",
+    // Same reason as the CLI path: an inherited ELECTRON_RUN_AS_NODE would start
+    // Obsidian as a bare Node process, which cannot require("electron").
+    env: childEnv(),
   });
   child.unref();
 
