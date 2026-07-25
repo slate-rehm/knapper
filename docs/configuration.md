@@ -24,17 +24,25 @@ untouched.
 
 ## Tools and output
 
-| Variable                | Flag           | Default                        | Description                                          |
-| ----------------------- | -------------- | ------------------------------ | ---------------------------------------------------- |
-| `KNAP_TOOLSETS`         | `--toolsets`   | `core,ui,telemetry,plugin-dev` | Comma-separated toolsets, or `all`                   |
-| `KNAP_SCREENSHOT_DIR`   | `--output-dir` | `./.knapper`                   | Screenshots and snapshot artifacts, relative to cwd  |
-| `KNAP_TELEMETRY_BUFFER` | —              | `2000`                         | Max retained telemetry events (ring buffer)          |
-| `KNAP_MAX_CONCURRENCY`  | —              | `4`                            | Concurrent read-only tool calls; mutations serialize |
-| `KNAP_LOG_LEVEL`        | `--log-level`  | `info`                         | `debug`, `info`, `warn`, `error`, `silent` — stderr  |
+| Variable                 | Flag           | Default                        | Description                                          |
+| ------------------------ | -------------- | ------------------------------ | ---------------------------------------------------- |
+| `KNAP_TOOLSETS`          | `--toolsets`   | `core,ui,telemetry,plugin-dev` | Comma-separated toolsets, or `all`                   |
+| `KNAP_SCREENSHOT_DIR`    | `--output-dir` | `./.knapper`                   | Screenshots and snapshot artifacts, relative to cwd  |
+| `KNAP_TELEMETRY_BUFFER`  | —              | `2000`                         | Max retained telemetry events (ring buffer)          |
+| `KNAP_TELEMETRY_NETWORK` | —              | `false`                        | Also capture failed network requests                 |
+| `KNAP_MAX_CONCURRENCY`   | —              | `4`                            | Concurrent read-only tool calls; mutations serialize |
+| `KNAP_LOG_LEVEL`         | `--log-level`  | `info`                         | `debug`, `info`, `warn`, `error`, `silent` — stderr  |
 
 `KNAP_MAX_CONCURRENCY` only raises the ceiling for tools marked `readOnlyHint`.
 Anything that mutates takes an exclusive lock regardless, so real input and UI
 mutations never interleave.
+
+`KNAP_TELEMETRY_NETWORK` is off by default because failed requests share the one
+ring buffer with console output, and Obsidian's renderer is chatty enough that
+they crowd out the plugin errors most sessions are after. Turn it on when you are
+debugging a plugin that fetches, then read the results with
+`obsidian_logs source=network`. `obsidian_telemetry_status` reports whether it is
+armed. Accepted truthy values: `1`, `true`, `yes`, `on`.
 
 ## Transport
 

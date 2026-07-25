@@ -19,10 +19,6 @@ export const CAPABILITIES = [
   "eventStream",
   /** Raw Chrome DevTools Protocol passthrough. Both, but mutually exclusive. */
   "rawCdp",
-  /** Open a vault that is not currently open. CLI only. */
-  "openClosedVault",
-  /** Enumerate the vault registry. Reads obsidian.json directly. */
-  "listVaults",
   /** Install or uninstall a community plugin. CLI only. */
   "pluginInstall",
   /** Start or stop the Obsidian process. Local process control. */
@@ -50,8 +46,6 @@ export const CAPABILITY_PREFERENCE: Record<Capability, readonly Layer[]> = {
   ariaSnapshot: ["playwright"],
   eventStream: ["playwright"],
   rawCdp: ["playwright", "cliCdp"],
-  openClosedVault: ["cli"],
-  listVaults: ["local"],
   pluginInstall: ["cli"],
   launch: ["local"],
 };

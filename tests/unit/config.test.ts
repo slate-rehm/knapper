@@ -42,6 +42,7 @@ describe("loadConfig", () => {
     expect(config.cdpPort).toBe(9222);
     expect(config.logLevel).toBe("info");
     expect(config.telemetryBuffer).toBe(2000);
+    expect(config.telemetryNetwork).toBe(false);
     expect(config.vault).toBeUndefined();
   });
 
@@ -74,6 +75,17 @@ describe("loadConfig", () => {
 
   it("ignores a non-numeric buffer size", () => {
     expect(loadConfig({}, { KNAP_TELEMETRY_BUFFER: "lots" }).telemetryBuffer).toBe(2000);
+  });
+
+  it("accepts the truthy spellings people actually type for network capture", () => {
+    for (const raw of ["1", "true", "TRUE", "yes", "on"]) {
+      expect(loadConfig({}, { KNAP_TELEMETRY_NETWORK: raw }).telemetryNetwork).toBe(true);
+    }
+    for (const raw of ["0", "false", "no", "off"]) {
+      expect(loadConfig({}, { KNAP_TELEMETRY_NETWORK: raw }).telemetryNetwork).toBe(false);
+    }
+    // Garbage must not silently arm a noisy capture path.
+    expect(loadConfig({}, { KNAP_TELEMETRY_NETWORK: "maybe" }).telemetryNetwork).toBe(false);
   });
 
   it("derives the port from a URL without one", () => {
@@ -137,9 +149,14 @@ describe("capability model", () => {
     expect(CAPABILITY_PREFERENCE.evaluate[0]).toBe("cli");
   });
 
-  it("keeps opening a closed vault and installing plugins CLI-only", () => {
-    expect(CAPABILITY_PREFERENCE.openClosedVault).toEqual(["cli"]);
+  it("keeps installing plugins CLI-only", () => {
     expect(CAPABILITY_PREFERENCE.pluginInstall).toEqual(["cli"]);
+  });
+
+  it("declares no capability that no tool requires", () => {
+    // A capability with no caller is dead routing logic that still has to be kept
+    // consistent; the registry is the only thing that consumes this table.
+    expect(Object.keys(CAPABILITY_PREFERENCE).sort()).toEqual([...CAPABILITIES].sort());
   });
 
   it("treats the two CDP transports as non-exclusive, per the Gate B measurement", () => {

@@ -358,6 +358,9 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       pluginId: z.string().optional().describe("Plugin id (default: read from manifest.json)"),
       unlink: z.boolean().optional().describe("Remove the symlink instead of creating one"),
     },
+    // Replaces an existing symlink at the target path, and unlink=true removes one.
+    // It refuses to clobber a real directory, but the link itself is still lost.
+    annotations: { destructiveHint: true },
     handler: async (args) => {
       const vault = args.vault as string;
       const sourceDir = args.sourceDir as string;

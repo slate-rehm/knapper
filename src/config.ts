@@ -50,6 +50,12 @@ export interface Config {
   unknownToolsets: string[];
   logLevel: LogLevel;
   telemetryBuffer: number;
+  /**
+   * Capture failed network requests alongside console output. Off by default: the
+   * two share one ring buffer, and Obsidian's renderer is chatty enough that
+   * network events crowd out the plugin errors most sessions are actually after.
+   */
+  telemetryNetwork: boolean;
   reconnectMs: number;
   /** Directory for screenshots and snapshot files. */
   outputDir: string;
@@ -69,6 +75,7 @@ export interface ConfigOverrides {
   toolsets?: string;
   logLevel?: string;
   telemetryBuffer?: number;
+  telemetryNetwork?: boolean;
   reconnectMs?: number;
   outputDir?: string;
   cliTimeoutMs?: number;
@@ -135,6 +142,15 @@ function numberFrom(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+/** Accept the shapes people actually type in an MCP client's env block. */
+function boolFrom(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined || raw === "") return fallback;
+  const v = raw.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return fallback;
+}
+
 export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): Config {
   const cdpUrl = overrides.cdpUrl ?? env.OBSIDIAN_CDP_URL ?? DEFAULT_CDP_URL;
 
@@ -166,6 +182,7 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
     unknownToolsets: unknown,
     logLevel,
     telemetryBuffer: overrides.telemetryBuffer ?? numberFrom(env.KNAP_TELEMETRY_BUFFER, 2000),
+    telemetryNetwork: overrides.telemetryNetwork ?? boolFrom(env.KNAP_TELEMETRY_NETWORK, false),
     reconnectMs:
       overrides.reconnectMs ?? numberFrom(env.KNAP_RECONNECT_MS ?? env.RECONNECT_MS, 2000),
     outputDir:

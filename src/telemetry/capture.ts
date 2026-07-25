@@ -48,6 +48,12 @@ export class TelemetryCapture {
     private readonly router: CapabilityRouter,
     private readonly store: TelemetryStore,
     private readonly logger: Logger,
+    /**
+     * Arm network capture without every call site having to ask for it. Network
+     * events are noisy and share the ring buffer with console output, so this is
+     * off unless KNAP_TELEMETRY_NETWORK says otherwise.
+     */
+    private readonly networkByDefault = false,
   ) {}
 
   get isArmed(): boolean {
@@ -63,17 +69,18 @@ export class TelemetryCapture {
    * attached Obsidian window. Safe to call repeatedly.
    */
   async arm(opts: { network?: boolean } = {}): Promise<{ armed: boolean; pages: number }> {
+    const resolved = { network: opts.network ?? this.networkByDefault };
     if (this.arming) {
       const pending = await this.arming;
       // A concurrent arm({network:true}) must still enable network after the
       // in-flight arm without network finishes.
-      if (opts.network === true && !this.networkEnabled && this.armed) {
-        return this.arm({ network: true });
+      if (resolved.network && !this.networkEnabled && this.armed) {
+        return this.arm(resolved);
       }
       return pending;
     }
 
-    this.arming = this.doArm(opts);
+    this.arming = this.doArm(resolved);
     try {
       return await this.arming;
     } finally {
