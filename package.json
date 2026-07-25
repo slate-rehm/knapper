@@ -1,5 +1,5 @@
 {
-  "name": "unified-obsidian-mcp",
+  "name": "knapper",
   "version": "0.1.0",
   "description": "MCP server for Obsidian plugin development: live app automation over CDP, Playwright browser tools, telemetry, and dev-cycle workflows.",
   "keywords": [
@@ -13,18 +13,18 @@
     "playwright",
     "plugin-development"
   ],
-  "homepage": "https://github.com/slate-rehm/unified-obsidian-browser#readme",
+  "homepage": "https://github.com/slate-rehm/knapper#readme",
   "bugs": {
-    "url": "https://github.com/slate-rehm/unified-obsidian-browser/issues"
+    "url": "https://github.com/slate-rehm/knapper/issues"
   },
   "license": "MIT",
   "author": "slate-rehm",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/slate-rehm/unified-obsidian-browser.git"
+    "url": "git+https://github.com/slate-rehm/knapper.git"
   },
   "bin": {
-    "unified-obsidian-mcp": "./dist/cli.js"
+    "knap": "./dist/cli.js"
   },
   "files": [
     "dist",
@@ -32,8 +32,6 @@
     "commands",
     "agents",
     "rules",
-    "assets",
-    "server.json",
     ".mcp.json",
     ".cursor-plugin",
     ".claude-plugin",
@@ -56,7 +54,7 @@
     "e2e": "node scripts/e2e.mjs",
     "versions:check": "node scripts/sync-version.mjs --check",
     "versions:sync": "node scripts/sync-version.mjs",
-    "prepublishOnly": "npm run versions:check && npm run build"
+    "prepare": "npm run versions:check && npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -67,6 +65,7 @@
   "devDependencies": {
     "@types/node": "^22.15.17",
     "@types/yargs": "^17.0.33",
+    "playwright-core": "1.62.0-alpha-1783623505000",
     "typescript": "^5.8.3",
     "vite-plus": "0.2.6",
     "vitest": "^4.1.1"
@@ -81,5 +80,5 @@
   "engines": {
     "node": ">=20"
   },
-  "mcpName": "io.github.slate-rehm/unified-obsidian-mcp"
+  "mcpName": "io.github.slate-rehm/knapper"
 }

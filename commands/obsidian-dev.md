@@ -1,6 +1,6 @@
 # Obsidian plugin dev cycle
 
-Run a full **build → link → reload → verify** loop against the live Obsidian app using unified-obsidian-mcp.
+Run a full **build → link → reload → verify** loop against the live Obsidian app using knapper.
 
 ## Prerequisites
 

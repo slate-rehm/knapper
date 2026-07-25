@@ -138,10 +138,10 @@ function numberFrom(raw: string | undefined, fallback: number): number {
 export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): Config {
   const cdpUrl = overrides.cdpUrl ?? env.OBSIDIAN_CDP_URL ?? DEFAULT_CDP_URL;
 
-  const rawLogLevel = overrides.logLevel ?? env.UOB_LOG_LEVEL ?? env.LOG_LEVEL ?? "info";
+  const rawLogLevel = overrides.logLevel ?? env.KNAP_LOG_LEVEL ?? env.LOG_LEVEL ?? "info";
   const logLevel: LogLevel = isLogLevel(rawLogLevel) ? rawLogLevel : "info";
 
-  const { enabled, unknown } = parseToolsets(overrides.toolsets ?? env.UOB_TOOLSETS);
+  const { enabled, unknown } = parseToolsets(overrides.toolsets ?? env.KNAP_TOOLSETS);
 
   const vault = overrides.vault ?? env.OBSIDIAN_VAULT;
   const targetMatch = overrides.targetMatch ?? env.OBSIDIAN_TARGET_MATCH;
@@ -158,18 +158,21 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
     transport,
     httpPort: overrides.httpPort ?? numberFrom(env.MCP_PORT, 9223),
     httpHost: overrides.httpHost ?? env.MCP_HOST ?? "127.0.0.1",
-    maxConcurrency: Math.max(1, overrides.maxConcurrency ?? numberFrom(env.UOB_MAX_CONCURRENCY, 4)),
+    maxConcurrency: Math.max(
+      1,
+      overrides.maxConcurrency ?? numberFrom(env.KNAP_MAX_CONCURRENCY, 4),
+    ),
     enabledToolsets: enabled,
     unknownToolsets: unknown,
     logLevel,
-    telemetryBuffer: overrides.telemetryBuffer ?? numberFrom(env.UOB_TELEMETRY_BUFFER, 2000),
+    telemetryBuffer: overrides.telemetryBuffer ?? numberFrom(env.KNAP_TELEMETRY_BUFFER, 2000),
     reconnectMs:
-      overrides.reconnectMs ?? numberFrom(env.UOB_RECONNECT_MS ?? env.RECONNECT_MS, 2000),
+      overrides.reconnectMs ?? numberFrom(env.KNAP_RECONNECT_MS ?? env.RECONNECT_MS, 2000),
     outputDir:
       overrides.outputDir ??
-      env.UOB_SCREENSHOT_DIR ??
+      env.KNAP_SCREENSHOT_DIR ??
       env.SCREENSHOT_DIR ??
-      join(process.cwd(), ".unified-obsidian-mcp"),
-    cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.UOB_CLI_TIMEOUT_MS, 15_000),
+      join(process.cwd(), ".knapper"),
+    cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.KNAP_CLI_TIMEOUT_MS, 15_000),
   };
 }

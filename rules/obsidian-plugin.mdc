@@ -1,5 +1,5 @@
 ---
-description: Guidance for AI assistants working in an Obsidian community plugin repository with unified-obsidian-mcp.
+description: Guidance for AI assistants working in an Obsidian community plugin repository with knapper.
 globs:
   - "**/*.ts"
   - "**/manifest.json"

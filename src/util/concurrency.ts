@@ -76,7 +76,7 @@ function queueTimeout(label: string, mode: LockMode, waitedMs: number, stats: Lo
         "queued behind another that has not finished. A tool is most likely wedged on the UI — an " +
         "open modal or dialog swallowing input is the usual cause. Take a screenshot or snapshot to " +
         "see the current window state, dismiss anything blocking, then retry. Raise " +
-        "UOB_MAX_CONCURRENCY only if the blocked calls are read-only.",
+        "KNAP_MAX_CONCURRENCY only if the blocked calls are read-only.",
       details: {
         tool: label,
         mode,

@@ -1,11 +1,11 @@
 /**
  * Keep every published manifest's version in step with package.json.
  *
- * The same version string is declared in six places across five files, because
- * each distribution channel (npm, the MCP registry, and the Cursor / Claude Code /
- * Codex plugin hosts) insists on its own manifest dialect. A release that bumps
- * package.json alone ships plugin manifests that claim the previous version, which
- * is invisible locally and only shows up as a wrong version in someone's client.
+ * The same version string is declared in four places across four files, because
+ * each plugin host (Cursor / Claude Code / Codex) insists on its own manifest
+ * dialect. A release that bumps package.json alone ships plugin manifests that
+ * claim the previous version, which is invisible locally and only shows up as a
+ * wrong version in someone's client.
  *
  *   node scripts/sync-version.mjs          # rewrite manifests from package.json
  *   node scripts/sync-version.mjs --check  # fail if any manifest has drifted (CI)
@@ -23,7 +23,6 @@ const check = process.argv.includes("--check");
  * rather than hand-editing a manifest, or the next release drifts again.
  */
 const TARGETS = [
-  { file: "server.json", paths: [["version"], ["packages", 0, "version"]] },
   { file: ".cursor-plugin/plugin.json", paths: [["version"]] },
   { file: ".claude-plugin/plugin.json", paths: [["version"]] },
   { file: ".codex-plugin/plugin.json", paths: [["version"]] },

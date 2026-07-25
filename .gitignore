@@ -30,4 +30,4 @@ test-vault/
 dist/
 
 # Screenshot/trace output written by the server at runtime
-.unified-obsidian-mcp/
+.knapper/

@@ -101,7 +101,7 @@ export class BrowserProxy {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
 
-    const client = new Client({ name: "unified-obsidian-mcp", version: "0.1.0" });
+    const client = new Client({ name: "knapper", version: "0.1.0" });
     await client.connect(clientTransport);
 
     const listed = await client.listTools();

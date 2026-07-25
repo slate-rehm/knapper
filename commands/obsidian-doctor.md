@@ -1,6 +1,6 @@
 # Obsidian connection doctor
 
-Diagnose why unified-obsidian-mcp cannot talk to Obsidian and fix each layer explicitly.
+Diagnose why knapper cannot talk to Obsidian and fix each layer explicitly.
 
 ## Run
 
