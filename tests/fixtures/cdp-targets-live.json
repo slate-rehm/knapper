@@ -1,0 +1,29 @@
+[
+  {
+    "description": "",
+    "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@9722f06a26ed9376ee395a4de8c472268d88a4fb/inspector.html?ws=127.0.0.1:9222/devtools/page/5C16C616E95943D3FFC52C6715A0E7FC",
+    "id": "5C16C616E95943D3FFC52C6715A0E7FC",
+    "title": "New tab - uob-test-vault - Obsidian 1.12.7",
+    "type": "page",
+    "url": "app://obsidian.md/index.html",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/5C16C616E95943D3FFC52C6715A0E7FC"
+  },
+  {
+    "description": "",
+    "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@9722f06a26ed9376ee395a4de8c472268d88a4fb/inspector.html?ws=127.0.0.1:9222/devtools/page/44E644B7C22DA343AF2BEB455AC42E54",
+    "id": "44E644B7C22DA343AF2BEB455AC42E54",
+    "title": "Metadata Cache Worker",
+    "type": "worker",
+    "url": "app://obsidian.md/worker.js",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/44E644B7C22DA343AF2BEB455AC42E54"
+  },
+  {
+    "description": "",
+    "devtoolsFrontendUrl": "https://chrome-devtools-frontend.appspot.com/serve_rev/@9722f06a26ed9376ee395a4de8c472268d88a4fb/inspector.html?ws=127.0.0.1:9222/devtools/page/945794B48D61376F9358ADDA3F3A1E3C",
+    "id": "945794B48D61376F9358ADDA3F3A1E3C",
+    "title": "blob:app://obsidian.md/16992aa8-c994-464a-83a0-6ed26a982e8c",
+    "type": "worker",
+    "url": "blob:app://obsidian.md/16992aa8-c994-464a-83a0-6ed26a982e8c",
+    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/945794B48D61376F9358ADDA3F3A1E3C"
+  }
+]

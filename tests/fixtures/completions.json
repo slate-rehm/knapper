@@ -1,0 +1,1566 @@
+{
+  "links": {
+    "usage": "[file=<name>] [path=<path>] [total]",
+    "description": "List outgoing links from a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "total": {
+        "description": "Return link count"
+      }
+    }
+  },
+  "bookmarks": {
+    "usage": "[total] [verbose] [format=json|tsv|csv]",
+    "description": "List bookmarks",
+    "flags": {
+      "total": {
+        "description": "Return bookmark count"
+      },
+      "verbose": {
+        "description": "Include bookmark types"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: tsv)"
+      }
+    }
+  },
+  "bookmark": {
+    "usage": "[file=<path>] [subpath=<subpath>] [folder=<path>] [search=<query>] [url=<url>] [title=<title>]",
+    "description": "Add a bookmark",
+    "flags": {
+      "file": {
+        "value": "<path>",
+        "description": "File to bookmark"
+      },
+      "subpath": {
+        "value": "<subpath>",
+        "description": "Subpath (heading or block) within file"
+      },
+      "folder": {
+        "value": "<path>",
+        "description": "Folder to bookmark"
+      },
+      "search": {
+        "value": "<query>",
+        "description": "Search query to bookmark"
+      },
+      "url": {
+        "value": "<url>",
+        "description": "URL to bookmark"
+      },
+      "title": {
+        "value": "<title>",
+        "description": "Bookmark title"
+      }
+    }
+  },
+  "outline": {
+    "usage": "[file=<name>] [path=<path>] [format=tree|md|json] [total]",
+    "description": "Show headings for the current file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "format": {
+        "value": "tree|md|json",
+        "description": "Output format (default: tree)"
+      },
+      "total": {
+        "description": "Return heading count"
+      }
+    }
+  },
+  "wordcount": {
+    "usage": "[file=<name>] [path=<path>] [words] [characters]",
+    "description": "Count words and characters",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "words": {
+        "description": "Return word count only"
+      },
+      "characters": {
+        "description": "Return character count only"
+      }
+    }
+  },
+  "sync": {
+    "usage": "[on] [off]",
+    "description": "Pause or resume sync",
+    "flags": {
+      "on": {
+        "description": "Resume sync"
+      },
+      "off": {
+        "description": "Pause sync"
+      }
+    }
+  },
+  "sync:history": {
+    "usage": "[file=<name>] [path=<path>] [total]",
+    "description": "List sync version history for a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "total": {
+        "description": "Return version count"
+      }
+    }
+  },
+  "sync:read": {
+    "usage": "[file=<name>] [path=<path>] version=<n>",
+    "description": "Read a sync version",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "version": {
+        "value": "<n>",
+        "description": "Version number (required)",
+        "required": true
+      }
+    }
+  },
+  "sync:restore": {
+    "usage": "[file=<name>] [path=<path>] version=<n>",
+    "description": "Restore a sync version",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "version": {
+        "value": "<n>",
+        "description": "Version number (required)",
+        "required": true
+      }
+    }
+  },
+  "sync:open": {
+    "usage": "[file=<name>] [path=<path>]",
+    "description": "Open sync history",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "sync:deleted": {
+    "usage": "[total]",
+    "description": "List deleted files in sync",
+    "flags": {
+      "total": {
+        "description": "Return deleted file count"
+      }
+    }
+  },
+  "sync:status": {
+    "usage": "",
+    "description": "Show sync status"
+  },
+  "base:query": {
+    "usage": "[file=<name>] [path=<path>] [view=<name>] [format=json|csv|tsv|md|paths]",
+    "description": "Query a base and return results",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "Base file name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "Base file path"
+      },
+      "view": {
+        "value": "<name>",
+        "description": "View name to query"
+      },
+      "format": {
+        "value": "json|csv|tsv|md|paths",
+        "description": "Output format (default: json)"
+      }
+    }
+  },
+  "bases": {
+    "usage": "",
+    "description": "List all base files in vault"
+  },
+  "base:views": {
+    "usage": "",
+    "description": "List views in the current base file"
+  },
+  "base:create": {
+    "usage": "[file=<name>] [path=<path>] [view=<name>] [name=<name>] [content=<text>] [open] [newtab]",
+    "description": "Create a new item in a base",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "Base file name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "Base file path"
+      },
+      "view": {
+        "value": "<name>",
+        "description": "View name"
+      },
+      "name": {
+        "value": "<name>",
+        "description": "New file name"
+      },
+      "content": {
+        "value": "<text>",
+        "description": "Initial content"
+      },
+      "open": {
+        "description": "Open file after creating"
+      },
+      "newtab": {
+        "description": "Open in new tab"
+      }
+    }
+  },
+  "search": {
+    "usage": "query=<text> [path=<folder>] [limit=<n>] [total] [case] [format=text|json]",
+    "description": "Search vault for text",
+    "flags": {
+      "query": {
+        "value": "<text>",
+        "description": "Search query (required)",
+        "required": true
+      },
+      "path": {
+        "value": "<folder>",
+        "description": "Limit to folder"
+      },
+      "limit": {
+        "value": "<n>",
+        "description": "Max files"
+      },
+      "total": {
+        "description": "Return match count"
+      },
+      "case": {
+        "description": "Case sensitive"
+      },
+      "format": {
+        "value": "text|json",
+        "description": "Output format (default: text)"
+      }
+    }
+  },
+  "search:context": {
+    "usage": "query=<text> [path=<folder>] [limit=<n>] [case] [format=text|json]",
+    "description": "Search with matching line context",
+    "flags": {
+      "query": {
+        "value": "<text>",
+        "description": "Search query (required)",
+        "required": true
+      },
+      "path": {
+        "value": "<folder>",
+        "description": "Limit to folder"
+      },
+      "limit": {
+        "value": "<n>",
+        "description": "Max files"
+      },
+      "case": {
+        "description": "Case sensitive"
+      },
+      "format": {
+        "value": "text|json",
+        "description": "Output format (default: text)"
+      }
+    }
+  },
+  "search:open": {
+    "usage": "[query=<text>]",
+    "description": "Open search view",
+    "flags": {
+      "query": {
+        "value": "<text>",
+        "description": "Initial search query"
+      }
+    }
+  },
+  "daily": {
+    "usage": "[paneType=tab|split|window]",
+    "description": "Open daily note",
+    "flags": {
+      "paneType": {
+        "value": "tab|split|window",
+        "description": "Pane type to open in"
+      }
+    }
+  },
+  "daily:path": {
+    "usage": "",
+    "description": "Get daily note path"
+  },
+  "daily:read": {
+    "usage": "",
+    "description": "Read daily note contents"
+  },
+  "daily:append": {
+    "usage": "content=<text> [inline] [open] [paneType=tab|split|window]",
+    "description": "Append content to daily note",
+    "flags": {
+      "content": {
+        "value": "<text>",
+        "description": "Content to append (required)",
+        "required": true
+      },
+      "inline": {
+        "description": "Append without newline"
+      },
+      "open": {
+        "description": "Open file after adding"
+      },
+      "paneType": {
+        "value": "tab|split|window",
+        "description": "Pane type to open in"
+      }
+    }
+  },
+  "daily:prepend": {
+    "usage": "content=<text> [inline] [open] [paneType=tab|split|window]",
+    "description": "Prepend content to daily note",
+    "flags": {
+      "content": {
+        "value": "<text>",
+        "description": "Content to prepend (required)",
+        "required": true
+      },
+      "inline": {
+        "description": "Prepend without newline"
+      },
+      "open": {
+        "description": "Open file after adding"
+      },
+      "paneType": {
+        "value": "tab|split|window",
+        "description": "Pane type to open in"
+      }
+    }
+  },
+  "templates": {
+    "usage": "[total]",
+    "description": "List templates",
+    "flags": {
+      "total": {
+        "description": "Return template count"
+      }
+    }
+  },
+  "template:read": {
+    "usage": "name=<template> [resolve] [title=<title>]",
+    "description": "Read template content",
+    "flags": {
+      "name": {
+        "value": "<template>",
+        "description": "Template name (required)",
+        "required": true
+      },
+      "resolve": {
+        "description": "Resolve template variables"
+      },
+      "title": {
+        "value": "<title>",
+        "description": "Title for variable resolution"
+      }
+    }
+  },
+  "template:insert": {
+    "usage": "name=<template>",
+    "description": "Insert template into active file",
+    "flags": {
+      "name": {
+        "value": "<template>",
+        "description": "Template name (required)",
+        "required": true
+      }
+    }
+  },
+  "history": {
+    "usage": "[file=<name>] [path=<path>]",
+    "description": "List file history versions",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "history:list": {
+    "usage": "",
+    "description": "List files with history"
+  },
+  "history:read": {
+    "usage": "[file=<name>] [path=<path>] [version=<n>]",
+    "description": "Read a file history version",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "version": {
+        "value": "<n>",
+        "description": "Version number (default: 1)"
+      }
+    }
+  },
+  "history:restore": {
+    "usage": "[file=<name>] [path=<path>] version=<n>",
+    "description": "Restore a file history version",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "version": {
+        "value": "<n>",
+        "description": "Version number (required)",
+        "required": true
+      }
+    }
+  },
+  "history:open": {
+    "usage": "[file=<name>] [path=<path>]",
+    "description": "Open file recovery",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "help": {
+    "usage": "[<command>]",
+    "description": "Show list of all available commands",
+    "flags": {
+      "<command>": {
+        "description": "Show help for a specific command"
+      }
+    }
+  },
+  "devtools": {
+    "usage": "",
+    "description": "Toggle Electron dev tools"
+  },
+  "dev:mobile": {
+    "usage": "[on] [off]",
+    "description": "Toggle mobile emulation",
+    "flags": {
+      "on": {
+        "description": "Enable mobile emulation"
+      },
+      "off": {
+        "description": "Disable mobile emulation"
+      }
+    }
+  },
+  "dev:debug": {
+    "usage": "[on] [off]",
+    "description": "Attach/detach Chrome DevTools Protocol debugger",
+    "flags": {
+      "on": {
+        "description": "Attach debugger"
+      },
+      "off": {
+        "description": "Detach debugger"
+      }
+    }
+  },
+  "dev:errors": {
+    "usage": "[clear]",
+    "description": "Show captured errors",
+    "flags": {
+      "clear": {
+        "description": "Clear the error buffer"
+      }
+    }
+  },
+  "dev:screenshot": {
+    "usage": "[path=<filename>]",
+    "description": "Take a screenshot",
+    "flags": {
+      "path": {
+        "value": "<filename>",
+        "description": "Output file path"
+      }
+    }
+  },
+  "dev:cdp": {
+    "usage": "method=<CDP.method> [params=<json>]",
+    "description": "Run a Chrome DevTools Protocol command",
+    "flags": {
+      "method": {
+        "value": "<CDP.method>",
+        "description": "CDP method to call (required)",
+        "required": true
+      },
+      "params": {
+        "value": "<json>",
+        "description": "Method parameters as JSON"
+      }
+    }
+  },
+  "dev:css": {
+    "usage": "selector=<css> [prop=<name>]",
+    "description": "Inspect CSS with source locations",
+    "flags": {
+      "selector": {
+        "value": "<css>",
+        "description": "CSS selector (required)",
+        "required": true
+      },
+      "prop": {
+        "value": "<name>",
+        "description": "Filter by property name"
+      }
+    }
+  },
+  "dev:dom": {
+    "usage": "selector=<css> [total] [text] [inner] [all] [attr=<name>] [css=<prop>]",
+    "description": "Query DOM elements",
+    "flags": {
+      "selector": {
+        "value": "<css>",
+        "description": "CSS selector (required)",
+        "required": true
+      },
+      "total": {
+        "description": "Return element count"
+      },
+      "text": {
+        "description": "Return text content"
+      },
+      "inner": {
+        "description": "Return innerHTML instead of outerHTML"
+      },
+      "all": {
+        "description": "Return all matches instead of first"
+      },
+      "attr": {
+        "value": "<name>",
+        "description": "Get attribute value"
+      },
+      "css": {
+        "value": "<prop>",
+        "description": "Get CSS property value"
+      }
+    }
+  },
+  "dev:console": {
+    "usage": "[clear] [limit=<n>] [level=log|warn|error|info|debug]",
+    "description": "Show captured console messages",
+    "flags": {
+      "clear": {
+        "description": "Clear the console buffer"
+      },
+      "limit": {
+        "value": "<n>",
+        "description": "Max messages to show (default 50)"
+      },
+      "level": {
+        "value": "log|warn|error|info|debug",
+        "description": "Filter by log level"
+      }
+    }
+  },
+  "eval": {
+    "usage": "code=<javascript>",
+    "description": "Execute JavaScript and return result",
+    "flags": {
+      "code": {
+        "value": "<javascript>",
+        "description": "JavaScript code to execute (required)",
+        "required": true
+      }
+    }
+  },
+  "commands": {
+    "usage": "[filter=<prefix>]",
+    "description": "List available commands",
+    "flags": {
+      "filter": {
+        "value": "<prefix>",
+        "description": "Filter by ID prefix"
+      }
+    }
+  },
+  "command": {
+    "usage": "id=<command-id>",
+    "description": "Execute an Obsidian command",
+    "flags": {
+      "id": {
+        "value": "<command-id>",
+        "description": "Command ID to execute (required)",
+        "required": true
+      }
+    }
+  },
+  "random": {
+    "usage": "[folder=<path>] [newtab]",
+    "description": "Open a random note",
+    "flags": {
+      "folder": {
+        "value": "<path>",
+        "description": "Limit to folder"
+      },
+      "newtab": {
+        "description": "Open in new tab"
+      }
+    }
+  },
+  "random:read": {
+    "usage": "[folder=<path>]",
+    "description": "Read a random note",
+    "flags": {
+      "folder": {
+        "value": "<path>",
+        "description": "Limit to folder"
+      }
+    }
+  },
+  "reload": {
+    "usage": "",
+    "description": "Reload the vault"
+  },
+  "restart": {
+    "usage": "",
+    "description": "Restart the app"
+  },
+  "plugin": {
+    "usage": "id=<plugin-id>",
+    "description": "Get plugin info",
+    "flags": {
+      "id": {
+        "value": "<plugin-id>",
+        "description": "Plugin ID (required)",
+        "required": true
+      }
+    }
+  },
+  "plugins": {
+    "usage": "[filter=core|community] [versions] [format=json|tsv|csv]",
+    "description": "List installed plugins",
+    "flags": {
+      "filter": {
+        "value": "core|community",
+        "description": "Filter by plugin type"
+      },
+      "versions": {
+        "description": "Include version numbers"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: tsv)"
+      }
+    }
+  },
+  "plugins:enabled": {
+    "usage": "[filter=core|community] [versions] [format=json|tsv|csv]",
+    "description": "List enabled plugins",
+    "flags": {
+      "filter": {
+        "value": "core|community",
+        "description": "Filter by plugin type"
+      },
+      "versions": {
+        "description": "Include version numbers"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: tsv)"
+      }
+    }
+  },
+  "plugins:restrict": {
+    "usage": "[on] [off]",
+    "description": "Toggle or check restricted mode",
+    "flags": {
+      "on": {
+        "description": "Enable restricted mode"
+      },
+      "off": {
+        "description": "Disable restricted mode"
+      }
+    }
+  },
+  "themes": {
+    "usage": "[versions]",
+    "description": "List installed themes",
+    "flags": {
+      "versions": {
+        "description": "Include version numbers"
+      }
+    }
+  },
+  "theme": {
+    "usage": "[name=<name>]",
+    "description": "Show active theme or get info",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Theme name for details"
+      }
+    }
+  },
+  "snippets": {
+    "usage": "",
+    "description": "List installed CSS snippets"
+  },
+  "snippets:enabled": {
+    "usage": "",
+    "description": "List enabled CSS snippets"
+  },
+  "tags": {
+    "usage": "[file=<name>] [path=<path>] [total] [counts] [sort=count] [format=json|tsv|csv] [active]",
+    "description": "List tags in the vault",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "total": {
+        "description": "Return tag count"
+      },
+      "counts": {
+        "description": "Include tag counts"
+      },
+      "sort": {
+        "value": "count",
+        "description": "Sort by count (default: name)"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: tsv)"
+      },
+      "active": {
+        "description": "Show tags for active file"
+      }
+    }
+  },
+  "tasks": {
+    "usage": "[file=<name>] [path=<path>] [total] [done] [todo] [status=\"<char>\"] [verbose] [format=json|tsv|csv] [active] [daily]",
+    "description": "List tasks in the vault",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "Filter by file name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "Filter by file path"
+      },
+      "total": {
+        "description": "Return task count"
+      },
+      "done": {
+        "description": "Show completed tasks"
+      },
+      "todo": {
+        "description": "Show incomplete tasks"
+      },
+      "status": {
+        "value": "\"<char>\"",
+        "description": "Filter by status character"
+      },
+      "verbose": {
+        "description": "Group by file with line numbers"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: text)"
+      },
+      "active": {
+        "description": "Show tasks for active file"
+      },
+      "daily": {
+        "description": "Show tasks from daily note"
+      }
+    }
+  },
+  "task": {
+    "usage": "[ref=<path:line>] [file=<name>] [path=<path>] [line=<n>] [toggle] [done] [todo] [daily] [status=\"<char>\"]",
+    "description": "Show or update a task",
+    "flags": {
+      "ref": {
+        "value": "<path:line>",
+        "description": "Task reference (path:line)"
+      },
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "line": {
+        "value": "<n>",
+        "description": "Line number"
+      },
+      "toggle": {
+        "description": "Toggle task status"
+      },
+      "done": {
+        "description": "Mark as done"
+      },
+      "todo": {
+        "description": "Mark as todo"
+      },
+      "daily": {
+        "description": "Use daily note"
+      },
+      "status": {
+        "value": "\"<char>\"",
+        "description": "Set status character"
+      }
+    }
+  },
+  "tag": {
+    "usage": "name=<tag> [total] [verbose]",
+    "description": "Get tag info",
+    "flags": {
+      "name": {
+        "value": "<tag>",
+        "description": "Tag name (required)",
+        "required": true
+      },
+      "total": {
+        "description": "Return occurrence count"
+      },
+      "verbose": {
+        "description": "Include file list and count"
+      }
+    }
+  },
+  "properties": {
+    "usage": "[file=<name>] [path=<path>] [name=<name>] [total] [sort=count] [counts] [format=yaml|json|tsv] [active]",
+    "description": "List properties in the vault",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "Show properties for file"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "Show properties for path"
+      },
+      "name": {
+        "value": "<name>",
+        "description": "Get specific property count"
+      },
+      "total": {
+        "description": "Return property count"
+      },
+      "sort": {
+        "value": "count",
+        "description": "Sort by count (default: name)"
+      },
+      "counts": {
+        "description": "Include occurrence counts"
+      },
+      "format": {
+        "value": "yaml|json|tsv",
+        "description": "Output format (default: yaml)"
+      },
+      "active": {
+        "description": "Show properties for active file"
+      }
+    }
+  },
+  "property:set": {
+    "usage": "name=<name> value=<value> [type=text|list|number|checkbox|date|datetime] [file=<name>] [path=<path>]",
+    "description": "Set a property on a file",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Property name (required)",
+        "required": true
+      },
+      "value": {
+        "value": "<value>",
+        "description": "Property value (required)",
+        "required": true
+      },
+      "type": {
+        "value": "text|list|number|checkbox|date|datetime",
+        "description": "Property type"
+      },
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "property:remove": {
+    "usage": "name=<name> [file=<name>] [path=<path>]",
+    "description": "Remove a property from a file",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Property name (required)",
+        "required": true
+      },
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "property:read": {
+    "usage": "name=<name> [file=<name>] [path=<path>]",
+    "description": "Read a property value from a file",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Property name (required)",
+        "required": true
+      },
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "tabs": {
+    "usage": "[ids]",
+    "description": "List open tabs",
+    "flags": {
+      "ids": {
+        "description": "Include tab IDs"
+      }
+    }
+  },
+  "recents": {
+    "usage": "[total]",
+    "description": "List recently opened files",
+    "flags": {
+      "total": {
+        "description": "Return recent file count"
+      }
+    }
+  },
+  "tab:open": {
+    "usage": "[group=<id>] [file=<path>] [view=<type>]",
+    "description": "Open a new tab",
+    "flags": {
+      "group": {
+        "value": "<id>",
+        "description": "Tab group ID"
+      },
+      "file": {
+        "value": "<path>",
+        "description": "File to open"
+      },
+      "view": {
+        "value": "<type>",
+        "description": "View type to open"
+      }
+    }
+  },
+  "workspace": {
+    "usage": "[ids]",
+    "description": "Show workspace tree",
+    "flags": {
+      "ids": {
+        "description": "Include workspace item IDs"
+      }
+    }
+  },
+  "hotkeys": {
+    "usage": "[total] [verbose] [format=json|tsv|csv] [all]",
+    "description": "List hotkeys",
+    "flags": {
+      "total": {
+        "description": "Return hotkey count"
+      },
+      "verbose": {
+        "description": "Show if hotkey is custom"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: tsv)"
+      },
+      "all": {
+        "description": "Include commands without hotkeys"
+      }
+    }
+  },
+  "hotkey": {
+    "usage": "id=<command-id> [verbose]",
+    "description": "Get hotkey for a command",
+    "flags": {
+      "id": {
+        "value": "<command-id>",
+        "description": "Command ID (required)",
+        "required": true
+      },
+      "verbose": {
+        "description": "Show if custom or default"
+      }
+    }
+  },
+  "vault": {
+    "usage": "[info=name|path|files|folders|size]",
+    "description": "Show vault info",
+    "flags": {
+      "info": {
+        "value": "name|path|files|folders|size",
+        "description": "Return specific info only"
+      }
+    }
+  },
+  "files": {
+    "usage": "[folder=<path>] [ext=<extension>] [total]",
+    "description": "List files in the vault",
+    "flags": {
+      "folder": {
+        "value": "<path>",
+        "description": "Filter by folder"
+      },
+      "ext": {
+        "value": "<extension>",
+        "description": "Filter by extension"
+      },
+      "total": {
+        "description": "Return file count"
+      }
+    }
+  },
+  "folders": {
+    "usage": "[folder=<path>] [total]",
+    "description": "List folders in the vault",
+    "flags": {
+      "folder": {
+        "value": "<path>",
+        "description": "Filter by parent folder"
+      },
+      "total": {
+        "description": "Return folder count"
+      }
+    }
+  },
+  "vaults": {
+    "usage": "[total] [verbose]",
+    "description": "List known vaults",
+    "flags": {
+      "total": {
+        "description": "Return vault count"
+      },
+      "verbose": {
+        "description": "Include vault paths"
+      }
+    }
+  },
+  "version": {
+    "usage": "",
+    "description": "Show Obsidian version"
+  },
+  "backlinks": {
+    "usage": "[file=<name>] [path=<path>] [counts] [total] [format=json|tsv|csv]",
+    "description": "List backlinks to a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "Target file name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "Target file path"
+      },
+      "counts": {
+        "description": "Include link counts"
+      },
+      "total": {
+        "description": "Return backlink count"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: tsv)"
+      }
+    }
+  },
+  "unresolved": {
+    "usage": "[total] [counts] [verbose] [format=json|tsv|csv]",
+    "description": "List unresolved links in vault",
+    "flags": {
+      "total": {
+        "description": "Return unresolved link count"
+      },
+      "counts": {
+        "description": "Include link counts"
+      },
+      "verbose": {
+        "description": "Include source files"
+      },
+      "format": {
+        "value": "json|tsv|csv",
+        "description": "Output format (default: tsv)"
+      }
+    }
+  },
+  "orphans": {
+    "usage": "[total] [all]",
+    "description": "List files with no incoming links",
+    "flags": {
+      "total": {
+        "description": "Return orphan count"
+      },
+      "all": {
+        "description": "Include non-markdown files"
+      }
+    }
+  },
+  "deadends": {
+    "usage": "[total] [all]",
+    "description": "List files with no outgoing links",
+    "flags": {
+      "total": {
+        "description": "Return dead-end count"
+      },
+      "all": {
+        "description": "Include non-markdown files"
+      }
+    }
+  },
+  "aliases": {
+    "usage": "[file=<name>] [path=<path>] [total] [verbose] [active]",
+    "description": "List aliases in the vault",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "total": {
+        "description": "Return alias count"
+      },
+      "verbose": {
+        "description": "Include file paths"
+      },
+      "active": {
+        "description": "Show aliases for active file"
+      }
+    }
+  },
+  "folder": {
+    "usage": "path=<path> [info=files|folders|size]",
+    "description": "Show folder info",
+    "flags": {
+      "path": {
+        "value": "<path>",
+        "description": "Folder path (required)",
+        "required": true
+      },
+      "info": {
+        "value": "files|folders|size",
+        "description": "Return specific info only"
+      }
+    }
+  },
+  "file": {
+    "usage": "[file=<name>] [path=<path>]",
+    "description": "Show file info",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "open": {
+    "usage": "[file=<name>] [path=<path>] [newtab]",
+    "description": "Open a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "newtab": {
+        "description": "Open in new tab"
+      }
+    }
+  },
+  "create": {
+    "usage": "[name=<name>] [path=<path>] [content=<text>] [template=<name>] [overwrite] [open] [newtab]",
+    "description": "Create a new file",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "content": {
+        "value": "<text>",
+        "description": "Initial content"
+      },
+      "template": {
+        "value": "<name>",
+        "description": "Template to use"
+      },
+      "overwrite": {
+        "description": "Overwrite if file exists"
+      },
+      "open": {
+        "description": "Open file after creating"
+      },
+      "newtab": {
+        "description": "Open in new tab"
+      }
+    }
+  },
+  "append": {
+    "usage": "[file=<name>] [path=<path>] content=<text> [inline]",
+    "description": "Append content to a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "content": {
+        "value": "<text>",
+        "description": "Content to append (required)",
+        "required": true
+      },
+      "inline": {
+        "description": "Append without newline"
+      }
+    }
+  },
+  "prepend": {
+    "usage": "[file=<name>] [path=<path>] content=<text> [inline]",
+    "description": "Prepend content to a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "content": {
+        "value": "<text>",
+        "description": "Content to prepend (required)",
+        "required": true
+      },
+      "inline": {
+        "description": "Prepend without newline"
+      }
+    }
+  },
+  "move": {
+    "usage": "[file=<name>] [path=<path>] to=<path>",
+    "description": "Move or rename a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "to": {
+        "value": "<path>",
+        "description": "Destination folder or path (required)",
+        "required": true
+      }
+    }
+  },
+  "rename": {
+    "usage": "[file=<name>] [path=<path>] name=<name>",
+    "description": "Rename a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "name": {
+        "value": "<name>",
+        "description": "New file name (required)",
+        "required": true
+      }
+    }
+  },
+  "delete": {
+    "usage": "[file=<name>] [path=<path>] [permanent]",
+    "description": "Delete a file",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "permanent": {
+        "description": "Skip trash, delete permanently"
+      }
+    }
+  },
+  "read": {
+    "usage": "[file=<name>] [path=<path>]",
+    "description": "Read file contents",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      }
+    }
+  },
+  "diff": {
+    "usage": "[file=<name>] [path=<path>] [from=<n>] [to=<n>] [filter=local|sync]",
+    "description": "List or diff local/sync versions",
+    "flags": {
+      "file": {
+        "value": "<name>",
+        "description": "File name"
+      },
+      "path": {
+        "value": "<path>",
+        "description": "File path"
+      },
+      "from": {
+        "value": "<n>",
+        "description": "Version number to diff from"
+      },
+      "to": {
+        "value": "<n>",
+        "description": "Version number to diff to"
+      },
+      "filter": {
+        "value": "local|sync",
+        "description": "Filter by version source"
+      }
+    }
+  },
+  "plugin:enable": {
+    "usage": "id=<id> [filter=core|community]",
+    "description": "Enable a plugin",
+    "flags": {
+      "id": {
+        "value": "<id>",
+        "description": "Plugin ID (required)",
+        "required": true
+      },
+      "filter": {
+        "value": "core|community",
+        "description": "Plugin type"
+      }
+    }
+  },
+  "plugin:disable": {
+    "usage": "id=<id> [filter=core|community]",
+    "description": "Disable a plugin",
+    "flags": {
+      "id": {
+        "value": "<id>",
+        "description": "Plugin ID (required)",
+        "required": true
+      },
+      "filter": {
+        "value": "core|community",
+        "description": "Plugin type"
+      }
+    }
+  },
+  "plugin:reload": {
+    "usage": "id=<id>",
+    "description": "Reload a plugin (for developers)",
+    "flags": {
+      "id": {
+        "value": "<id>",
+        "description": "Plugin ID (required)",
+        "required": true
+      }
+    }
+  },
+  "plugin:install": {
+    "usage": "id=<id> [enable]",
+    "description": "Install a community plugin",
+    "flags": {
+      "id": {
+        "value": "<id>",
+        "description": "Plugin ID (required)",
+        "required": true
+      },
+      "enable": {
+        "description": "Enable after install"
+      }
+    }
+  },
+  "plugin:uninstall": {
+    "usage": "id=<id>",
+    "description": "Uninstall a community plugin",
+    "flags": {
+      "id": {
+        "value": "<id>",
+        "description": "Plugin ID (required)",
+        "required": true
+      }
+    }
+  },
+  "snippet:enable": {
+    "usage": "name=<name>",
+    "description": "Enable a CSS snippet",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Snippet name (required)",
+        "required": true
+      }
+    }
+  },
+  "snippet:disable": {
+    "usage": "name=<name>",
+    "description": "Disable a CSS snippet",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Snippet name (required)",
+        "required": true
+      }
+    }
+  },
+  "theme:set": {
+    "usage": "name=<name>",
+    "description": "Set active theme",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Theme name (empty for default) (required)",
+        "required": true
+      }
+    }
+  },
+  "theme:install": {
+    "usage": "name=<name> [enable]",
+    "description": "Install a community theme",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Theme name (required)",
+        "required": true
+      },
+      "enable": {
+        "description": "Activate after install"
+      }
+    }
+  },
+  "theme:uninstall": {
+    "usage": "name=<name>",
+    "description": "Uninstall a theme",
+    "flags": {
+      "name": {
+        "value": "<name>",
+        "description": "Theme name (required)",
+        "required": true
+      }
+    }
+  }
+}

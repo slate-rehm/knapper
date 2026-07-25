@@ -11,6 +11,7 @@ User → MCP Client (Claude Code / Claude Desktop) → This Server → Obsidian 
 **The MCP client is the trust boundary.** This server does not authenticate callers — it trusts that the MCP client only sends requests the user has approved. All tool calls from the MCP client are executed against the Obsidian CLI without additional authorization.
 
 This means:
+
 - The server should only be registered with MCP clients you trust
 - Tool calls are gated by the MCP client's permission system (e.g. Claude Code prompts for approval on destructive actions)
 - There is no network listener — the server communicates exclusively via stdio

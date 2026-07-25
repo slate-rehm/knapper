@@ -1,26 +1,60 @@
 {
-  "name": "live-mcp-for-obsidian",
-  "version": "0.2.2",
-  "description": "A live connection between AI assistants and your running Obsidian instance. Full app automation — not just file access.",
-  "type": "module",
+  "name": "unified-obsidian-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Obsidian plugin development: live app automation over CDP, Playwright browser tools, telemetry, and dev-cycle workflows.",
+  "keywords": [
+    "automation",
+    "cdp",
+    "devtools",
+    "mcp",
+    "model-context-protocol",
+    "obsidian",
+    "obsidian-plugin",
+    "playwright",
+    "plugin-development"
+  ],
+  "homepage": "https://github.com/slate-rehm/unified-obsidian-browser#readme",
+  "bugs": {
+    "url": "https://github.com/slate-rehm/unified-obsidian-browser/issues"
+  },
+  "license": "MIT",
+  "author": "slate-rehm",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slate-rehm/unified-obsidian-browser.git"
+  },
   "bin": {
-    "live-mcp-for-obsidian": "./build/cli.js"
+    "unified-obsidian-mcp": "./dist/cli.js"
   },
   "files": [
-    "build"
+    "dist",
+    "skills",
+    "commands",
+    "agents",
+    "rules",
+    "assets",
+    "server.json",
+    ".mcp.json",
+    ".cursor-plugin",
+    ".claude-plugin",
+    ".codex-plugin"
   ],
+  "type": "module",
+  "main": "./dist/index.js",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node build/cli.js",
+    "start": "node dist/cli.js",
+    "check": "vp check",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@playwright/mcp": "^0.0.78",
     "yargs": "^17.7.2",
-    "zod": "^3.24.4"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.15.17",
@@ -28,27 +62,15 @@
     "typescript": "^5.8.3",
     "vitest": "^4.1.1"
   },
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": "12.0.1",
+      "onFail": "download"
+    }
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
-  "keywords": [
-    "mcp",
-    "obsidian",
-    "model-context-protocol",
-    "automation",
-    "claude",
-    "ai",
-    "devtools",
-    "plugins"
-  ],
-  "author": "gapmiss",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/gapmiss/live-mcp-for-obsidian.git"
-  },
-  "homepage": "https://github.com/gapmiss/live-mcp-for-obsidian#readme",
-  "bugs": {
-    "url": "https://github.com/gapmiss/live-mcp-for-obsidian/issues"
-  }
+  "mcpName": "io.github.slate-rehm/unified-obsidian-mcp"
 }
