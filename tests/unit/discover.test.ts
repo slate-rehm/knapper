@@ -136,6 +136,30 @@ describe("selectTarget", () => {
   it("returns undefined when no Obsidian window is present", () => {
     expect(selectTarget([WEBVIEW, WORKER])).toBeUndefined();
   });
+
+  it("narrows by a case-insensitive title substring", () => {
+    expect(selectTarget([MAIN, POPOUT], { match: "beta" })?.target.id).toBe("popout-1");
+  });
+
+  it("matches against the URL as well as the title", () => {
+    expect(selectTarget([POPOUT, MAIN], { match: "APP://OBSIDIAN.MD" })?.target.id).toBe("main-1");
+  });
+
+  it("lets a confirmed vault outrank a match string", () => {
+    const other = target({
+      id: "main-2",
+      type: "page",
+      title: "Beta - Second Vault - Obsidian 1.12.7",
+      url: "app://obsidian.md/index.html",
+    });
+    expect(selectTarget([MAIN, other], { vault: "second vault", match: "Alpha" })?.target.id).toBe(
+      "main-2",
+    );
+  });
+
+  it("degrades to the default choice when the match string hits nothing", () => {
+    expect(selectTarget([POPOUT, MAIN], { match: "no-such-window" })?.target.id).toBe("main-1");
+  });
 });
 
 describe("live fixture", () => {

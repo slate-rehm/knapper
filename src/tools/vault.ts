@@ -249,7 +249,9 @@ export function registerVaultTools(ctx: ServerContext): void {
     handler: async (args) => {
       const tokens: string[] = [];
       pushFileTarget(tokens, args.file as string | undefined, args.path as string | undefined);
-      pushKv(tokens, "to", args.to as string);
+      // `rename` takes name=, unlike `move`, which takes to=. Sending to= here
+      // makes Obsidian reject the call for a missing required parameter.
+      pushKv(tokens, "name", args.to as string);
       const { stdout } = await runCli(router, {
         command: "rename",
         args: tokens,

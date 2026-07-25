@@ -97,12 +97,20 @@ export interface SelectOptions {
   vault?: string;
   /** Select this exact target id. */
   targetId?: string;
+  /** Case-insensitive substring of the target title or URL. */
+  match?: string;
 }
 
 /**
  * Pick the best target to drive. Main windows outrank popouts; a vault match
  * outranks position. Returns undefined when nothing matches so the caller can
  * raise a precise error.
+ *
+ * Precedence mirrors `PlaywrightSession.page()`: `targetId`, then `vault`, then
+ * `match`, then main-preferred. `vault` beats `match` because the session
+ * confirms the vault against the renderer, whereas `match` can only see a title
+ * that lags behind vault switches. A `match` that hits nothing falls through
+ * rather than failing, so a stale string degrades instead of bricking selection.
  */
 export function selectTarget(
   targets: CdpTarget[],
@@ -120,6 +128,18 @@ export function selectTarget(
   if (opts.vault !== undefined) {
     const wanted = opts.vault.toLowerCase();
     const matched = candidates.filter((t) => t.vaultName?.toLowerCase() === wanted);
+    if (matched.length > 0) {
+      return matched.find((t) => t.kind === "main") ?? matched[0];
+    }
+  }
+
+  if (opts.match !== undefined && opts.match !== "") {
+    const needle = opts.match.toLowerCase();
+    const matched = candidates.filter(
+      (t) =>
+        t.target.title.toLowerCase().includes(needle) ||
+        t.target.url.toLowerCase().includes(needle),
+    );
     if (matched.length > 0) {
       return matched.find((t) => t.kind === "main") ?? matched[0];
     }

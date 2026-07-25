@@ -23,6 +23,8 @@ import { parseObsidianTitle, OBSIDIAN_MAIN_URL } from "./discover.js";
 export interface PlaywrightSessionOptions {
   cdpUrl: string;
   vault?: string;
+  /** Case-insensitive substring matched against a window's title or URL. */
+  targetMatch?: string;
   logger: Logger;
   timeoutMs?: number;
 }
@@ -39,6 +41,12 @@ export class PlaywrightSession {
   private browser?: Browser;
   private context?: BrowserContext;
   private pinnedTargetId?: string;
+  /**
+   * A stale `targetMatch` degrades instead of failing, so it is re-evaluated on
+   * every call. Warning each time would flood stderr, so the miss is announced
+   * once and demoted to debug afterwards.
+   */
+  private warnedTargetMatchMiss = false;
 
   constructor(private readonly opts: PlaywrightSessionOptions) {}
 
@@ -137,9 +145,19 @@ export class PlaywrightSession {
   /**
    * Resolve the page to drive.
    *
-   * Multiple main windows all share the same URL, so when a vault is requested we
-   * confirm identity through `app.vault.getName()` rather than trusting the title,
-   * which lags behind vault switches.
+   * Precedence, strongest signal first:
+   *   1. `attachTo` — an explicitly pinned CDP target id. The caller named one
+   *      window, so a mismatch is an error rather than a fallback.
+   *   2. `vault` — confirmed through `app.vault.getName()` in the renderer. This
+   *      outranks `targetMatch` because the title a match string would be tested
+   *      against lags behind vault switches, while the renderer never does.
+   *   3. `targetMatch` — substring of the title or URL. Advisory only: a stale
+   *      match string must degrade to the fallback rather than brick every tool
+   *      call, so a miss warns and continues.
+   *   4. Main window preferred, then whatever is left.
+   *
+   * Multiple main windows all share the same URL, which is why steps 2 and 3
+   * exist at all.
    */
   async page(): Promise<Page> {
     const windows = await this.windows();
@@ -167,6 +185,25 @@ export class PlaywrightSession {
       for (const w of windows.filter((x) => x.kind === "main")) {
         const name = await this.vaultNameOf(w.page);
         if (name?.toLowerCase() === wanted) return w.page;
+      }
+    }
+
+    const match = this.opts.targetMatch?.toLowerCase();
+    if (match !== undefined && match !== "") {
+      const matched = windows.filter(
+        (w) => w.title.toLowerCase().includes(match) || w.url.toLowerCase().includes(match),
+      );
+      const chosen = matched.find((w) => w.kind === "main") ?? matched[0];
+      if (chosen) return chosen.page;
+      const message = `no Obsidian window matches OBSIDIAN_TARGET_MATCH; falling back to the main window`;
+      if (this.warnedTargetMatchMiss) {
+        this.opts.logger.debug(message, { targetMatch: this.opts.targetMatch });
+      } else {
+        this.warnedTargetMatchMiss = true;
+        this.opts.logger.warn(message, {
+          targetMatch: this.opts.targetMatch,
+          titles: windows.map((w) => w.title),
+        });
       }
     }
 
@@ -204,13 +241,28 @@ export class PlaywrightSession {
     }
   }
 
+  /** Is `window.app` present in this page? The cheapest proof the renderer is live. */
+  private async hasApp(page: Page): Promise<boolean> {
+    return page.evaluate(() => typeof (globalThis as { app?: unknown }).app !== "undefined");
+  }
+
+  /**
+   * Liveness probe for the supervisor: attach if needed, then confirm the renderer
+   * still answers. Never throws — "Obsidian is not running" is an ordinary state
+   * for this server, not an error, so every failure mode collapses to `false`.
+   */
+  async healthCheck(): Promise<boolean> {
+    try {
+      return await this.hasApp(await this.page());
+    } catch {
+      return false;
+    }
+  }
+
   /** Evaluate an expression in the renderer, verifying `window.app` first. */
   async evaluate<T>(expression: string): Promise<T> {
     const page = await this.page();
-    const hasApp = await page.evaluate(
-      () => typeof (globalThis as { app?: unknown }).app !== "undefined",
-    );
-    if (!hasApp) throw appUnavailable();
+    if (!(await this.hasApp(page))) throw appUnavailable();
 
     try {
       return (await page.evaluate(`(() => { ${wrapExpression(expression)} })()`)) as T;

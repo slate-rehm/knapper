@@ -206,12 +206,15 @@ export function registerObsidianTools(ctx: ServerContext): void {
     annotations: { readOnlyHint: true },
     inputSchema: pluginIdSchema,
     handler: async (args) => {
+      const id = args.id as string;
       const { stdout } = await runCli(router, {
         command: "plugin",
-        args: [`id=${args.id as string}`],
+        args: [`id=${id}`],
         vault: vaultName(args, config),
       });
-      return cliOutcome(stdout);
+      // Obsidian echoes type/name/version/author/enabled/description but never
+      // the id it was asked about, so put it back to match this tool's contract.
+      return cliOutcome(`id\t${id}\n${stdout.trim()}`);
     },
   });
 

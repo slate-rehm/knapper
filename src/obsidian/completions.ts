@@ -88,8 +88,23 @@ export async function cliCommandIds(
     if (filter !== undefined && filter !== "") fallback.push(`filter=${filter}`);
     stdout = await router.cliCommand(fallback, vault !== undefined ? { vault } : {});
   }
-  const parsed = parseCliJson<string[]>(stdout);
-  if (Array.isArray(parsed)) return parsed;
+  // The two sources disagree on shape: `__commands` emits JSON objects
+  // ({id, name}) and ignores filter=, while the `commands` fallback emits bare
+  // id strings and does filter. Normalize to ids so callers can treat both alike
+  // — passing an object through here surfaced as `c.startsWith is not a function`.
+  const parsed = parseCliJson<unknown>(stdout);
+  if (Array.isArray(parsed)) {
+    return parsed
+      .map((entry) => {
+        if (typeof entry === "string") return entry;
+        if (entry !== null && typeof entry === "object" && "id" in entry) {
+          const { id } = entry as { id?: unknown };
+          return typeof id === "string" ? id : undefined;
+        }
+        return undefined;
+      })
+      .filter((id): id is string => id !== undefined);
+  }
   return stdout
     .split("\n")
     .map((l) => l.trim())

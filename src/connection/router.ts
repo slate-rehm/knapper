@@ -25,6 +25,7 @@ import {
 } from "../util/errors.js";
 import { ObsidianCli } from "./cli/exec.js";
 import { PlaywrightSession } from "./cdp/session.js";
+import { ConnectionSupervisor } from "./supervisor.js";
 import { isObsidianRunning, probeHealth, type HealthReport } from "./health.js";
 import { probeCdp } from "./cdp/discover.js";
 import { readGlobalConfig } from "./vaults.js";
@@ -39,6 +40,11 @@ export interface LayerAvailability {
 export class CapabilityRouter {
   readonly cli: ObsidianCli;
   readonly playwright: PlaywrightSession;
+  /**
+   * Owned here rather than by the server so the existing shutdown path —
+   * `cli.ts` calls only `router.dispose()` — stops its timer.
+   */
+  readonly supervisor: ConnectionSupervisor;
 
   private availability: LayerAvailability = {
     playwright: false,
@@ -51,6 +57,7 @@ export class CapabilityRouter {
   private cliFlagEnabled = false;
   /** Which layer currently owns the Electron debugger, if any. */
   private debuggerHolder?: Layer;
+  private disposed = false;
 
   constructor(
     private readonly config: Config,
@@ -64,7 +71,13 @@ export class CapabilityRouter {
     this.playwright = new PlaywrightSession({
       cdpUrl: config.cdpUrl,
       ...(config.vault !== undefined ? { vault: config.vault } : {}),
+      ...(config.targetMatch !== undefined ? { targetMatch: config.targetMatch } : {}),
       logger: logger.child("cdp"),
+    });
+    this.supervisor = new ConnectionSupervisor({
+      session: this.playwright,
+      logger: logger.child("supervisor"),
+      reconnectMs: config.reconnectMs,
     });
   }
 
@@ -212,7 +225,11 @@ export class CapabilityRouter {
     });
   }
 
+  /** Idempotent: shutdown paths can and do call this more than once. */
   async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.supervisor.stop();
     await this.playwright.close();
   }
 

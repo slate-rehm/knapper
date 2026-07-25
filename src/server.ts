@@ -89,6 +89,10 @@ export async function createServerContext(config: Config): Promise<ServerContext
   registerPluginDevTools(ctx);
   await registerBrowserTools(ctx);
 
+  // Starts detached and stays quiet until Obsidian appears; stopped by
+  // `router.dispose()`, which the CLI already calls on shutdown.
+  router.supervisor.start();
+
   return ctx;
 }
 

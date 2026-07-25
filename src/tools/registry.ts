@@ -6,6 +6,12 @@
  * carries the tools it can actually use. Capability availability is checked at
  * call time rather than registration time, because a transport can appear or
  * disappear while the server is running (Obsidian restarts, debug port opens).
+ *
+ * Dispatch is also where call admission happens. Every tool drives the same live
+ * Obsidian window, so a mutating call takes the exclusive lock and a read-only
+ * call takes a bounded shared one. Classification comes from the `readOnlyHint`
+ * annotation each tool already declares, and defaults to exclusive when the hint
+ * is absent — an unannotated tool is assumed to touch the UI.
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -16,6 +22,8 @@ import type { Logger } from "../util/logger.js";
 import type { TelemetryStore } from "../telemetry/store.js";
 import { appendTelemetrySummary } from "../telemetry/helpers.js";
 import { toUobError, UobError } from "../util/errors.js";
+import { CallLock, type LockMode } from "../util/concurrency.js";
+import { loadConfig } from "../config.js";
 import { renderResult } from "../util/serialize.js";
 import { jsonSchemaToZodShape } from "../browser/json-schema.js";
 
@@ -132,12 +140,20 @@ function withTelemetrySuffix(
 
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition>();
+  private readonly lock: CallLock;
 
   constructor(
     private readonly enabledToolsets: Set<Toolset>,
     private readonly logger: Logger,
     private readonly telemetry?: TelemetryStore,
-  ) {}
+    /**
+     * Read-only calls allowed to overlap. Falls back to the environment-derived
+     * default so the knob works even when the caller does not thread it through.
+     */
+    maxConcurrency?: number,
+  ) {
+    this.lock = new CallLock({ maxShared: maxConcurrency ?? loadConfig().maxConcurrency });
+  }
 
   /** Register a tool, or skip it when its toolset is disabled. */
   add<S extends ZodRawShape>(def: ToolDefinition<S>): void {
@@ -192,18 +208,29 @@ export class ToolRegistry {
         config as never,
         (async (args: Record<string, unknown>) => {
           const started = Date.now();
-          const sinceSeq = this.telemetry?.cursor ?? 0;
+          const mode: LockMode = def.annotations?.readOnlyHint === true ? "shared" : "exclusive";
           try {
-            let outcome = await def.handler(args ?? {});
-            if (
-              this.telemetry &&
-              def.annotations?.readOnlyHint !== true &&
-              def.handlesOwnTelemetry !== true
-            ) {
-              outcome = withTelemetrySuffix(outcome, this.telemetry, sinceSeq);
-            }
-            this.logger.debug("tool ok", { tool: def.name, ms: Date.now() - started });
-            return normalize(outcome);
+            return await this.lock.run(mode, def.name, async () => {
+              // Read the telemetry cursor after admission, not before: a call that
+              // waited in the queue would otherwise report every log line produced
+              // by the calls it was queued behind.
+              const sinceSeq = this.telemetry?.cursor ?? 0;
+              const ranAt = Date.now();
+              let outcome = await def.handler(args ?? {});
+              if (
+                this.telemetry &&
+                def.annotations?.readOnlyHint !== true &&
+                def.handlesOwnTelemetry !== true
+              ) {
+                outcome = withTelemetrySuffix(outcome, this.telemetry, sinceSeq);
+              }
+              this.logger.debug("tool ok", {
+                tool: def.name,
+                ms: Date.now() - ranAt,
+                queuedMs: ranAt - started,
+              });
+              return normalize(outcome);
+            });
           } catch (e) {
             const err = toUobError(e);
             this.logger.warn("tool failed", {
