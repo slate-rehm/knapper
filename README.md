@@ -88,6 +88,11 @@ This needs `git` on your machine and costs a TypeScript build on first run. It a
 tracks whatever is on the default branch rather than a release, so prefer the pinned
 form for anything you depend on.
 
+The build happens in a `prepare` lifecycle script. If your npm is configured to
+block install scripts (`--ignore-scripts`, or npm 11's script approval prompt),
+`dist/` never gets built and the server fails to start — use the pinned tarball
+instead, which ships `dist/` prebuilt and runs no scripts.
+
 ### Cursor
 
 Add it in **Settings → MCP**, or drop [`.mcp.json`](.mcp.json) at your project root

@@ -9,6 +9,11 @@
  *
  *   node scripts/sync-version.mjs          # rewrite manifests from package.json
  *   node scripts/sync-version.mjs --check  # fail if any manifest has drifted (CI)
+ *
+ * All progress output goes to stderr. This script runs from the `prepare`
+ * lifecycle hook, which npm executes during `npm pack` — and `npm pack --json`
+ * writes the tarball manifest to stdout, so a single console.log here produces
+ * invalid JSON and breaks the release workflow's tarball-name lookup.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -72,7 +77,7 @@ for (const { file, paths } of TARGETS) {
       drifted++;
     } else {
       setIn(json, path, version);
-      console.log(`  set ${where} -> ${version}`);
+      console.error(`  set ${where} -> ${version}`);
       changed = true;
     }
   }
@@ -92,7 +97,7 @@ if (check) {
     );
     process.exit(1);
   }
-  console.log(`all manifests agree on version ${version}`);
+  console.error(`all manifests agree on version ${version}`);
 } else {
-  console.log(rewrote === 0 ? `already in sync at ${version}` : `synced ${rewrote} manifest(s)`);
+  console.error(rewrote === 0 ? `already in sync at ${version}` : `synced ${rewrote} manifest(s)`);
 }
