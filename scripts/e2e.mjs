@@ -303,11 +303,16 @@ if (suite("Tool surface & schema integrity")) {
   });
 
   await check("read-only tools are annotated as such", () => {
+    // readOnlyHint is not decoration: the registry gives these a shared lock and
+    // everything else an exclusive one, so a missing hint silently serializes.
     const shouldBeReadOnly = [
       "obsidian_status",
       "obsidian_read",
       "obsidian_search",
       "obsidian_logs",
+      "obsidian_snapshot",
+      "browser_snapshot",
+      "browser_take_screenshot",
     ];
     const bad = shouldBeReadOnly.filter(
       (n) => tools.find((t) => t.name === n)?.annotations?.readOnlyHint !== true,
@@ -316,11 +321,33 @@ if (suite("Tool surface & schema integrity")) {
   });
 
   await check("destructive tools carry a destructive annotation", () => {
-    const shouldBeDestructive = ["obsidian_delete", "obsidian_move", "obsidian_rename"];
+    // Anything that destroys existing state, plus the two arbitrary-code escape
+    // hatches. Additive writes (create/append/prepend) are deliberately absent.
+    const shouldBeDestructive = [
+      "obsidian_delete",
+      "obsidian_move",
+      "obsidian_rename",
+      "obsidian_eval",
+      "obsidian_cdp",
+      "browser_evaluate",
+      "obsidian_link_plugin",
+      "obsidian_reset_state",
+      "obsidian_property_set",
+      "obsidian_property_remove",
+      "obsidian_theme_set",
+    ];
     const bad = shouldBeDestructive.filter(
       (n) => tools.find((t) => t.name === n)?.annotations?.destructiveHint !== true,
     );
     assert(bad.length === 0, `missing destructiveHint: ${bad.join(", ")}`);
+  });
+
+  await check("arbitrary-code tools are flagged open-world", () => {
+    const openWorld = ["obsidian_eval", "obsidian_cdp", "browser_evaluate"];
+    const bad = openWorld.filter(
+      (n) => tools.find((t) => t.name === n)?.annotations?.openWorldHint !== true,
+    );
+    assert(bad.length === 0, `missing openWorldHint: ${bad.join(", ")}`);
   });
 
   await check("toolset gating actually narrows the surface", async () => {

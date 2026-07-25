@@ -1,6 +1,6 @@
 ---
 name: obsidian-debugging
-description: Debug Obsidian plugins with unified-obsidian-mcp telemetry: cursor-based obsidian_logs tailing, obsidian_log_mark brackets, console and network capture, and error attribution from stack frames. Use after reloads, UI exercises, or mysterious plugin onload failures.
+description: Debug Obsidian plugins with knapper telemetry: cursor-based obsidian_logs tailing, obsidian_log_mark brackets, console and network capture, and error attribution from stack frames. Use after reloads, UI exercises, or mysterious plugin onload failures.
 ---
 
 # Obsidian debugging with telemetry

@@ -42,6 +42,7 @@ describe("loadConfig", () => {
     expect(config.cdpPort).toBe(9222);
     expect(config.logLevel).toBe("info");
     expect(config.telemetryBuffer).toBe(2000);
+    expect(config.telemetryNetwork).toBe(false);
     expect(config.vault).toBeUndefined();
   });
 
@@ -51,9 +52,9 @@ describe("loadConfig", () => {
       {
         OBSIDIAN_CDP_URL: "http://127.0.0.1:9333",
         OBSIDIAN_VAULT: "my-vault",
-        UOB_TOOLSETS: "core",
-        UOB_LOG_LEVEL: "debug",
-        UOB_TELEMETRY_BUFFER: "50",
+        KNAP_TOOLSETS: "core",
+        KNAP_LOG_LEVEL: "debug",
+        KNAP_TELEMETRY_BUFFER: "50",
       },
     );
     expect(config.cdpPort).toBe(9333);
@@ -69,11 +70,22 @@ describe("loadConfig", () => {
   });
 
   it("ignores an invalid log level rather than failing to start", () => {
-    expect(loadConfig({}, { UOB_LOG_LEVEL: "chatty" }).logLevel).toBe("info");
+    expect(loadConfig({}, { KNAP_LOG_LEVEL: "chatty" }).logLevel).toBe("info");
   });
 
   it("ignores a non-numeric buffer size", () => {
-    expect(loadConfig({}, { UOB_TELEMETRY_BUFFER: "lots" }).telemetryBuffer).toBe(2000);
+    expect(loadConfig({}, { KNAP_TELEMETRY_BUFFER: "lots" }).telemetryBuffer).toBe(2000);
+  });
+
+  it("accepts the truthy spellings people actually type for network capture", () => {
+    for (const raw of ["1", "true", "TRUE", "yes", "on"]) {
+      expect(loadConfig({}, { KNAP_TELEMETRY_NETWORK: raw }).telemetryNetwork).toBe(true);
+    }
+    for (const raw of ["0", "false", "no", "off"]) {
+      expect(loadConfig({}, { KNAP_TELEMETRY_NETWORK: raw }).telemetryNetwork).toBe(false);
+    }
+    // Garbage must not silently arm a noisy capture path.
+    expect(loadConfig({}, { KNAP_TELEMETRY_NETWORK: "maybe" }).telemetryNetwork).toBe(false);
   });
 
   it("derives the port from a URL without one", () => {
@@ -106,17 +118,17 @@ describe("loadConfig", () => {
 
   it("clamps concurrency to at least one, so a zero cannot wedge every tool call", () => {
     expect(loadConfig({}, {}).maxConcurrency).toBe(4);
-    expect(loadConfig({}, { UOB_MAX_CONCURRENCY: "1" }).maxConcurrency).toBe(1);
-    expect(loadConfig({}, { UOB_MAX_CONCURRENCY: "0" }).maxConcurrency).toBe(1);
-    expect(loadConfig({}, { UOB_MAX_CONCURRENCY: "nope" }).maxConcurrency).toBe(4);
+    expect(loadConfig({}, { KNAP_MAX_CONCURRENCY: "1" }).maxConcurrency).toBe(1);
+    expect(loadConfig({}, { KNAP_MAX_CONCURRENCY: "0" }).maxConcurrency).toBe(1);
+    expect(loadConfig({}, { KNAP_MAX_CONCURRENCY: "nope" }).maxConcurrency).toBe(4);
   });
 
-  it("accepts the plan's canonical env names alongside the UOB_ prefixed ones", () => {
+  it("accepts the plan's canonical env names alongside the KNAP_ prefixed ones", () => {
     expect(loadConfig({}, { LOG_LEVEL: "warn" }).logLevel).toBe("warn");
     expect(loadConfig({}, { RECONNECT_MS: "500" }).reconnectMs).toBe(500);
     expect(loadConfig({}, { SCREENSHOT_DIR: "/tmp/shots" }).outputDir).toBe("/tmp/shots");
     // The prefixed name wins where both are set, since it is the documented one.
-    expect(loadConfig({}, { UOB_LOG_LEVEL: "debug", LOG_LEVEL: "warn" }).logLevel).toBe("debug");
+    expect(loadConfig({}, { KNAP_LOG_LEVEL: "debug", LOG_LEVEL: "warn" }).logLevel).toBe("debug");
   });
 });
 
@@ -137,9 +149,14 @@ describe("capability model", () => {
     expect(CAPABILITY_PREFERENCE.evaluate[0]).toBe("cli");
   });
 
-  it("keeps opening a closed vault and installing plugins CLI-only", () => {
-    expect(CAPABILITY_PREFERENCE.openClosedVault).toEqual(["cli"]);
+  it("keeps installing plugins CLI-only", () => {
     expect(CAPABILITY_PREFERENCE.pluginInstall).toEqual(["cli"]);
+  });
+
+  it("declares no capability that no tool requires", () => {
+    // A capability with no caller is dead routing logic that still has to be kept
+    // consistent; the registry is the only thing that consumes this table.
+    expect(Object.keys(CAPABILITY_PREFERENCE).sort()).toEqual([...CAPABILITIES].sort());
   });
 
   it("treats the two CDP transports as non-exclusive, per the Gate B measurement", () => {

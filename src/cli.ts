@@ -10,7 +10,7 @@ import { TOOLSETS, DEFAULT_TOOLSETS } from "./toolsets.js";
 import { LOG_LEVELS } from "./util/logger.js";
 
 const argv = await yargs(hideBin(process.argv))
-  .scriptName("unified-obsidian-mcp")
+  .scriptName("knap")
   .usage("$0 [options]\n\nMCP server for Obsidian plugin development.")
   .option("cdp-url", {
     type: "string",
@@ -38,6 +38,10 @@ const argv = await yargs(hideBin(process.argv))
     type: "string",
     describe: "Directory for screenshots and snapshot files",
   })
+  .option("target-match", {
+    type: "string",
+    describe: "Only attach to windows whose title or URL contains this substring",
+  })
   .option("transport", {
     type: "string",
     choices: TRANSPORT_KINDS as unknown as string[],
@@ -64,6 +68,7 @@ const config = loadConfig({
   ...(argv.toolsets !== undefined ? { toolsets: argv.toolsets } : {}),
   ...(argv["log-level"] !== undefined ? { logLevel: argv["log-level"] } : {}),
   ...(argv["output-dir"] !== undefined ? { outputDir: argv["output-dir"] } : {}),
+  ...(argv["target-match"] !== undefined ? { targetMatch: argv["target-match"] } : {}),
   ...(argv.transport !== undefined ? { transport: argv.transport } : {}),
   ...(argv.port !== undefined ? { httpPort: argv.port } : {}),
   ...(argv.host !== undefined ? { httpHost: argv.host } : {}),
@@ -92,7 +97,7 @@ if (config.transport === "http") {
   // this process's stdin, and a detached or redirected stdin closing must not take a
   // server with live sessions down with it.
   httpHandle = await startHttpTransport({ server, config, logger: ctx.logger });
-  ctx.logger.info(`unified-obsidian-mcp listening on ${httpHandle.url}`, {
+  ctx.logger.info(`knapper listening on ${httpHandle.url}`, {
     toolsets: [...config.enabledToolsets],
     cdpUrl: config.cdpUrl,
   });
@@ -105,7 +110,7 @@ if (config.transport === "http") {
   const transport = new StdioServerTransport();
   transport.onclose = () => void shutdown("transport closed");
   await server.connect(transport);
-  ctx.logger.info("unified-obsidian-mcp ready", {
+  ctx.logger.info("knapper ready", {
     toolsets: [...config.enabledToolsets],
     cdpUrl: config.cdpUrl,
   });

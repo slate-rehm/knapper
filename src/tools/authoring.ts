@@ -87,6 +87,8 @@ export function registerAuthoringTools(ctx: ServerContext): void {
       name: z.string().describe("Theme name"),
       ...vaultOpt,
     },
+    // Overwrites the user's chosen appearance with no undo.
+    annotations: { destructiveHint: true },
     handler: async (args) => {
       const { stdout } = await runCli(router, {
         command: "theme:set",
@@ -164,6 +166,8 @@ export function registerAuthoringTools(ctx: ServerContext): void {
         .describe("Property type hint for Obsidian"),
       ...fileRef,
     },
+    // Overwrites any existing value for that key.
+    annotations: { destructiveHint: true },
     handler: async (args) => {
       const tokens = [`name=${args.name as string}`, `value=${cliValue(args.value as string)}`];
       pushKv(tokens, "type", args.type as string | undefined);
@@ -187,6 +191,8 @@ export function registerAuthoringTools(ctx: ServerContext): void {
       name: z.string().describe("Frontmatter property name to remove"),
       ...fileRef,
     },
+    // Deletes user data with no undo.
+    annotations: { destructiveHint: true },
     handler: async (args) => {
       const tokens = [`name=${args.name as string}`];
       pushFileTarget(tokens, args.file as string | undefined, args.path as string | undefined);

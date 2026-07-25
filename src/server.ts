@@ -65,9 +65,19 @@ export async function createServerContext(config: Config): Promise<ServerContext
 
   const router = new CapabilityRouter(config, logger);
   const telemetry = new TelemetryStore(config.telemetryBuffer);
-  const capture = new TelemetryCapture(router, telemetry, logger.child("telemetry"));
+  const capture = new TelemetryCapture(
+    router,
+    telemetry,
+    logger.child("telemetry"),
+    config.telemetryNetwork,
+  );
   const browserProxy = new BrowserProxy(config, router, logger.child("browser"));
-  const registry = new ToolRegistry(config.enabledToolsets, logger, telemetry);
+  const registry = new ToolRegistry(
+    config.enabledToolsets,
+    logger,
+    telemetry,
+    config.maxConcurrency,
+  );
 
   const ctx: ServerContext = {
     config,
@@ -101,7 +111,7 @@ export async function createServer(
 ): Promise<{ server: McpServer; ctx: ServerContext }> {
   const ctx = await createServerContext(config);
   const server = new McpServer(
-    { name: "unified-obsidian-mcp", version: await packageVersion() },
+    { name: "knapper", version: await packageVersion() },
     { instructions: INSTRUCTIONS },
   );
 

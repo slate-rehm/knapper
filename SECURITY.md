@@ -1,55 +1,118 @@
 # Security
 
+## What this server is
+
+knapper drives a **live Obsidian desktop application**. It executes arbitrary JavaScript in
+the renderer, dispatches real mouse and keyboard input, reads and writes vault files, and
+starts and stops the Obsidian process. Running it is closer to granting desktop automation
+access than to installing a note-reading integration.
+
+Use a scratch vault for agent work. The live suites in this repo create, rename, and delete
+notes, which is why they are pointed at a dedicated `uob-test-vault`.
+
 ## Trust model
 
-This MCP server acts as a bridge between an AI assistant (the MCP client) and a running Obsidian instance. The trust chain is:
-
 ```
-User → MCP Client (Claude Code / Claude Desktop) → This Server → Obsidian CLI → Obsidian App
+User → MCP client → knapper → { Obsidian CLI | Chrome DevTools Protocol } → Obsidian
 ```
 
-**The MCP client is the trust boundary.** This server does not authenticate callers — it trusts that the MCP client only sends requests the user has approved. All tool calls from the MCP client are executed against the Obsidian CLI without additional authorization.
+**The MCP client is the trust boundary.** knapper does not authenticate callers. It trusts
+that the client only forwards requests the user has approved, and it relies on the client's
+permission system to prompt on the tools that need it. Every tool carries MCP annotations —
+`readOnlyHint`, `destructiveHint`, `openWorldHint` — so a client can distinguish a vault read
+from arbitrary code execution. Register knapper only with clients you trust.
 
-This means:
+Two transports reach Obsidian and both are local:
 
-- The server should only be registered with MCP clients you trust
-- Tool calls are gated by the MCP client's permission system (e.g. Claude Code prompts for approval on destructive actions)
-- There is no network listener — the server communicates exclusively via stdio
+- **Obsidian CLI** — spawns the `obsidian` binary via `execFile`. Requires the global
+  `"cli": true` flag in `obsidian.json`.
+- **Chrome DevTools Protocol** — attaches to `--remote-debugging-port` on loopback. Requires
+  Obsidian to have been deliberately cold-started with that flag.
+
+Neither is enabled by default in a stock Obsidian install. The user has to opt in to both.
+
+## The MCP transport is a network listener when you ask for one
+
+The default `stdio` transport has no listener and is what MCP clients use.
+
+`--transport http` **does** bind a TCP listener (default `127.0.0.1:9223`, endpoint `/mcp`).
+It has **no authentication of any kind**. Anything that can reach that port can execute
+arbitrary JavaScript inside your Obsidian renderer and read or delete your vault.
+
+It binds to loopback unless you override `MCP_HOST`, and it logs a warning when you do. DNS
+rebinding protection is on for non-wildcard hosts. Only one session is served at a time. If
+you need remote access, put it behind a tunnel or an authenticating reverse proxy — do not
+expose the port directly.
 
 ## Powerful tools
 
-Several tools provide capabilities that go beyond reading and writing notes. These are intentional and necessary for the server's purpose (full app automation), but users should understand their scope.
+### `obsidian_eval` — `destructiveHint`, `openWorldHint`
 
-### `obsidian_eval`
+Executes arbitrary JavaScript in Obsidian's renderer with full access to `app.*`, the DOM,
+and whatever Electron exposes to that context. There are no restrictions on the code.
 
-Executes arbitrary JavaScript in Obsidian's main process. This has full access to Obsidian's `app.*` API, the DOM, and Node.js built-ins available in Electron's renderer process. There are no restrictions on what code can be executed.
+**Why it exists:** it is the escape hatch for anything the ~100 purpose-built tools do not
+cover, and it is usually the right way to read plugin or vault state.
 
-**Why it exists:** Many automation tasks require access to Obsidian's internal APIs that aren't exposed through dedicated CLI commands. This is the escape hatch for anything not covered by the other 42 tools.
+### `obsidian_cdp` — `destructiveHint`, `openWorldHint`
 
-**Mitigation:** The MCP client controls what code is sent. Claude Code and Claude Desktop present tool calls to the user for approval before execution.
+Raw Chrome DevTools Protocol passthrough. At least as powerful as `obsidian_eval`, since
+`Runtime.evaluate` is one of the methods it forwards. Intended for debugging and profiling.
+In the `devtools` toolset, which is off by default.
 
-### `obsidian_cdp`
+### `browser_evaluate` — `destructiveHint`, `openWorldHint`
 
-Sends raw Chrome DevTools Protocol commands to Obsidian's Electron window. This can inspect and manipulate the renderer process at a low level.
+The same capability by way of `@playwright/mcp`.
 
-**Why it exists:** Enables advanced debugging, performance profiling, and DOM manipulation for plugin and theme development.
+### `obsidian_delete` — `destructiveHint`
 
-### `obsidian_delete`
+Moves files to the system trash. `permanent: true` must be set explicitly to bypass it.
 
-Moves files to the system trash by default. The `permanent` flag must be explicitly set to `true` to bypass trash. The tool is annotated with `destructiveHint: true`, which MCP clients use to require user confirmation.
+### Withheld browser tools
+
+knapper proxies `@playwright/mcp` through an **allowlist**, not a blocklist
+(`src/browser/allowlist.ts`). Tools that would damage or hijack the user's real window are
+withheld even when upstream advertises them: `browser_close`, `browser_navigate` and its
+back/forward variants, `browser_resize`, `browser_file_upload`, `browser_pdf_save`,
+`browser_run_code_unsafe`, and the storage-state pair. Navigating or closing the window here
+means navigating or closing _the user's actual Obsidian_.
+
+## What it writes to disk
+
+knapper is not a read-only bridge. It writes, outside the vault as well as inside it:
+
+| Path                                       | Written by                                   | Why                                                                    |
+| ------------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------- |
+| `<userData>/obsidian.json`                 | `obsidian_setup_cli`, `obsidian_setup_vault` | Flips the global `cli` flag; registers a vault                         |
+| `<vault>/.obsidian/plugins/<id>`           | `obsidian_link_plugin`                       | Creates or replaces a **symlink**. Refuses to clobber a real directory |
+| `<vault>/.obsidian/plugins/<id>/data.json` | `obsidian_reset_state`                       | Overwrites plugin settings with `{}`; returns the previous contents    |
+| `./.knapper/`                              | screenshot and snapshot tools                | Output artifacts, under `KNAP_SCREENSHOT_DIR`                          |
+| The vault itself                           | the `vault` and `authoring` toolsets         | Note CRUD, frontmatter, daily notes                                    |
 
 ## Input handling
 
-- **No shell injection risk.** All CLI calls use Node.js `execFile()`, which passes arguments directly to the process without a shell. Arguments like `content=foo; rm -rf /` are treated as literal strings.
+- **No shell injection.** Every CLI call goes through `execFile`, which passes arguments
+  directly to the process without a shell. `content=foo; rm -rf /` is a literal string.
+- **CLI argument escaping** is centralized in `cliValue` (`src/obsidian/helpers.ts`), and
+  `obsidian_search` uses Obsidian's native `search` command rather than composing JavaScript.
+- **Path handling is delegated** to the Obsidian CLI, which resolves paths within the vault.
+  The exceptions are the explicit filesystem writes in the table above.
+- **`obsidian_eval` is not sanitized, by design.** Executing the code you pass is the tool.
 
-- **JavaScript injection in `obsidian_search` is mitigated.** The search tool constructs JavaScript code that runs via `obsidian_eval`. User input is escaped using `JSON.stringify()` to prevent injection through the query parameter.
+## Timeouts
 
-- **Path handling is delegated to the CLI.** File paths are passed directly to the Obsidian CLI, which resolves them within the vault. This server does not perform file system operations directly.
+A single Obsidian CLI invocation is killed after `KNAP_CLI_TIMEOUT_MS` (default **15000** ms)
+so a hung binary cannot block the client indefinitely.
 
-## Timeout
+## Logging
 
-All CLI calls have a 10-second timeout. If the Obsidian binary does not respond within 10 seconds, the call is killed and an error is returned. This prevents hung processes from blocking the MCP client.
+Logs go to **stderr only** — a single stray byte on stdout corrupts JSON-RPC framing. At the
+default `info` level, note contents are not logged. `--log-level debug` is more verbose and
+may include tool arguments; do not use it for a screen recording or a bug report without
+reading it first.
 
-## Reporting vulnerabilities
+## Reporting a vulnerability
 
-If you discover a security issue, please open an issue on the GitHub repository or contact the maintainer directly.
+Open a [security advisory](https://github.com/slate-rehm/knapper/security/advisories/new) on
+the repository, or a regular issue if the problem is not sensitive. There is no formal SLA on
+this project — it is maintained on a best-effort basis.

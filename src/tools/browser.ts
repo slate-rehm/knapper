@@ -62,7 +62,10 @@ function annotationsFor(name: string) {
     name === "browser_console_messages" ||
     name === "browser_tabs" ||
     name === "browser_find" ||
-    name === "browser_generate_locator"
+    name === "browser_generate_locator" ||
+    // Reads pixels; changes nothing. Without this it takes the registry's exclusive
+    // lock and serializes against every other call for no reason.
+    name === "browser_take_screenshot"
   ) {
     return { readOnlyHint: true };
   }

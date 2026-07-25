@@ -7,8 +7,7 @@ on:
   pull_request:
     branches: [dev, master]
   workflow_dispatch:
-  # Let the release and nightly workflows reuse these exact gates instead of
-  # duplicating them.
+  # Let the release workflow reuse these exact gates instead of duplicating them.
   workflow_call:
 
 # A new push to the same branch makes an in-flight run obsolete.
@@ -95,13 +94,12 @@ jobs:
           LIST=$(tar -tzf "$TARBALL")
           echo "$LIST" | head -40
           missing=0
-          # The bin, plus one manifest per distribution channel. A missing dotfile
-          # here is the classic npm packaging failure: it works locally from a
-          # clone and silently breaks for everyone installing from the registry.
+          # The bin, plus one manifest per plugin host. A missing dotfile here is
+          # the classic npm packaging failure: it works locally from a clone and
+          # silently breaks for everyone installing the release tarball.
           for required in \
             package/dist/cli.js \
             package/package.json \
-            package/server.json \
             package/.mcp.json \
             package/.cursor-plugin/plugin.json \
             package/.claude-plugin/plugin.json \
@@ -129,9 +127,9 @@ jobs:
           mkdir -p /tmp/install-test && cd /tmp/install-test
           npm init -y >/dev/null
           npm install "$TARBALL"
-          test -x node_modules/.bin/unified-obsidian-mcp \
+          test -x node_modules/.bin/knap \
             || { echo "::error::bin is not executable after install"; exit 1; }
-          head -1 node_modules/unified-obsidian-mcp/dist/cli.js | grep -q '^#!/usr/bin/env node' \
+          head -1 node_modules/knapper/dist/cli.js | grep -q '^#!/usr/bin/env node' \
             || { echo "::error::missing shebang in dist/cli.js"; exit 1; }
 
       - name: Installed server answers MCP over stdio without Obsidian
@@ -141,7 +139,7 @@ jobs:
           # answer obsidian_status with a diagnosis rather than crashing.
           cd /tmp/install-test
           node "$GITHUB_WORKSPACE/scripts/ci-smoke.mjs" \
-            node_modules/unified-obsidian-mcp/dist/cli.js
+            node_modules/knapper/dist/cli.js
 
       - uses: actions/upload-artifact@v7
         with:

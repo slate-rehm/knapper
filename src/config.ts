@@ -50,6 +50,12 @@ export interface Config {
   unknownToolsets: string[];
   logLevel: LogLevel;
   telemetryBuffer: number;
+  /**
+   * Capture failed network requests alongside console output. Off by default: the
+   * two share one ring buffer, and Obsidian's renderer is chatty enough that
+   * network events crowd out the plugin errors most sessions are actually after.
+   */
+  telemetryNetwork: boolean;
   reconnectMs: number;
   /** Directory for screenshots and snapshot files. */
   outputDir: string;
@@ -69,6 +75,7 @@ export interface ConfigOverrides {
   toolsets?: string;
   logLevel?: string;
   telemetryBuffer?: number;
+  telemetryNetwork?: boolean;
   reconnectMs?: number;
   outputDir?: string;
   cliTimeoutMs?: number;
@@ -135,13 +142,22 @@ function numberFrom(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+/** Accept the shapes people actually type in an MCP client's env block. */
+function boolFrom(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined || raw === "") return fallback;
+  const v = raw.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return fallback;
+}
+
 export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): Config {
   const cdpUrl = overrides.cdpUrl ?? env.OBSIDIAN_CDP_URL ?? DEFAULT_CDP_URL;
 
-  const rawLogLevel = overrides.logLevel ?? env.UOB_LOG_LEVEL ?? env.LOG_LEVEL ?? "info";
+  const rawLogLevel = overrides.logLevel ?? env.KNAP_LOG_LEVEL ?? env.LOG_LEVEL ?? "info";
   const logLevel: LogLevel = isLogLevel(rawLogLevel) ? rawLogLevel : "info";
 
-  const { enabled, unknown } = parseToolsets(overrides.toolsets ?? env.UOB_TOOLSETS);
+  const { enabled, unknown } = parseToolsets(overrides.toolsets ?? env.KNAP_TOOLSETS);
 
   const vault = overrides.vault ?? env.OBSIDIAN_VAULT;
   const targetMatch = overrides.targetMatch ?? env.OBSIDIAN_TARGET_MATCH;
@@ -158,18 +174,22 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
     transport,
     httpPort: overrides.httpPort ?? numberFrom(env.MCP_PORT, 9223),
     httpHost: overrides.httpHost ?? env.MCP_HOST ?? "127.0.0.1",
-    maxConcurrency: Math.max(1, overrides.maxConcurrency ?? numberFrom(env.UOB_MAX_CONCURRENCY, 4)),
+    maxConcurrency: Math.max(
+      1,
+      overrides.maxConcurrency ?? numberFrom(env.KNAP_MAX_CONCURRENCY, 4),
+    ),
     enabledToolsets: enabled,
     unknownToolsets: unknown,
     logLevel,
-    telemetryBuffer: overrides.telemetryBuffer ?? numberFrom(env.UOB_TELEMETRY_BUFFER, 2000),
+    telemetryBuffer: overrides.telemetryBuffer ?? numberFrom(env.KNAP_TELEMETRY_BUFFER, 2000),
+    telemetryNetwork: overrides.telemetryNetwork ?? boolFrom(env.KNAP_TELEMETRY_NETWORK, false),
     reconnectMs:
-      overrides.reconnectMs ?? numberFrom(env.UOB_RECONNECT_MS ?? env.RECONNECT_MS, 2000),
+      overrides.reconnectMs ?? numberFrom(env.KNAP_RECONNECT_MS ?? env.RECONNECT_MS, 2000),
     outputDir:
       overrides.outputDir ??
-      env.UOB_SCREENSHOT_DIR ??
+      env.KNAP_SCREENSHOT_DIR ??
       env.SCREENSHOT_DIR ??
-      join(process.cwd(), ".unified-obsidian-mcp"),
-    cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.UOB_CLI_TIMEOUT_MS, 15_000),
+      join(process.cwd(), ".knapper"),
+    cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.KNAP_CLI_TIMEOUT_MS, 15_000),
   };
 }
