@@ -206,6 +206,31 @@ npm run acceptance   # fast gate over the critical seams
 npm run e2e          # deep end-to-end: vault round-trips, UI, telemetry, dev cycle
 ```
 
+## Branching model
+
+```
+feature/*  ──PR──▶  dev  ──PR──▶  master
+                     │              │
+                  nightly       production
+                   @next          @latest
+```
+
+- **`dev`** is the default branch and the target for all feature PRs.
+- **`master`** is production, and only advances by a promotion PR from `dev`.
+- Both branches require a passing CI run; neither accepts a direct push.
+
+`npm install unified-obsidian-mcp` always resolves to the newest **production**
+release, because only `master` publishes the `latest` dist-tag. Nightlies go to
+`next` and are marked as GitHub prereleases:
+
+```bash
+npm install unified-obsidian-mcp        # latest production release
+npm install unified-obsidian-mcp@next   # last night's dev build
+```
+
+The nightly workflow re-reads the dist-tags after publishing and fails if a
+nightly ever moved `latest`.
+
 ## Releasing
 
 `package.json` is the single source of truth for the version. The same string is
@@ -217,10 +242,14 @@ npm run versions:sync    # rewrite every manifest from package.json
 npm run versions:check   # CI gate: fail on drift
 ```
 
-Cut a release either way:
+**Nightly (`dev`)** runs at 04:00 UTC, skips itself when `dev` has not moved, and
+publishes `X.Y.Z-nightly.<date>.<sha>` to the `next` tag. It never writes that
+version back to the branch.
 
-- **From the Actions tab** — run the _Release_ workflow and pick `patch` / `minor` / `major`. It bumps, syncs manifests, commits, tags, publishes to npm with provenance, and creates the GitHub Release. Tick _dry run_ to rehearse without publishing or tagging.
-- **From a tag** — `npm version minor && git push --follow-tags`. The workflow refuses to publish if the tag and `package.json` disagree.
+**Production (`master`)** — after the promotion PR merges, cut it either way:
+
+- **From the Actions tab** — run the _Release_ workflow and pick `patch` / `minor` / `major`. It bumps, syncs manifests, commits to `master`, tags, publishes to npm with provenance, and creates the GitHub Release. Tick _dry run_ to rehearse without publishing or tagging.
+- **From a tag** — `npm version minor && git push --follow-tags`. The workflow refuses to publish if the tag and `package.json` disagree, or if the commit is not on `master`.
 
 Publishing needs an `NPM_TOKEN` repository secret. Set the repository variable
 `PUBLISH_MCP_REGISTRY` to `true` to also push [`server.json`](server.json) to the
