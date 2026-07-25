@@ -134,6 +134,9 @@ export function registerCoreTools(ctx: ServerContext): void {
     inputSchema: {
       code: z.string().describe("JavaScript to evaluate in the renderer"),
     },
+    // Arbitrary code against the live app: it can delete notes, disable plugins, or
+    // reach the network. Annotated like browser_evaluate so clients prompt for it.
+    annotations: { destructiveHint: true, openWorldHint: true },
     handler: async (args) => {
       const code = args.code as string;
       const { value, layer } = await router.evaluate<unknown>(code);

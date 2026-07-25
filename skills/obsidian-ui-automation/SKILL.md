@@ -1,6 +1,6 @@
 ---
 name: obsidian-ui-automation
-description: Drive the live Obsidian desktop UI with unified-obsidian-mcp browser tools (Playwright over CDP). Use for clicking controls, forms, modals, and verifying layout when obsidian_command or obsidian_eval are insufficient. Teaches snapshot-first refs, target vs element, virtualization hazards, and notice placement.
+description: Drive the live Obsidian desktop UI with knapper browser tools (Playwright over CDP). Use for clicking controls, forms, modals, and verifying layout when obsidian_command or obsidian_eval are insufficient. Teaches snapshot-first refs, target vs element, virtualization hazards, and notice placement.
 ---
 
 # Obsidian UI automation (snapshot-first)

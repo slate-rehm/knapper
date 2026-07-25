@@ -1,14 +1,14 @@
 {
-  "name": "unified-obsidian-mcp",
+  "name": "knapper",
   "interface": {
     "displayName": "Unified Obsidian MCP"
   },
   "plugins": [
     {
-      "name": "unified-obsidian-mcp",
+      "name": "knapper",
       "source": {
         "source": "local",
-        "path": "../.."
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",

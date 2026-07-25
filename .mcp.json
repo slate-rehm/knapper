@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "obsidian": {
+    "knapper": {
       "command": "npx",
-      "args": ["-y", "unified-obsidian-mcp@latest"]
+      "args": ["-y", "github:slate-rehm/knapper"]
     }
   }
 }

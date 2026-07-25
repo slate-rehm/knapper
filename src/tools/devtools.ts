@@ -98,6 +98,9 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
         .describe("Method parameters as a JSON object (serialized into params=…)"),
       ...vaultOpt,
     },
+    // Raw protocol access is at least as powerful as obsidian_eval — Runtime.evaluate
+    // is one of the methods it forwards.
+    annotations: { destructiveHint: true, openWorldHint: true },
     handler: async (args) => {
       const tokens = [`method=${args.method as string}`];
       if (args.params !== undefined) {

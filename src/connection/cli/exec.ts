@@ -35,6 +35,25 @@ export interface CliResult {
   stderr: string;
 }
 
+/**
+ * Environment for a spawned Obsidian process.
+ *
+ * `ELECTRON_RUN_AS_NODE=1` tells an Electron binary to behave as a bare Node
+ * runtime, which makes `require("electron")` fail — and Obsidian's `app.asar`
+ * requires it on the first line. Electron-based MCP clients (Claude Code, Cursor,
+ * VS Code, Claude Desktop) set this for their child processes, so it arrives in
+ * our environment through no fault of the user's, and we inherit it straight into
+ * the CLI. Every call then dies with `Cannot find module 'electron'`, which looks
+ * like a broken Obsidian install rather than an inherited env var.
+ *
+ * Stripping it is always correct here: we are launching a desktop application, and
+ * never want it as a plain Node process.
+ */
+export function childEnv(): NodeJS.ProcessEnv {
+  const { ELECTRON_RUN_AS_NODE: _stripped, ...rest } = process.env;
+  return rest;
+}
+
 /** Path to the IPC socket the CLI client connects to. Useful for liveness checks. */
 export function cliSocketPath(): string {
   switch (process.platform) {
@@ -97,6 +116,24 @@ export function classifyCliOutput(
   const trimmed = stdout.trim();
 
   if (trimmed.includes(CLI_DISABLED_MARKER)) return cliDisabled();
+
+  // We strip ELECTRON_RUN_AS_NODE before spawning (see childEnv), so seeing this
+  // means something else in the chain re-introduced it — a wrapper script, a shell
+  // profile, or a launcher. Name it precisely; the raw stack reads like a broken
+  // Obsidian install and sends people reinstalling the app for no reason.
+  if (trimmed.includes("Cannot find module 'electron'")) {
+    return new UobError(
+      "ARGV_CORRUPTION",
+      "The Obsidian binary started as a bare Node process and could not load Electron.",
+      {
+        remediation:
+          "ELECTRON_RUN_AS_NODE is set in the environment Obsidian inherited. Unset it for the " +
+          "MCP server's process (Electron-based clients such as Claude Code, Cursor, and VS Code " +
+          "set it for child processes), or check your Obsidian wrapper script for it.",
+        details: { variable: "ELECTRON_RUN_AS_NODE" },
+      },
+    );
+  }
 
   if (trimmed === VAULT_NOT_FOUND_MARKER) {
     return new UobError("VAULT_NOT_FOUND", `Obsidian does not know a vault named "${vault}".`, {
@@ -230,7 +267,7 @@ export class ObsidianCli {
       execFile(
         this.opts.obsidianBin,
         args,
-        { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 },
+        { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: childEnv() },
         (error, stdout, stderr) => {
           if (!error) {
             resolve({ stdout, stderr });

@@ -1,14 +1,19 @@
 /**
  * Keep every published manifest's version in step with package.json.
  *
- * The same version string is declared in six places across five files, because
- * each distribution channel (npm, the MCP registry, and the Cursor / Claude Code /
- * Codex plugin hosts) insists on its own manifest dialect. A release that bumps
- * package.json alone ships plugin manifests that claim the previous version, which
- * is invisible locally and only shows up as a wrong version in someone's client.
+ * The same version string is declared in four places across four files, because
+ * each plugin host (Cursor / Claude Code / Codex) insists on its own manifest
+ * dialect. A release that bumps package.json alone ships plugin manifests that
+ * claim the previous version, which is invisible locally and only shows up as a
+ * wrong version in someone's client.
  *
  *   node scripts/sync-version.mjs          # rewrite manifests from package.json
  *   node scripts/sync-version.mjs --check  # fail if any manifest has drifted (CI)
+ *
+ * All progress output goes to stderr. This script runs from the `prepare`
+ * lifecycle hook, which npm executes during `npm pack` — and `npm pack --json`
+ * writes the tarball manifest to stdout, so a single console.log here produces
+ * invalid JSON and breaks the release workflow's tarball-name lookup.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -23,7 +28,6 @@ const check = process.argv.includes("--check");
  * rather than hand-editing a manifest, or the next release drifts again.
  */
 const TARGETS = [
-  { file: "server.json", paths: [["version"], ["packages", 0, "version"]] },
   { file: ".cursor-plugin/plugin.json", paths: [["version"]] },
   { file: ".claude-plugin/plugin.json", paths: [["version"]] },
   { file: ".codex-plugin/plugin.json", paths: [["version"]] },
@@ -73,7 +77,7 @@ for (const { file, paths } of TARGETS) {
       drifted++;
     } else {
       setIn(json, path, version);
-      console.log(`  set ${where} -> ${version}`);
+      console.error(`  set ${where} -> ${version}`);
       changed = true;
     }
   }
@@ -93,7 +97,7 @@ if (check) {
     );
     process.exit(1);
   }
-  console.log(`all manifests agree on version ${version}`);
+  console.error(`all manifests agree on version ${version}`);
 } else {
-  console.log(rewrote === 0 ? `already in sync at ${version}` : `synced ${rewrote} manifest(s)`);
+  console.error(rewrote === 0 ? `already in sync at ${version}` : `synced ${rewrote} manifest(s)`);
 }

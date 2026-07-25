@@ -16,6 +16,18 @@ describe("classifyCliOutput", () => {
     expect(classifyCliOutput("name\tuob-test-vault\n")).toBeUndefined();
   });
 
+  it("names ELECTRON_RUN_AS_NODE rather than surfacing a raw module-not-found stack", () => {
+    // What an Electron-based MCP client's inherited env actually produces.
+    const err = classifyCliOutput(
+      "node:internal/modules/cjs/loader:1393\n  throw err;\n  ^\n\n" +
+        "Error: Cannot find module 'electron'\nRequire stack:\n- /usr/lib/obsidian/app.asar/main.js\n",
+    );
+    expect(err).toBeDefined();
+    expect(err?.remediation).toMatch(/ELECTRON_RUN_AS_NODE/);
+    // The message must not read as a broken Obsidian install.
+    expect(err?.message).not.toMatch(/not found|reinstall/i);
+  });
+
   it("maps the CLI-disabled marker and names the tool that fixes it", () => {
     const err = classifyCliOutput("Command line interface is not enabled.\n");
     expect(err?.code).toBe("CLI_DISABLED");

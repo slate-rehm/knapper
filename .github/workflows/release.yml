@@ -4,11 +4,13 @@ name: Release
 # merged dev -> master, so anything published here has already been through CI
 # on a PR into dev and again on the promotion PR.
 #
-# Nightlies are a separate workflow publishing the `next` dist-tag; this one owns
-# `latest`, so `npm install unified-obsidian-mcp` always resolves to production.
+# This project is not published to any registry. The release artifact is the npm
+# tarball attached to the GitHub Release, which users install by URL:
+#
+#   npm i -g https://github.com/slate-rehm/knapper/releases/download/v0.1.0/knapper-0.1.0.tgz
 #
 # The version bump itself is an ordinary change: bump it in a PR into dev, then
-# promote dev -> master. This workflow only tags and publishes what is already on
+# promote dev -> master. This workflow only tags and releases what is already on
 # master, so it never has to write to a protected branch.
 #
 # Two ways in, both equivalent:
@@ -41,13 +43,12 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   release:
-    name: publish
+    name: release
     runs-on: ubuntu-latest
     needs: verify
     environment: release
     permissions:
       contents: write # create the tag and the GitHub Release
-      id-token: write # npm provenance attestation
     outputs:
       version: ${{ steps.resolve.outputs.version }}
     steps:
@@ -69,17 +70,6 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Fail early if the publish token is missing
-        if: ${{ !inputs.dry_run }}
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "::error::NPM_TOKEN is not set. Add it under Settings → Secrets → Actions."
-            exit 1
-          fi
 
       - run: npm ci
 
@@ -124,16 +114,10 @@ jobs:
       - name: Degraded-mode smoke test on the build
         run: node scripts/ci-smoke.mjs
 
-      - name: Publish to npm
-        if: ${{ !inputs.dry_run }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        # --provenance links the tarball to this workflow run; it needs id-token.
-        # --tag latest is explicit: nightlies publish to `next`, and `latest` must
-        # only ever point at a production release.
-        run: npm publish --provenance --access public --tag latest
-
-      - name: Pack for the release artifact
+      # The tarball attached below is the only distribution artifact, so packing it
+      # is a release gate rather than a convenience: if `npm pack` fails, no user
+      # can install this version.
+      - name: Pack the release artifact
         id: pack
         run: |
           npm pack --json > pack.json
@@ -150,31 +134,3 @@ jobs:
             --generate-notes \
             --verify-tag \
             "${{ steps.pack.outputs.tarball }}"
-
-  # Opt-in: set the repository variable PUBLISH_MCP_REGISTRY to "true" once the
-  # server is claimed on the registry. Kept separate so a registry hiccup cannot
-  # fail a release that already published to npm.
-  mcp-registry:
-    name: publish to MCP registry
-    runs-on: ubuntu-latest
-    needs: release
-    if: ${{ vars.PUBLISH_MCP_REGISTRY == 'true' && !inputs.dry_run }}
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: v${{ needs.release.outputs.version }}
-
-      - name: Install mcp-publisher
-        run: |
-          curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
-            | tar -xz mcp-publisher
-          chmod +x mcp-publisher
-
-      - name: Authenticate with GitHub OIDC
-        run: ./mcp-publisher login github-oidc
-
-      - name: Publish server.json
-        run: ./mcp-publisher publish

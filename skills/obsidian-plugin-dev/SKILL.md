@@ -1,11 +1,11 @@
 ---
 name: obsidian-plugin-dev
-description: Build, link, reload, and verify Obsidian plugins against a live desktop app using unified-obsidian-mcp. Use when developing or testing community plugins, symlinking build output, running obsidian_dev_cycle, reading attributed console errors, or exercising plugin commands and CLI handlers.
+description: Build, link, reload, and verify Obsidian plugins against a live desktop app using knapper. Use when developing or testing community plugins, symlinking build output, running obsidian_dev_cycle, reading attributed console errors, or exercising plugin commands and CLI handlers.
 ---
 
 # Obsidian plugin development loop
 
-This skill assumes **unified-obsidian-mcp** is connected and Obsidian is running. If anything fails with connection errors, switch to the **obsidian-instance-setup** skill first (`obsidian_doctor` → remediation → `obsidian_launch`).
+This skill assumes **knapper** is connected and Obsidian is running. If anything fails with connection errors, switch to the **obsidian-instance-setup** skill first (`obsidian_doctor` → remediation → `obsidian_launch`).
 
 ## Mental model
 

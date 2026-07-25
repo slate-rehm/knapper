@@ -1,6 +1,6 @@
 ---
 name: obsidian-instance-setup
-description: Connect unified-obsidian-mcp to a live Obsidian desktop app: obsidian_doctor diagnosis, obsidian_launch with remote debugging, CLI enablement, vault registry, argv corruption, and the Electron single-instance lock. Use before plugin dev or UI automation when transports fail.
+description: Connect knapper to a live Obsidian desktop app: obsidian_doctor diagnosis, obsidian_launch with remote debugging, CLI enablement, vault registry, argv corruption, and the Electron single-instance lock. Use before plugin dev or UI automation when transports fail.
 ---
 
 # Obsidian instance setup
@@ -65,7 +65,7 @@ Hosts disagree on plugin manifest variables, so configure via environment:
 - `OBSIDIAN_BIN` — path to executable
 - `OBSIDIAN_VAULT` — default vault name for CLI
 
-See repository README for the full table (`UOB_*` toolsets, telemetry, timeouts). Add `vault`, `devtools`, or `authoring` via `UOB_TOOLSETS` when you need those opt-in surfaces (properties/tags/tasks live under **authoring**, not vault).
+See repository README for the full table (`KNAP_*` toolsets, telemetry, timeouts). Add `vault`, `devtools`, or `authoring` via `KNAP_TOOLSETS` when you need those opt-in surfaces (properties/tags/tasks live under **authoring**, not vault).
 
 ## Linux distro wrappers
 

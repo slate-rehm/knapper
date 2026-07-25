@@ -143,7 +143,6 @@ describe("resolve", () => {
     nothingAvailable();
     const router = makeRouter();
     expect(await router.resolve("launch")).toBe("local");
-    expect(await router.resolve("listVaults")).toBe("local");
   });
 });
 

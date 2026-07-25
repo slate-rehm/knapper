@@ -129,7 +129,7 @@ the defaults rather than failing to start.
 
 Close the client. The server process must exit — the attached CDP websocket keeps
 the event loop alive, so a lingering process per session is a leak. Verify with
-`pgrep -af 'unified-obsidian-mcp|dist/cli.js'`.
+`pgrep -af 'knapper|dist/cli.js'`.
 
 ## Known caveat
 
