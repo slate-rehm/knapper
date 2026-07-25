@@ -1,0 +1,165 @@
+name: Nightly
+
+# Nightly prereleases cut from dev.
+#
+# These publish to the `next` npm dist-tag and are marked as GitHub prereleases,
+# so `latest` keeps pointing at the most recent production release from master.
+# Install a nightly deliberately with `npm install unified-obsidian-mcp@next`.
+#
+# The version is derived in-flight and never committed back to dev: writing a
+# nightly version into package.json would put a prerelease string on the branch
+# that production releases are cut from.
+on:
+  schedule:
+    # 04:00 UTC daily, comfortably after a normal working day in the Americas.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and validate, but do not publish"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Skip the whole run when dev has not moved since the last nightly, so an idle
+  # repository does not accumulate identical prereleases.
+  changes:
+    name: check for new commits
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Compare against the commit the previous nightly tag points at.
+          LAST=$(gh release list --limit 30 --json tagName,isPrerelease \
+            --jq '[.[] | select(.isPrerelease) | .tagName] | first' 2>/dev/null || echo "")
+          if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then
+            echo "no previous nightly; running"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LAST_SHA=$(git rev-list -n 1 "$LAST" 2>/dev/null || echo "")
+          if [ "$LAST_SHA" = "$SHA" ]; then
+            echo "dev unchanged since $LAST; skipping"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  verify:
+    needs: changes
+    if: needs.changes.outputs.should_run == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  nightly:
+    name: publish nightly
+    runs-on: ubuntu-latest
+    needs: [changes, verify]
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm ci
+
+      - name: Derive the nightly version
+        id: version
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          # Strip any prerelease suffix so nightlies always hang off a clean base.
+          BASE=${BASE%%-*}
+          STAMP=$(date -u +'%Y%m%d')
+          SHORT=$(git rev-parse --short HEAD)
+          # Semver prerelease ordering keeps these below the eventual release.
+          VERSION="${BASE}-nightly.${STAMP}.${SHORT}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: $VERSION"
+
+      - name: Stamp the version into package.json and every manifest
+        run: |
+          npm version "${{ steps.version.outputs.version }}" \
+            --no-git-tag-version --allow-same-version
+          node scripts/sync-version.mjs
+          node scripts/sync-version.mjs --check
+
+      - name: Build
+        run: npm run build
+
+      - name: Degraded-mode smoke test
+        run: npm run smoke
+
+      - name: Publish to npm under the next tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # --tag next is what keeps `latest` on the production release.
+        run: npm publish --provenance --access public --tag next
+
+      - name: Pack for the prerelease artifact
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          echo "tarball=$(node -p "require('./pack.json')[0].filename")" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub prerelease
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "v$VERSION" \
+            --target "${{ needs.changes.outputs.sha }}" \
+            --title "Nightly v$VERSION" \
+            --notes "Automated nightly from \`dev\` at ${{ needs.changes.outputs.sha }}.
+
+          Install with \`npm install unified-obsidian-mcp@next\`.
+
+          Nightlies are not production releases; \`latest\` continues to point at the most recent release from \`master\`." \
+            --prerelease \
+            "${{ steps.pack.outputs.tarball }}"
+
+      - name: Confirm latest still points at production
+        if: ${{ !inputs.dry_run }}
+        run: |
+          # A misconfigured publish that moved `latest` to a nightly would be a
+          # silent, high-blast-radius regression for everyone on @latest.
+          LATEST=$(npm view unified-obsidian-mcp dist-tags.latest 2>/dev/null || echo "")
+          NEXT=$(npm view unified-obsidian-mcp dist-tags.next 2>/dev/null || echo "")
+          echo "latest=$LATEST next=$NEXT"
+          if [ "$LATEST" = "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::the nightly moved the latest dist-tag"
+            exit 1
+          fi

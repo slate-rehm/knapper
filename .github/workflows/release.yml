@@ -1,13 +1,20 @@
 name: Release
 
+# Production releases only, and only from master. Work reaches master by being
+# merged dev -> master, so anything published here has already been through CI
+# on a PR into dev and again on the promotion PR.
+#
+# Nightlies are a separate workflow publishing the `next` dist-tag; this one owns
+# `latest`, so `npm install unified-obsidian-mcp` always resolves to production.
+#
 # Two ways in:
 #
 #  1. Push a tag (`git tag v0.2.0 && git push origin v0.2.0`) — publishes exactly
-#     that tag, and fails if it disagrees with package.json.
+#     that tag, and fails if it disagrees with package.json or is not on master.
 #  2. Run this workflow from the Actions tab with a bump — it bumps package.json,
-#     syncs every manifest, commits, tags, pushes, and then publishes in the same
-#     run. The bump path exists because a tag pushed by GITHUB_TOKEN does not
-#     trigger other workflows, so a two-workflow handoff would silently stall.
+#     syncs every manifest, commits to master, tags, pushes, and then publishes in
+#     the same run. The bump path exists because a tag pushed by GITHUB_TOKEN does
+#     not trigger other workflows, so a two-workflow handoff would silently stall.
 on:
   push:
     tags: ["v*.*.*"]
@@ -52,7 +59,15 @@ jobs:
         with:
           # Need history and a writable ref for the dispatch bump path.
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'master' || github.ref }}
+
+      - name: Refuse to release anything that is not on master
+        run: |
+          git fetch origin master --depth=1
+          if ! git merge-base --is-ancestor HEAD origin/master; then
+            echo "::error::this commit is not on master; promote dev -> master first"
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -86,7 +101,7 @@ jobs:
           git commit -m "release: v$VERSION"
           git tag "v$VERSION"
           if [ "${{ inputs.dry_run }}" != "true" ]; then
-            git push origin HEAD:main
+            git push origin HEAD:master
             git push origin "v$VERSION"
           else
             echo "dry run: not pushing v$VERSION"
@@ -120,7 +135,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         # --provenance links the tarball to this workflow run; it needs id-token.
-        run: npm publish --provenance --access public
+        # --tag latest is explicit: nightlies publish to `next`, and `latest` must
+        # only ever point at a production release.
+        run: npm publish --provenance --access public --tag latest
 
       - name: Pack for the release artifact
         id: pack

@@ -2,10 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [dev, master]
+  # Work flows feature -> dev -> master, so those are the only valid PR targets.
   pull_request:
+    branches: [dev, master]
   workflow_dispatch:
-  # Let the release workflow reuse these exact gates instead of duplicating them.
+  # Let the release and nightly workflows reuse these exact gates instead of
+  # duplicating them.
   workflow_call:
 
 # A new push to the same branch makes an in-flight run obsolete.
