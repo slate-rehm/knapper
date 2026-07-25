@@ -7,25 +7,21 @@ name: Release
 # Nightlies are a separate workflow publishing the `next` dist-tag; this one owns
 # `latest`, so `npm install unified-obsidian-mcp` always resolves to production.
 #
-# Two ways in:
+# The version bump itself is an ordinary change: bump it in a PR into dev, then
+# promote dev -> master. This workflow only tags and publishes what is already on
+# master, so it never has to write to a protected branch.
 #
-#  1. Push a tag (`git tag v0.2.0 && git push origin v0.2.0`) — publishes exactly
-#     that tag, and fails if it disagrees with package.json or is not on master.
-#  2. Run this workflow from the Actions tab with a bump — it bumps package.json,
-#     syncs every manifest, commits to master, tags, pushes, and then publishes in
-#     the same run. The bump path exists because a tag pushed by GITHUB_TOKEN does
-#     not trigger other workflows, so a two-workflow handoff would silently stall.
+# Two ways in, both equivalent:
+#
+#  1. Push a tag — `npm version minor` on a dev PR, promote, then
+#     `git tag v0.2.0 && git push origin v0.2.0`.
+#  2. Run this workflow from the Actions tab — it tags master's current HEAD with
+#     the version already in package.json and publishes that.
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
-      bump:
-        description: "Version bump to cut from main"
-        required: true
-        default: patch
-        type: choice
-        options: [patch, minor, major]
       dry_run:
         description: "Build and validate, but do not publish or tag"
         required: false
@@ -57,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Need history and a writable ref for the dispatch bump path.
+          # Full history so the master-ancestry check below can resolve.
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && 'master' || github.ref }}
 
@@ -87,21 +83,19 @@ jobs:
 
       - run: npm ci
 
-      - name: Bump, sync manifests and tag
-        id: bump
+      - name: Tag master at the version already in package.json
         if: github.event_name == 'workflow_dispatch'
         run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::v$VERSION is already tagged. Bump the version in a PR into dev first."
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          npm version "${{ inputs.bump }}" --no-git-tag-version
-          node scripts/sync-version.mjs
-          VERSION=$(node -p "require('./package.json').version")
-          git add package.json package-lock.json server.json \
-            .cursor-plugin/plugin.json .claude-plugin/plugin.json .codex-plugin/plugin.json
-          git commit -m "release: v$VERSION"
           git tag "v$VERSION"
           if [ "${{ inputs.dry_run }}" != "true" ]; then
-            git push origin HEAD:master
+            # A tag is not a branch push, so this works against protected master.
             git push origin "v$VERSION"
           else
             echo "dry run: not pushing v$VERSION"
