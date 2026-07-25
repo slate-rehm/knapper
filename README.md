@@ -128,15 +128,15 @@ Cursor plugin `variables` and Claude `userConfig` do not unify across hosts — 
 
 Gating keeps tool count manageable for model tool selection.
 
-| Toolset      | Default | Description                                                                                                           |
-| ------------ | ------- | --------------------------------------------------------------------------------------------------------------------- |
-| `core`       | yes     | Status, doctor, launch, eval, CLI, commands, attach                                                                   |
-| `ui`         | yes     | `browser_*` (from `@playwright/mcp`) for real UI interaction                                                          |
-| `telemetry`  | yes     | Console/error/network capture, cursor tailing                                                                         |
-| `plugin-dev` | yes     | Reload, manifest/settings, `obsidian_dev_cycle`, exercise/reset                                                       |
-| `vault`      | no      | Note/file CRUD, search, properties — **opt-in** because other Obsidian MCP servers already cover vault workflows well |
-| `devtools`   | no      | DOM/CSS/CDP passthrough, mobile emulation                                                                             |
-| `authoring`  | no      | Themes, snippets, daily notes, metadata                                                                               |
+| Toolset      | Default | Description                                                                                                          |
+| ------------ | ------- | -------------------------------------------------------------------------------------------------------------------- |
+| `core`       | yes     | Status, doctor, launch, eval, CLI, commands, attach                                                                  |
+| `ui`         | yes     | `browser_*` (from `@playwright/mcp`) for real UI interaction, plus `obsidian_snapshot`                               |
+| `telemetry`  | yes     | Console/error/network capture, cursor tailing                                                                        |
+| `plugin-dev` | yes     | Reload, manifest/settings, `obsidian_dev_cycle`, exercise/reset                                                      |
+| `vault`      | no      | Note/file CRUD, search, tabs, graph queries — **opt-in** because other Obsidian MCP servers already cover vault CRUD |
+| `devtools`   | no      | DOM/CSS/CDP passthrough, OS-window screenshots, mobile emulation                                                     |
+| `authoring`  | no      | Themes, snippets, properties, tags, tasks, daily notes, templates                                                    |
 
 Enable extras: `UOB_TOOLSETS=core,ui,telemetry,plugin-dev,vault` or `--toolsets all`.
 
@@ -148,9 +148,11 @@ Enable extras: `UOB_TOOLSETS=core,ui,telemetry,plugin-dev,vault` or `--toolsets 
 
 **Telemetry:** `obsidian_logs`, `obsidian_log_mark`, `obsidian_logs_clear`, `obsidian_telemetry_status`
 
-**UI:** `obsidian_snapshot` (scoped to a leaf, modal, or settings tab), plus `browser_snapshot`, `browser_click`, `browser_type`, `browser_press_key`, `browser_take_screenshot`, … — 32 tools proxied from `@playwright/mcp`, with the destructive ones (`browser_close`, `browser_navigate`, `browser_resize`, file upload, raw code execution) deliberately withheld because they would close, navigate away from, or resize the user's real Obsidian window.
+**UI:** `obsidian_snapshot` (scoped to a leaf, modal, or settings tab), plus `browser_snapshot`, `browser_click`, `browser_type`, `browser_press_key`, `browser_take_screenshot`, … — **27** tools proxied from `@playwright/mcp` (plus a few Obsidian-native helpers like `browser_reload`), with the destructive ones (`browser_close`, `browser_navigate`, `browser_resize`, file upload, raw code execution) deliberately withheld because they would close, navigate away from, or resize the user's real Obsidian window. `browser_take_screenshot` captures web contents; `obsidian_screenshot` (devtools toolset) captures the OS window via Electron `capturePage()`.
 
 **Vault (opt-in):** `obsidian_search`, `obsidian_read`, `obsidian_create`, and related file/note tools
+
+**Authoring (opt-in):** `obsidian_properties`, `obsidian_tags`, `obsidian_tasks`, themes, daily notes
 
 Browser tools are **snapshot-first**: call `browser_snapshot` (or the cheaper scoped `obsidian_snapshot`), then pass the returned ref as **`target`** (CSS selectors also work there). Prefer `obsidian_command` over menu clicking.
 

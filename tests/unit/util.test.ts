@@ -98,6 +98,30 @@ describe("parseCliJson", () => {
     expect(parseCliJson("not json at all")).toBeUndefined();
     expect(parseCliJson("")).toBeUndefined();
   });
+
+  it("treats Obsidian's (no output) sentinel as undefined", () => {
+    expect(parseCliJson("(no output)")).toBeUndefined();
+  });
+});
+
+describe("wrapExpression", () => {
+  it("adds an implicit return for a bare expression", async () => {
+    const { wrapExpression } = await import("../../src/util/serialize.js");
+    expect(wrapExpression("app.vault.getName()")).toBe("return (app.vault.getName());");
+  });
+
+  it("preserves the return value of an IIFE used by evaluateJson callers", async () => {
+    // The old CLI path did `JSON.stringify((() => { ${code} })())`, which discards
+    // an IIFE result. wrapExpression must emit `return (…)` so the value survives.
+    const { wrapExpression } = await import("../../src/util/serialize.js");
+    const code = "(() => { return { a: 1 }; })()";
+    expect(wrapExpression(code)).toBe(`return (${code});`);
+  });
+
+  it("leaves statement bodies that already return alone", async () => {
+    const { wrapExpression } = await import("../../src/util/serialize.js");
+    expect(wrapExpression("const x = 1;\nreturn x;")).toBe("const x = 1;\nreturn x;");
+  });
 });
 
 describe("CLI argument grammar", () => {

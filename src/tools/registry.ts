@@ -13,6 +13,8 @@ import type { ZodRawShape } from "zod";
 import type { Capability } from "../capabilities.js";
 import type { Toolset } from "../toolsets.js";
 import type { Logger } from "../util/logger.js";
+import type { TelemetryStore } from "../telemetry/store.js";
+import { appendTelemetrySummary } from "../telemetry/helpers.js";
 import { toUobError, UobError } from "../util/errors.js";
 import { renderResult } from "../util/serialize.js";
 import { jsonSchemaToZodShape } from "../browser/json-schema.js";
@@ -49,6 +51,11 @@ export interface ToolDefinition<S extends ZodRawShape = ZodRawShape> {
   /** JSON Schema for proxied tools (converted to Zod at registration). */
   jsonInputSchema?: Record<string, unknown>;
   annotations?: ToolAnnotations;
+  /**
+   * When true, the tool already appends a telemetry summary (e.g. composites that
+   * bracket with a mark). Skip the registry-level mutator suffix.
+   */
+  handlesOwnTelemetry?: boolean;
   handler: (args: Record<string, unknown>) => Promise<ToolOutcome>;
 }
 
@@ -110,12 +117,26 @@ function errorResult(err: UobError): McpToolResult {
   };
 }
 
+function withTelemetrySuffix(
+  outcome: ToolOutcome,
+  store: TelemetryStore,
+  sinceSeq: number,
+): ToolOutcome {
+  if (typeof outcome === "string") {
+    return appendTelemetrySummary(outcome, store, sinceSeq);
+  }
+  if ("mcp" in outcome) return outcome;
+  if (outcome.text === undefined) return outcome;
+  return { ...outcome, text: appendTelemetrySummary(outcome.text, store, sinceSeq) };
+}
+
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition>();
 
   constructor(
     private readonly enabledToolsets: Set<Toolset>,
     private readonly logger: Logger,
+    private readonly telemetry?: TelemetryStore,
   ) {}
 
   /** Register a tool, or skip it when its toolset is disabled. */
@@ -171,8 +192,16 @@ export class ToolRegistry {
         config as never,
         (async (args: Record<string, unknown>) => {
           const started = Date.now();
+          const sinceSeq = this.telemetry?.cursor ?? 0;
           try {
-            const outcome = await def.handler(args ?? {});
+            let outcome = await def.handler(args ?? {});
+            if (
+              this.telemetry &&
+              def.annotations?.readOnlyHint !== true &&
+              def.handlesOwnTelemetry !== true
+            ) {
+              outcome = withTelemetrySuffix(outcome, this.telemetry, sinceSeq);
+            }
             this.logger.debug("tool ok", { tool: def.name, ms: Date.now() - started });
             return normalize(outcome);
           } catch (e) {

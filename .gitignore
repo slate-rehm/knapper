@@ -28,3 +28,6 @@ npm-debug.log*
 test-vault/
 # Build output (published to npm from a clean build, never committed)
 dist/
+
+# Screenshot/trace output written by the server at runtime
+.unified-obsidian-mcp/

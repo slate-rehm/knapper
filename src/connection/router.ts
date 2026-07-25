@@ -25,7 +25,7 @@ import {
 } from "../util/errors.js";
 import { ObsidianCli } from "./cli/exec.js";
 import { PlaywrightSession } from "./cdp/session.js";
-import { probeHealth, type HealthReport } from "./health.js";
+import { isObsidianRunning, probeHealth, type HealthReport } from "./health.js";
 import { probeCdp } from "./cdp/discover.js";
 import { readGlobalConfig } from "./vaults.js";
 
@@ -47,6 +47,8 @@ export class CapabilityRouter {
     local: true,
   };
   private availabilityCheckedAt = 0;
+  /** Global `cli` flag from obsidian.json, independent of process liveness. */
+  private cliFlagEnabled = false;
   /** Which layer currently owns the Electron debugger, if any. */
   private debuggerHolder?: Layer;
 
@@ -74,20 +76,28 @@ export class CapabilityRouter {
     const age = Date.now() - this.availabilityCheckedAt;
     if (!force && age < 3000) return this.availability;
 
-    const [version, globalConfig] = await Promise.all([
+    const [version, globalConfig, procRunning] = await Promise.all([
       probeCdp(this.config.cdpUrl),
       readGlobalConfig(),
+      isObsidianRunning(),
     ]);
 
     const cdpUp = version !== undefined;
     const cliOn = globalConfig?.cli === true;
+    // Spawning the CLI binary while nothing is running cold-starts Obsidian
+    // *without* `--remote-debugging-port`. On Linux we can see the process; on
+    // other platforms fall back to trusting the flag (a failed call still
+    // surfaces TIMEOUT / NOT_RUNNING via exec).
+    const running = cdpUp || procRunning;
+    const cliUsable = cliOn && (running || process.platform !== "linux");
 
+    this.cliFlagEnabled = cliOn;
     this.availability = {
       playwright: cdpUp,
-      cli: cliOn,
+      cli: cliUsable,
       // dev:cdp rides the CLI. Verified to coexist with a live Playwright
       // attachment (see EXCLUSIVE_DEBUGGER_LAYERS), so no exclusion here.
-      cliCdp: cliOn,
+      cliCdp: cliUsable,
       local: true,
     };
     this.availabilityCheckedAt = Date.now();
@@ -166,10 +176,16 @@ export class CapabilityRouter {
       return { value: await this.playwright.evaluate<T>(code), layer };
     }
     // The CLI returns strings, so ask the page to stringify before it crosses over.
-    const stdout = await this.cli.evaluate(`JSON.stringify((() => { ${code} })())`);
-    const { parseCliJson } = await import("../util/serialize.js");
+    // Use wrapExpression so IIFEs and bare expressions keep their return values —
+    // a naive `{ ${code} }` body discards an IIFE result and yields `(no output)`.
+    const { parseCliJson, wrapExpression } = await import("../util/serialize.js");
+    const stdout = await this.cli.evaluate(`JSON.stringify((() => { ${wrapExpression(code)} })())`);
     const parsed = parseCliJson<T>(stdout);
     if (parsed === undefined) {
+      const cleaned = stdout.trim().replace(/^=>\s*/, "");
+      if (cleaned === "" || cleaned === "(no output)") {
+        return { value: undefined as T, layer };
+      }
       throw new UobError(
         "EVAL_FAILED",
         "Expected JSON from the Obsidian CLI but could not parse it.",
@@ -213,11 +229,16 @@ export class CapabilityRouter {
 
     const onlyCli = preference.every((l) => l === "cli");
     if (onlyCli) {
-      return availability.cli ? obsidianNotRunning(this.config.cdpPort) : cliDisabled();
+      // Distinguish "flag off" from "flag on but process down" — collapsing these
+      // was the exact failure mode the four precondition states exist to avoid.
+      return this.cliFlagEnabled ? obsidianNotRunning(this.config.cdpPort) : cliDisabled();
     }
 
     // Mixed preference with nothing available means Obsidian is unreachable entirely.
     if (!availability.cli && !availability.playwright) {
+      if (this.cliFlagEnabled) {
+        return obsidianNotRunning(this.config.cdpPort);
+      }
       return new UobError(
         "OBSIDIAN_NOT_RUNNING",
         `No transport can serve "${capability}": the CLI is disabled and no CDP port is open.`,

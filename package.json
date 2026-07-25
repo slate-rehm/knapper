@@ -37,7 +37,8 @@
     ".mcp.json",
     ".cursor-plugin",
     ".claude-plugin",
-    ".codex-plugin"
+    ".codex-plugin",
+    ".agents"
   ],
   "type": "module",
   "main": "./dist/index.js",
@@ -65,8 +66,8 @@
   "devEngines": {
     "packageManager": {
       "name": "npm",
-      "version": "12.0.1",
-      "onFail": "download"
+      "version": ">=11",
+      "onFail": "warn"
     }
   },
   "engines": {

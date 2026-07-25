@@ -65,6 +65,23 @@ export function cliValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
 }
 
+export interface ClassifyCliOptions {
+  /**
+   * When true, leave bare `Error: …` lines for `classifyEvalOutput` — Obsidian
+   * prints in-page throws the same way it prints CLI failures, both with exit 0.
+   */
+  allowEvalErrors?: boolean;
+}
+
+/**
+ * Strip the optional `Error: ` prefix Obsidian adds to many CLI failures.
+ * Measured against 1.12.7: unknown commands print
+ * `Error: Command "…" not found. It may require a plugin to be enabled.`
+ */
+function cliErrorBody(trimmed: string): string {
+  return trimmed.replace(/^Error:\s*/, "");
+}
+
 /**
  * Classify CLI stdout, since Obsidian reports failures as ordinary output with
  * exit code 0 rather than as a non-zero exit. Pure, so the sentinel handling can
@@ -72,7 +89,11 @@ export function cliValue(value: string): string {
  *
  * Returns undefined when the output represents success.
  */
-export function classifyCliOutput(stdout: string, vault?: string): UobError | undefined {
+export function classifyCliOutput(
+  stdout: string,
+  vault?: string,
+  opts: ClassifyCliOptions = {},
+): UobError | undefined {
   const trimmed = stdout.trim();
 
   if (trimmed.includes(CLI_DISABLED_MARKER)) return cliDisabled();
@@ -84,19 +105,60 @@ export function classifyCliOutput(stdout: string, vault?: string): UobError | un
     });
   }
 
+  const body = cliErrorBody(trimmed);
+
   // A surviving single-dash token in the distro wrapper's flags file lands in
-  // argv[0] and comes back as an unknown command.
-  const unknownCommand = /^Command "(-[^"]*)" not found\./.exec(trimmed);
-  if (unknownCommand) {
+  // argv[0] and comes back as an unknown command. Live shape includes an
+  // optional `Error: ` prefix and a trailing hint sentence.
+  const argvCorruption = /^Command "(-[^"]*)" not found\./.exec(body);
+  if (argvCorruption) {
     return new UobError(
       "ARGV_CORRUPTION",
-      `Obsidian rejected "${unknownCommand[1]}" as a command name, which means a single-dash launch flag is leaking into CLI argv.`,
+      `Obsidian rejected "${argvCorruption[1]}" as a command name, which means a single-dash launch flag is leaking into CLI argv.`,
       {
         remediation:
           "Edit Obsidian's user-flags.conf and use a double dash (e.g. `--disable-gpu`), or remove the line.",
-        details: { token: unknownCommand[1] },
+        details: { token: argvCorruption[1] },
       },
     );
+  }
+
+  const unknownCommand = /^Command "([^"]*)" not found\./.exec(body);
+  if (unknownCommand) {
+    return new UobError(
+      "INVALID_ARGUMENT",
+      `Obsidian CLI command "${unknownCommand[1]}" was not found.`,
+      {
+        remediation:
+          "Check the command name (use completions / `help`), or enable the plugin that provides it.",
+        details: { command: unknownCommand[1], output: trimmed },
+      },
+    );
+  }
+
+  const missingPlugin = /^Plugin "([^"]*)" not found\./.exec(body);
+  if (missingPlugin) {
+    return new UobError("PLUGIN_NOT_FOUND", `Plugin "${missingPlugin[1]}" was not found.`, {
+      remediation: "Use the `plugins` CLI command (or obsidian_plugins) to list installed plugins.",
+      details: { pluginId: missingPlugin[1], output: trimmed },
+    });
+  }
+
+  if (body.startsWith("Missing required parameter:")) {
+    return new UobError("INVALID_ARGUMENT", trimmed, {
+      remediation: "Supply the missing parameter using the CLI's `key=value` grammar.",
+      details: { output: trimmed },
+    });
+  }
+
+  // Remaining `Error: …` lines are CLI failures (exit code is always 0). Skip in
+  // eval mode so in-page throws stay classified as EVAL_FAILED.
+  if (!opts.allowEvalErrors && trimmed.startsWith("Error:")) {
+    return new UobError("INVALID_ARGUMENT", trimmed, {
+      remediation:
+        "The Obsidian CLI reported a failure on stdout with exit code 0 — treat this message as the error.",
+      details: { output: trimmed },
+    });
   }
 
   return undefined;
@@ -105,13 +167,15 @@ export function classifyCliOutput(stdout: string, vault?: string): UobError | un
 /**
  * Detect an in-page throw in `eval` output.
  *
- * The CLI prints a successful result prefixed with `=> ` and a thrown error bare,
- * both with exit code 0. Without this distinction a thrown exception is
- * indistinguishable from an evaluation that returned an error-shaped string.
+ * The CLI prints a successful result prefixed with `=> ` and a thrown error bare
+ * (often as `Error: <message>` even for ReferenceError/SyntaxError), both with
+ * exit code 0. Undefined results are printed as the literal `(no output)`.
  */
 export function classifyEvalOutput(stdout: string, code: string): UobError | undefined {
   const trimmed = stdout.trim();
   if (trimmed.startsWith("=>")) return undefined;
+  // Obsidian's eval prints this literal for `undefined` / no return value.
+  if (trimmed === "" || trimmed === "(no output)") return undefined;
   if (!/^[A-Za-z]*Error: /.test(trimmed)) return undefined;
 
   return new UobError("EVAL_FAILED", `Evaluation threw in the Obsidian renderer: ${trimmed}`, {
@@ -145,6 +209,19 @@ export class ObsidianCli {
     const failure = classifyCliOutput(stdout, vault);
     if (failure) throw failure;
 
+    return stdout;
+  }
+
+  /** Raw exec + precondition classification, used by `evaluate` so in-page throws stay EVAL_FAILED. */
+  private async runForEval(
+    code: string,
+    vault: string | undefined,
+    timeoutMs: number,
+  ): Promise<string> {
+    const args = buildArgs(["eval", `code=${cliValue(code)}`], vault);
+    const { stdout } = await this.exec(args, timeoutMs, "eval");
+    const failure = classifyCliOutput(stdout, vault, { allowEvalErrors: true });
+    if (failure) throw failure;
     return stdout;
   }
 
@@ -208,7 +285,8 @@ export class ObsidianCli {
    * from a successful evaluation that happened to return an error-shaped string.
    */
   async evaluate(code: string): Promise<string> {
-    const stdout = await this.run(["eval", `code=${cliValue(code)}`]);
+    const vault = this.opts.vault;
+    const stdout = await this.runForEval(code, vault, this.opts.timeoutMs);
 
     const failure = classifyEvalOutput(stdout, code);
     if (failure) throw failure;

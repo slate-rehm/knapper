@@ -16,10 +16,12 @@ import {
 } from "../obsidian/helpers.js";
 import { cliValue } from "../connection/cli/exec.js";
 
-const vaultOpt = { vault: z.string().optional() };
+const vaultOpt = {
+  vault: z.string().optional().describe("Target vault name; overrides the session default"),
+};
 const fileRef = {
-  file: z.string().optional(),
-  path: z.string().optional(),
+  file: z.string().optional().describe("File name (wikilink resolution)"),
+  path: z.string().optional().describe("Exact vault-relative path"),
   ...vaultOpt,
 };
 
@@ -30,10 +32,12 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_themes",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "List installed community themes. " + CLOSED_VAULT_WARNING,
+    description:
+      "List installed community themes. Prefer over guessing theme ids before obsidian_theme_set. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      versions: z.boolean().optional(),
+      versions: z.boolean().optional().describe("Include installed theme versions"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -52,10 +56,12 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_theme",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "Show active theme or details for a named theme. " + CLOSED_VAULT_WARNING,
+    description:
+      "Show the active theme, or details for a named theme. Use obsidian_themes to list candidates. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      name: z.string().optional(),
+      name: z.string().optional().describe("Theme name; omit to show the active theme"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -74,7 +80,9 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_theme_set",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "Switch the active theme. " + CLOSED_VAULT_WARNING,
+    description:
+      "Switch the active theme (mutates appearance). Confirm the name with obsidian_themes first. " +
+      CLOSED_VAULT_WARNING,
     inputSchema: {
       name: z.string().describe("Theme name"),
       ...vaultOpt,
@@ -93,7 +101,9 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_snippets",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "List CSS snippets and enabled state. " + CLOSED_VAULT_WARNING,
+    description:
+      "List CSS snippets and whether each is enabled. Useful before toggling snippet files on disk. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: vaultOpt,
     handler: async (args) => {
@@ -114,11 +124,11 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     annotations: { readOnlyHint: true },
     inputSchema: {
       ...fileRef,
-      name: z.string().optional(),
-      total: z.boolean().optional(),
-      counts: z.boolean().optional(),
-      format: z.enum(["yaml", "json", "tsv"]).optional(),
-      active: z.boolean().optional(),
+      name: z.string().optional().describe("Filter to a single property name"),
+      total: z.boolean().optional().describe("Return only a total count"),
+      counts: z.boolean().optional().describe("Include usage counts"),
+      format: z.enum(["yaml", "json", "tsv"]).optional().describe("Output format"),
+      active: z.boolean().optional().describe("Limit to the active file"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -142,11 +152,16 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_property_set",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "Set a frontmatter property on a file. " + CLOSED_VAULT_WARNING,
+    description:
+      "Set a frontmatter property on a file (writes YAML). Prefer over editing markdown by hand. " +
+      CLOSED_VAULT_WARNING,
     inputSchema: {
-      name: z.string(),
-      value: z.string(),
-      type: z.enum(["text", "list", "number", "checkbox", "date", "datetime"]).optional(),
+      name: z.string().describe("Frontmatter property name"),
+      value: z.string().describe("Property value (list items as CLI grammar requires)"),
+      type: z
+        .enum(["text", "list", "number", "checkbox", "date", "datetime"])
+        .optional()
+        .describe("Property type hint for Obsidian"),
       ...fileRef,
     },
     handler: async (args) => {
@@ -166,9 +181,10 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_property_remove",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "Remove a frontmatter property. " + CLOSED_VAULT_WARNING,
+    description:
+      "Remove a frontmatter property from a file (mutates YAML). " + CLOSED_VAULT_WARNING,
     inputSchema: {
-      name: z.string(),
+      name: z.string().describe("Frontmatter property name to remove"),
       ...fileRef,
     },
     handler: async (args) => {
@@ -187,10 +203,12 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_property_read",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "Read one property value from a file. " + CLOSED_VAULT_WARNING,
+    description:
+      "Read one frontmatter property value from a file. Prefer over parsing the whole note. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      name: z.string(),
+      name: z.string().describe("Frontmatter property name to read"),
       ...fileRef,
     },
     handler: async (args) => {
@@ -209,14 +227,16 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_tags",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "List tags in the vault or for a file. " + CLOSED_VAULT_WARNING,
+    description:
+      "List tags in the vault or for a file. Prefer over DOM scraping the tags view. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
       ...fileRef,
-      counts: z.boolean().optional(),
-      sort: z.enum(["count"]).optional(),
-      format: z.enum(["json", "tsv", "csv"]).optional(),
-      active: z.boolean().optional(),
+      counts: z.boolean().optional().describe("Include tag usage counts"),
+      sort: z.enum(["count"]).optional().describe("Sort tags by count"),
+      format: z.enum(["json", "tsv", "csv"]).optional().describe("Output format (default json)"),
+      active: z.boolean().optional().describe("Limit to the active file"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -239,16 +259,18 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_tasks",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "List markdown tasks (- [ ] / - [x]). " + CLOSED_VAULT_WARNING,
+    description:
+      "List markdown checkbox tasks (- [ ] / - [x]) across the vault or one file. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
       ...fileRef,
-      done: z.boolean().optional(),
-      todo: z.boolean().optional(),
-      verbose: z.boolean().optional(),
-      format: z.enum(["json", "tsv", "csv"]).optional(),
-      active: z.boolean().optional(),
-      daily: z.boolean().optional(),
+      done: z.boolean().optional().describe("Only completed tasks"),
+      todo: z.boolean().optional().describe("Only incomplete tasks"),
+      verbose: z.boolean().optional().describe("Include extra task detail"),
+      format: z.enum(["json", "tsv", "csv"]).optional().describe("Output format (default json)"),
+      active: z.boolean().optional().describe("Limit to the active file"),
+      daily: z.boolean().optional().describe("Limit to the daily note"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -274,9 +296,14 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     toolset: "authoring",
     capability: "cliCommand",
     description:
-      "Open or read today's daily note (requires daily-notes plugin). " + CLOSED_VAULT_WARNING,
+      "Open today's daily note (default) or read its content with read=true. Requires the daily-notes " +
+      "core plugin. Opening focuses the editor. " +
+      CLOSED_VAULT_WARNING,
     inputSchema: {
-      read: z.boolean().optional(),
+      read: z
+        .boolean()
+        .optional()
+        .describe("When true, read today's note content instead of opening it (default opens)"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -293,10 +320,12 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_daily_append",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "Append to the daily note. " + CLOSED_VAULT_WARNING,
+    description:
+      "Append markdown to today's daily note (creates it if needed). Prefer over manual open+type. " +
+      CLOSED_VAULT_WARNING,
     inputSchema: {
-      content: z.string(),
-      inline: z.boolean().optional(),
+      content: z.string().describe("Markdown to append to today's daily note"),
+      inline: z.boolean().optional().describe("Append inline without a leading newline"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -315,7 +344,9 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_templates",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "List template files. " + CLOSED_VAULT_WARNING,
+    description:
+      "List template files from the configured templates folder. Errors if no template folder is set. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: vaultOpt,
     handler: async (args) => {
@@ -331,12 +362,12 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_bookmarks",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "List bookmarks. " + CLOSED_VAULT_WARNING,
+    description: "List bookmarks from the bookmarks core plugin. " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      total: z.boolean().optional(),
-      verbose: z.boolean().optional(),
-      format: z.enum(["json", "tsv", "csv"]).optional(),
+      total: z.boolean().optional().describe("Return only a total count"),
+      verbose: z.boolean().optional().describe("Include extra bookmark detail"),
+      format: z.enum(["json", "tsv", "csv"]).optional().describe("Output format (default json)"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -358,11 +389,13 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_outline",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "Show heading outline for a file. " + CLOSED_VAULT_WARNING,
+    description:
+      "Show the heading outline for a file. Prefer over scraping the outline pane DOM. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
       ...fileRef,
-      format: z.enum(["tree", "md", "json"]).optional(),
+      format: z.enum(["tree", "md", "json"]).optional().describe("Outline format (default tree)"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -382,7 +415,9 @@ export function registerAuthoringTools(ctx: ServerContext): void {
     name: "obsidian_history",
     toolset: "authoring",
     capability: "cliCommand",
-    description: "List local file history versions. " + CLOSED_VAULT_WARNING,
+    description:
+      "List local file history versions for a note (requires file-recovery). Pair with obsidian_diff. " +
+      CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: fileRef,
     handler: async (args) => {

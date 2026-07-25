@@ -9,7 +9,7 @@
  * restarts are routine during plugin development.
  */
 
-import type { Page } from "playwright-core";
+import type { BrowserContext, Page } from "playwright-core";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { Logger } from "../util/logger.js";
 import { consoleMessageText } from "./console-format.js";
@@ -34,10 +34,15 @@ function toLevel(type: string): LogLevel {
 }
 
 export class TelemetryCapture {
-  /** Pages already wired, tracked so re-arming does not double-subscribe. */
+  /** Pages already wired for console/pageerror, tracked so re-arming does not double-subscribe. */
   private readonly wired = new WeakSet<Page>();
+  /** Pages that already have network listeners (separate so network can be enabled later). */
+  private readonly networkWired = new WeakSet<Page>();
+  /** Context we attached the `page` listener to; changes after CDP reconnect. */
+  private subscribedContext?: BrowserContext;
   private armed = false;
   private networkEnabled = false;
+  private arming?: Promise<{ armed: boolean; pages: number }>;
 
   constructor(
     private readonly router: CapabilityRouter,
@@ -58,9 +63,29 @@ export class TelemetryCapture {
    * attached Obsidian window. Safe to call repeatedly.
    */
   async arm(opts: { network?: boolean } = {}): Promise<{ armed: boolean; pages: number }> {
+    if (this.arming) {
+      const pending = await this.arming;
+      // A concurrent arm({network:true}) must still enable network after the
+      // in-flight arm without network finishes.
+      if (opts.network === true && !this.networkEnabled && this.armed) {
+        return this.arm({ network: true });
+      }
+      return pending;
+    }
+
+    this.arming = this.doArm(opts);
+    try {
+      return await this.arming;
+    } finally {
+      this.arming = undefined;
+    }
+  }
+
+  private async doArm(opts: { network?: boolean }): Promise<{ armed: boolean; pages: number }> {
     const availability = await this.router.refreshAvailability();
     if (!availability.playwright) {
       this.armed = false;
+      this.subscribedContext = undefined;
       return { armed: false, pages: 0 };
     }
 
@@ -68,10 +93,17 @@ export class TelemetryCapture {
     const context = await session.connect();
     this.router.claimDebugger("playwright");
 
+    // After a CDP reconnect Playwright hands us a new BrowserContext. The old
+    // `page` listener dies with the previous context, so we must re-subscribe.
+    if (this.subscribedContext !== context) {
+      this.armed = false;
+      this.subscribedContext = context;
+    }
+
     // Catch windows opened after we attach (popouts, new vault windows).
     if (!this.armed) {
       context.on("page", (page) => {
-        void this.wirePage(page, opts.network === true).catch((e) =>
+        void this.wirePage(page, this.networkEnabled || opts.network === true).catch((e) =>
           this.logger.debug("failed to wire new page", { error: String(e) }),
         );
       });
@@ -80,7 +112,7 @@ export class TelemetryCapture {
     let count = 0;
     for (const page of context.pages()) {
       if (page.isClosed()) continue;
-      if (await this.wirePage(page, opts.network === true)) count++;
+      if (await this.wirePage(page, opts.network === true || this.networkEnabled)) count++;
     }
 
     this.armed = true;
@@ -90,49 +122,58 @@ export class TelemetryCapture {
   }
 
   private async wirePage(page: Page, network: boolean): Promise<boolean> {
-    if (this.wired.has(page)) return false;
-    this.wired.add(page);
+    let changed = false;
 
-    page.on("console", (msg) => {
-      const location = msg.location();
-      const url = location?.url;
-      const level = toLevel(msg.type());
-      const meta =
-        location?.lineNumber !== undefined
-          ? { line: location.lineNumber, column: location.columnNumber }
-          : undefined;
+    if (!this.wired.has(page)) {
+      this.wired.add(page);
+      changed = true;
 
-      void (async () => {
-        const text = await consoleMessageText(msg);
+      page.on("console", (msg) => {
+        const location = msg.location();
+        const url = location?.url;
+        const level = toLevel(msg.type());
+        const meta =
+          location?.lineNumber !== undefined
+            ? { line: location.lineNumber, column: location.columnNumber }
+            : undefined;
+
+        void (async () => {
+          const text = await consoleMessageText(msg);
+          this.store.add({
+            source: "console",
+            level,
+            text,
+            ...(url ? { url } : {}),
+            ...(meta !== undefined ? { meta } : {}),
+          });
+        })().catch((e) => this.logger.debug("console format failed", { error: String(e) }));
+      });
+
+      page.on("pageerror", (error) => {
         this.store.add({
-          source: "console",
-          level,
-          text,
-          ...(url ? { url } : {}),
-          ...(meta !== undefined ? { meta } : {}),
+          source: "pageerror",
+          level: "error",
+          text: error.message,
+          ...(error.stack !== undefined ? { stack: error.stack } : {}),
         });
-      })().catch((e) => this.logger.debug("console format failed", { error: String(e) }));
-    });
-
-    page.on("pageerror", (error) => {
-      this.store.add({
-        source: "pageerror",
-        level: "error",
-        text: error.message,
-        ...(error.stack !== undefined ? { stack: error.stack } : {}),
       });
-    });
 
-    page.on("crash", () => {
-      this.store.add({
-        source: "exception",
-        level: "error",
-        text: "Obsidian renderer crashed.",
+      page.on("crash", () => {
+        this.store.add({
+          source: "exception",
+          level: "error",
+          text: "Obsidian renderer crashed.",
+        });
       });
-    });
+    }
 
-    if (network) await this.wireNetwork(page);
-    return true;
+    if (network && !this.networkWired.has(page)) {
+      this.networkWired.add(page);
+      await this.wireNetwork(page);
+      changed = true;
+    }
+
+    return changed;
   }
 
   /**

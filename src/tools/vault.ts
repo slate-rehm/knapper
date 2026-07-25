@@ -36,9 +36,9 @@ export function registerVaultTools(ctx: ServerContext): void {
       "List files in the vault, optionally by folder or extension. " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      folder: z.string().optional(),
-      ext: z.string().optional(),
-      total: z.boolean().optional(),
+      folder: z.string().optional().describe("Limit listing to this folder path"),
+      ext: z.string().optional().describe("File extension filter, e.g. md"),
+      total: z.boolean().optional().describe("Return only the count of matching files"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -63,8 +63,8 @@ export function registerVaultTools(ctx: ServerContext): void {
     description: "List folders in the vault. " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      folder: z.string().optional(),
-      total: z.boolean().optional(),
+      folder: z.string().optional().describe("Limit listing under this folder path"),
+      total: z.boolean().optional().describe("Return only the folder count"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -105,21 +105,28 @@ export function registerVaultTools(ctx: ServerContext): void {
     name: "obsidian_create",
     toolset: "vault",
     capability: "cliCommand",
-    description: "Create a new note. " + CLOSED_VAULT_WARNING,
+    description:
+      "Create a new note (side effect: writes a file; optional open focuses the editor). " +
+      CLOSED_VAULT_WARNING,
     inputSchema: {
-      name: z.string().optional(),
-      path: z.string().optional(),
-      content: z.string().optional(),
-      template: z.string().optional(),
-      overwrite: z.boolean().optional(),
-      open: z.boolean().optional(),
+      name: z
+        .string()
+        .optional()
+        .describe("Note name (wikilink-style); prefer path for exact location"),
+      path: z.string().optional().describe("Exact vault-relative path for the new note"),
+      content: z.string().optional().describe("Initial markdown body (newlines escaped for CLI)"),
+      template: z.string().optional().describe("Template name to apply when creating"),
+      overwrite: z.boolean().optional().describe("Overwrite if the path already exists"),
+      open: z.boolean().optional().describe("Open the note after creating it"),
       ...vaultOpt,
     },
     handler: async (args) => {
       const tokens: string[] = [];
       pushKv(tokens, "name", args.name as string | undefined);
       pushKv(tokens, "path", args.path as string | undefined);
-      pushKv(tokens, "content", args.content as string | undefined);
+      if (args.content !== undefined) {
+        tokens.push(`content=${cliValue(args.content as string)}`);
+      }
       pushKv(tokens, "template", args.template as string | undefined);
       pushFlag(tokens, "overwrite", args.overwrite as boolean | undefined);
       pushFlag(tokens, "open", args.open as boolean | undefined);
@@ -140,7 +147,7 @@ export function registerVaultTools(ctx: ServerContext): void {
     inputSchema: {
       ...fileRef,
       content: z.string().describe("Content to append"),
-      inline: z.boolean().optional(),
+      inline: z.boolean().optional().describe("Append on the same line without a leading newline"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -163,8 +170,8 @@ export function registerVaultTools(ctx: ServerContext): void {
     description: "Prepend markdown to a file. " + CLOSED_VAULT_WARNING,
     inputSchema: {
       ...fileRef,
-      content: z.string(),
-      inline: z.boolean().optional(),
+      content: z.string().describe("Content to prepend"),
+      inline: z.boolean().optional().describe("Prepend without forcing a trailing newline"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -184,11 +191,13 @@ export function registerVaultTools(ctx: ServerContext): void {
     name: "obsidian_delete",
     toolset: "vault",
     capability: "cliCommand",
-    description: "Delete a file (trash by default). " + CLOSED_VAULT_WARNING,
+    description:
+      "Delete a file (moves to trash by default; permanent=true skips trash). " +
+      CLOSED_VAULT_WARNING,
     annotations: { destructiveHint: true },
     inputSchema: {
       ...fileRef,
-      permanent: z.boolean().optional(),
+      permanent: z.boolean().optional().describe("Permanently delete instead of moving to trash"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -230,7 +239,9 @@ export function registerVaultTools(ctx: ServerContext): void {
     name: "obsidian_rename",
     toolset: "vault",
     capability: "cliCommand",
-    description: "Rename a file. " + CLOSED_VAULT_WARNING,
+    description:
+      "Rename a file (updates links when Obsidian's rename supports it). " + CLOSED_VAULT_WARNING,
+    annotations: { destructiveHint: true },
     inputSchema: {
       ...fileRef,
       to: z.string().describe("New name or path"),
@@ -274,7 +285,10 @@ export function registerVaultTools(ctx: ServerContext): void {
     description: "Open a file in the editor (may focus or spawn tabs). " + CLOSED_VAULT_WARNING,
     inputSchema: {
       ...fileRef,
-      newtab: z.boolean().optional(),
+      newtab: z
+        .boolean()
+        .optional()
+        .describe("Open in a new tab instead of replacing the active leaf"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -296,7 +310,7 @@ export function registerVaultTools(ctx: ServerContext): void {
     description: "List recently opened files. " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      limit: z.number().optional(),
+      limit: z.number().optional().describe("Maximum number of recent files to return"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -319,8 +333,8 @@ export function registerVaultTools(ctx: ServerContext): void {
     description: "List open tabs including sidebar panels when all=true. " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      ids: z.boolean().optional(),
-      all: z.boolean().optional(),
+      ids: z.boolean().optional().describe("Include workspace item ids in the listing"),
+      all: z.boolean().optional().describe("Include sidebar panels as well as main tabs"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -346,10 +360,10 @@ export function registerVaultTools(ctx: ServerContext): void {
       CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      query: z.string(),
+      query: z.string().describe("Full-text search query"),
       path: z.string().optional().describe("Folder path filter"),
-      limit: z.number().optional(),
-      case: z.boolean().optional(),
+      limit: z.number().optional().describe("Maximum number of hits to return"),
+      case: z.boolean().optional().describe("Case-sensitive search when true"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -387,9 +401,12 @@ export function registerVaultTools(ctx: ServerContext): void {
 
   const graphSchema = {
     ...fileRef,
-    counts: z.boolean().optional(),
-    total: z.boolean().optional(),
-    format: z.enum(["json", "tsv", "csv"]).optional(),
+    counts: z.boolean().optional().describe("Include occurrence counts"),
+    total: z.boolean().optional().describe("Return only a total count"),
+    format: z
+      .enum(["json", "tsv", "csv"])
+      .optional()
+      .describe("Output format (default json when supported)"),
   };
 
   registry.add({
@@ -422,10 +439,10 @@ export function registerVaultTools(ctx: ServerContext): void {
     description: "List unresolved wikilinks in the vault. " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      total: z.boolean().optional(),
-      counts: z.boolean().optional(),
-      verbose: z.boolean().optional(),
-      format: z.enum(["json", "tsv", "csv"]).optional(),
+      total: z.boolean().optional().describe("Return only a total count"),
+      counts: z.boolean().optional().describe("Include occurrence counts"),
+      verbose: z.boolean().optional().describe("Include more detail per unresolved link"),
+      format: z.enum(["json", "tsv", "csv"]).optional().describe("Output format (default json)"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -451,8 +468,8 @@ export function registerVaultTools(ctx: ServerContext): void {
     description: "List notes with no incoming links. " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      total: z.boolean().optional(),
-      format: z.enum(["json", "tsv", "csv"]).optional(),
+      total: z.boolean().optional().describe("Return only a total count"),
+      format: z.enum(["json", "tsv", "csv"]).optional().describe("Output format (default json)"),
       ...vaultOpt,
     },
     handler: async (args) => {

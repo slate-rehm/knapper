@@ -65,7 +65,7 @@ Hosts disagree on plugin manifest variables, so configure via environment:
 - `OBSIDIAN_BIN` — path to executable
 - `OBSIDIAN_VAULT` — default vault name for CLI
 
-See repository README for the full table (`UOB_*` toolsets, telemetry, timeouts).
+See repository README for the full table (`UOB_*` toolsets, telemetry, timeouts). Add `vault`, `devtools`, or `authoring` via `UOB_TOOLSETS` when you need those opt-in surfaces (properties/tags/tasks live under **authoring**, not vault).
 
 ## Linux distro wrappers
 

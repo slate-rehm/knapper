@@ -9,12 +9,12 @@ UI tools require **CDP**: Obsidian must have been **cold-started** with `--remot
 
 ## Tool split
 
-| Need                           | Use                                                           |
-| ------------------------------ | ------------------------------------------------------------- |
-| Command palette actions        | `obsidian_command` or `obsidian_exercise_command`             |
-| Vault files, plugin state      | `obsidian_eval` (`app.vault`, `app.plugins`, …)               |
-| Clicks, typing, ARIA tree      | `browser_*` tools (proxied from `@playwright/mcp`)            |
-| Smaller Obsidian-specific tree | Prefer `browser_snapshot` scoped to a selector when available |
+| Need                           | Use                                                         |
+| ------------------------------ | ----------------------------------------------------------- |
+| Command palette actions        | `obsidian_command` or `obsidian_exercise_command`           |
+| Vault files, plugin state      | `obsidian_eval` (`app.vault`, `app.plugins`, …)             |
+| Clicks, typing, ARIA tree      | `browser_*` tools (proxied from `@playwright/mcp`)          |
+| Smaller Obsidian-specific tree | Prefer **`obsidian_snapshot`** (scope: leaf/modal/settings) |
 
 **Default rule:** prefer `obsidian_command` over clicking through menus — fewer flaky steps and stable ids.
 
@@ -83,7 +83,14 @@ Popouts often report `about:blank` as URL — use title + eval, not URL alone.
 
 ## Screenshots
 
-`browser_take_screenshot` for UI proof. Dev-cycle composites may also return images from `obsidian_dev_cycle`.
+Two different captures — do not conflate them:
+
+| Tool                      | What it captures                                                     |
+| ------------------------- | -------------------------------------------------------------------- |
+| `browser_take_screenshot` | Playwright **web contents** (page pixels)                            |
+| `obsidian_screenshot`     | Electron **`capturePage()`** of the **OS window** (devtools toolset) |
+
+Use `browser_take_screenshot` for UI proof during automation. Dev-cycle composites may also return images from `obsidian_dev_cycle`.
 
 Blocked browser tools (would harm a daily-driver window): navigate, close, resize, file upload, storage state, etc. — the server filters these.
 

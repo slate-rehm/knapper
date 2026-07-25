@@ -33,7 +33,7 @@ Cursor plugin `variables` and Claude Code `userConfig` do not unify across hosts
 
 ## Toolsets
 
-See README for descriptions. Default: `core`, `ui`, `telemetry`, `plugin-dev`. Add `vault` for note/file CRUD; `devtools` and `authoring` for niche workflows.
+See README for descriptions. Default: `core`, `ui`, `telemetry`, `plugin-dev`. Add `vault` for note/file CRUD; `authoring` for properties/tags/tasks/themes/daily notes; `devtools` for DOM/CSS/CDP and OS-window screenshots.
 
 ## Example MCP `env` block
 

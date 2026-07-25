@@ -67,7 +67,7 @@ export async function createServerContext(config: Config): Promise<ServerContext
   const telemetry = new TelemetryStore(config.telemetryBuffer);
   const capture = new TelemetryCapture(router, telemetry, logger.child("telemetry"));
   const browserProxy = new BrowserProxy(config, router, logger.child("browser"));
-  const registry = new ToolRegistry(config.enabledToolsets, logger);
+  const registry = new ToolRegistry(config.enabledToolsets, logger, telemetry);
 
   const ctx: ServerContext = {
     config,

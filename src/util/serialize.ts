@@ -48,13 +48,46 @@ export function renderResult(value: unknown, cap = DEFAULT_RESULT_CAP): Truncate
 /**
  * Parse CLI stdout that is expected to be JSON, tolerating the `=> ` prefix the
  * `eval` command prepends and surrounding whitespace.
+ *
+ * Obsidian prints the literal `(no output)` when an eval returns `undefined`.
  */
 export function parseCliJson<T = unknown>(stdout: string): T | undefined {
   const cleaned = stdout.trim().replace(/^=>\s*/, "");
-  if (cleaned === "") return undefined;
+  if (cleaned === "" || cleaned === "(no output)") return undefined;
   try {
     return JSON.parse(cleaned) as T;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Allow both expression and statement bodies for renderer eval.
+ *
+ * A bare expression gets an implicit return so callers can pass
+ * `app.vault.getName()` as well as a full statement body or an IIFE.
+ * Shared by the Playwright session and the CLI `evaluateJson` path — the CLI
+ * path previously wrapped with `{ ${code} }` and discarded IIFE return values.
+ *
+ * IIFEs must be detected *before* the "contains `;`" statement heuristic: an
+ * IIFE body almost always has semicolons, and returning it unchanged leaves
+ * `(() => { … })()` as an expression statement whose value is discarded.
+ */
+export function wrapExpression(code: string): string {
+  const trimmed = code.trim();
+  const looksLikeStatements =
+    /^(?:const|let|var|return|if|for|while|switch|try|throw|function|class)\b/.test(trimmed);
+  if (looksLikeStatements) {
+    return trimmed.includes("return") ? trimmed : `${trimmed}\nreturn undefined;`;
+  }
+
+  // IIFE: (() => { … })() or (function () { … })(), optional trailing semicolon.
+  if (/^\([\s\S]*\)\s*\(\s*\)\s*;?\s*$/.test(trimmed)) {
+    return `return (${trimmed.replace(/;?\s*$/, "")});`;
+  }
+
+  if (trimmed.includes(";") || trimmed.includes("\n")) {
+    return trimmed.includes("return") ? trimmed : `${trimmed}\nreturn undefined;`;
+  }
+  return `return (${trimmed});`;
 }

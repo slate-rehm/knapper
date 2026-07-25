@@ -17,6 +17,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import type { Logger } from "../../util/logger.js";
 import { appUnavailable, cdpPortClosed, UobError } from "../../util/errors.js";
+import { wrapExpression } from "../../util/serialize.js";
 import { parseObsidianTitle, OBSIDIAN_MAIN_URL } from "./discover.js";
 
 export interface PlaywrightSessionOptions {
@@ -170,7 +171,10 @@ export class PlaywrightSession {
     }
 
     const main = windows.find((w) => w.kind === "main");
-    return (main ?? windows[0]!).page;
+    if (main) return main.page;
+    const fallback = windows[0];
+    if (!fallback) throw appUnavailable();
+    return fallback.page;
   }
 
   /** Ask the renderer which vault it has open. Authoritative, unlike the title. */
@@ -233,18 +237,4 @@ export class PlaywrightSession {
     this.context = undefined;
     if (browser?.isConnected()) await browser.close().catch(() => undefined);
   }
-}
-
-/**
- * Allow both expression and statement bodies. A bare expression gets an implicit
- * return so `obsidian_eval` accepts `app.vault.getName()` as well as a full body.
- */
-function wrapExpression(code: string): string {
-  const trimmed = code.trim();
-  const looksLikeStatements =
-    /^(?:const|let|var|return|if|for|while|switch|try|throw|function|class)\b/.test(trimmed);
-  if (looksLikeStatements || trimmed.includes(";") || trimmed.includes("\n")) {
-    return trimmed.includes("return") ? trimmed : `${trimmed}\nreturn undefined;`;
-  }
-  return `return (${trimmed});`;
 }

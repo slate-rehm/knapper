@@ -81,9 +81,12 @@ export function registerObsidianTools(ctx: ServerContext): void {
       CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      filter: z.enum(["core", "community"]).optional(),
-      versions: z.boolean().optional(),
-      vault: z.string().optional(),
+      filter: z
+        .enum(["core", "community"])
+        .optional()
+        .describe("Limit to core or community plugins"),
+      versions: z.boolean().optional().describe("Include plugin versions"),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -101,7 +104,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
 
   const pluginIdSchema = {
     id: z.string().describe("Plugin id"),
-    vault: z.string().optional(),
+    vault: z.string().optional().describe("Target vault name; overrides the session default"),
   };
 
   registry.add({
@@ -163,7 +166,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
       CLOSED_VAULT_WARNING,
     inputSchema: {
       id: z.string().describe("Community plugin id"),
-      vault: z.string().optional(),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const { stdout } = await runCli(router, {
@@ -226,7 +229,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
         .record(z.string(), z.unknown())
         .optional()
         .describe("If set, replaces saved settings"),
-      vault: z.string().optional(),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const id = args.id as string;
@@ -249,7 +252,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
     annotations: { readOnlyHint: true },
     inputSchema: {
       id: z.string().describe("Plugin id prefix filter"),
-      vault: z.string().optional(),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const prefix = args.id as string;
@@ -271,7 +274,9 @@ export function registerObsidianTools(ctx: ServerContext): void {
       "you need JSON rather than a tree drawing. " +
       CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
-    inputSchema: { vault: z.string().optional() },
+    inputSchema: {
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
+    },
     handler: async () => {
       const code = `(() => {
         const leaves = [];
@@ -302,6 +307,8 @@ export function registerObsidianTools(ctx: ServerContext): void {
     capability: "evaluate",
     description:
       "Show a transient Notice banner in the Obsidian UI — useful to confirm an automation step ran. " +
+      "Notices render into `.notice-container` on `document.body`, outside `.workspace`, so workspace-scoped " +
+      "snapshots will miss them. " +
       CLOSED_VAULT_WARNING,
     inputSchema: {
       message: z.string().describe("Notice text"),
@@ -310,7 +317,8 @@ export function registerObsidianTools(ctx: ServerContext): void {
     handler: async (args) => {
       const message = args.message as string;
       const duration = (args.duration as number | undefined) ?? 4000;
-      const code = `new Notice(${JSON.stringify(message)}, ${duration})`;
+      // Return a primitive — Notice objects are circular and fail Playwright serialization.
+      const code = `(() => { new Notice(${JSON.stringify(message)}, ${duration}); return true; })()`;
       await router.evaluate(code);
       return contentOutcome(`Notice shown: ${message}`);
     },
@@ -326,7 +334,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
     annotations: { readOnlyHint: true },
     inputSchema: {
       ids: z.boolean().optional().describe("Include workspace item ids"),
-      vault: z.string().optional(),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -345,7 +353,9 @@ export function registerObsidianTools(ctx: ServerContext): void {
     toolset: "core",
     capability: "cliCommand",
     description: "Reload the current vault (re-reads plugins and config). " + CLOSED_VAULT_WARNING,
-    inputSchema: { vault: z.string().optional() },
+    inputSchema: {
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
+    },
     handler: async (args) => {
       const { stdout } = await runCli(router, {
         command: "reload",

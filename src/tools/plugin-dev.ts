@@ -16,6 +16,7 @@ export function registerPluginDevTools(ctx: ServerContext): void {
   registry.add({
     name: "obsidian_dev_cycle",
     toolset: "plugin-dev",
+    handlesOwnTelemetry: true,
     description:
       "Answer “did my plugin change work?” in one call: insert a telemetry mark, reload the plugin " +
       "via CLI, optionally open a note, wait for the UI to settle, capture a screenshot, and return " +
@@ -59,6 +60,7 @@ export function registerPluginDevTools(ctx: ServerContext): void {
     name: "obsidian_exercise_command",
     toolset: "plugin-dev",
     capability: "evaluate",
+    handlesOwnTelemetry: true,
     description:
       "Run an Obsidian command-palette command by id (via app.commands.executeCommandById), wait for " +
       "the UI to settle, and return workspace state before/after plus new console output since a " +
@@ -86,6 +88,7 @@ export function registerPluginDevTools(ctx: ServerContext): void {
   registry.add({
     name: "obsidian_reset_state",
     toolset: "plugin-dev",
+    handlesOwnTelemetry: true,
     description:
       "Disable a plugin, reset its data.json to {}, and re-enable it for a clean-slate test run. " +
       "Returns the previous data.json contents so you can restore them. Side effects: plugin unload/load; " +

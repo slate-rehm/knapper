@@ -26,13 +26,13 @@ export type Toolset = (typeof TOOLSETS)[number];
 export const DEFAULT_TOOLSETS: readonly Toolset[] = ["core", "ui", "telemetry", "plugin-dev"];
 
 export const TOOLSET_DESCRIPTIONS: Record<Toolset, string> = {
-  core: "Status, doctor, launch, eval, and command execution.",
+  core: "Status, doctor, launch, eval, CLI, and command-palette execution.",
   ui: "Browser automation over CDP (proxied from @playwright/mcp) plus Obsidian-scoped snapshots.",
   telemetry: "Console, error, and network capture with cursor-based tailing.",
   "plugin-dev": "Plugin reload, manifest and settings inspection, and dev-cycle composites.",
-  vault: "File and note CRUD, search, properties, tags, and tasks.",
-  devtools: "Raw CDP passthrough, DOM/CSS inspection, and mobile emulation.",
-  authoring: "Themes, snippets, daily notes, and metadata authoring.",
+  vault: "File and note CRUD, search, tabs, and graph queries (backlinks, orphans, aliases).",
+  devtools: "Raw CDP passthrough, DOM/CSS inspection, OS-window screenshots, and mobile emulation.",
+  authoring: "Themes, snippets, frontmatter properties, tags, tasks, daily notes, and templates.",
 };
 
 export function isToolset(value: string): value is Toolset {

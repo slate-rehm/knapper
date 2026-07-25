@@ -18,7 +18,9 @@ import {
 import { cliValue } from "../connection/cli/exec.js";
 import { parseCliJson } from "../util/serialize.js";
 
-const vaultOpt = { vault: z.string().optional() };
+const vaultOpt = {
+  vault: z.string().optional().describe("Target vault name; overrides the session default"),
+};
 
 export function registerDevtoolsTools(ctx: ServerContext): void {
   const { registry, router, config } = ctx;
@@ -28,16 +30,16 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
     toolset: "devtools",
     capability: "cliCommand",
     description:
-      "Query the Obsidian renderer DOM by CSS selector via `dev:dom`. Prefer browser_snapshot for " +
-      "interaction refs; use this for HTML/text extraction. " +
+      "Query the Obsidian renderer DOM by CSS selector via `dev:dom`. Prefer browser_snapshot / " +
+      "obsidian_snapshot for interaction refs; use this for HTML/text/attribute extraction. " +
       CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      selector: z.string(),
-      text: z.boolean().optional(),
-      all: z.boolean().optional(),
-      attr: z.string().optional(),
-      css: z.string().optional(),
+      selector: z.string().describe("CSS selector to query in the renderer"),
+      text: z.boolean().optional().describe("Return textContent instead of outer HTML"),
+      all: z.boolean().optional().describe("Match all elements (default: first match only)"),
+      attr: z.string().optional().describe("Return a single attribute value instead of HTML"),
+      css: z.string().optional().describe("Return a computed CSS property value"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -64,8 +66,8 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
       CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      selector: z.string(),
-      prop: z.string().optional(),
+      selector: z.string().describe("CSS selector whose computed styles to inspect"),
+      prop: z.string().optional().describe("Single CSS property name to report (optional)"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -86,14 +88,14 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
     capability: "rawCdp",
     description:
       "Raw Chrome DevTools Protocol passthrough via Obsidian's `dev:cdp` (webContents.debugger). " +
-      "Coexists with Playwright per verified Gate B. " +
+      "Coexists with Playwright per verified Gate B. Prefer obsidian_eval for ordinary JS. " +
       CLOSED_VAULT_WARNING,
     inputSchema: {
       method: z.string().describe("CDP method name, e.g. Runtime.evaluate"),
       params: z
         .record(z.string(), z.unknown())
         .optional()
-        .describe("Method parameters as JSON object"),
+        .describe("Method parameters as a JSON object (serialized into params=…)"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -118,8 +120,8 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
     description:
       "Toggle Obsidian mobile layout emulation via `dev:mobile`. " + CLOSED_VAULT_WARNING,
     inputSchema: {
-      on: z.boolean().optional().describe("Enable emulation"),
-      off: z.boolean().optional().describe("Disable emulation"),
+      on: z.boolean().optional().describe("Enable mobile layout emulation"),
+      off: z.boolean().optional().describe("Disable mobile layout emulation"),
       ...vaultOpt,
     },
     handler: async (args) => {
@@ -141,12 +143,14 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
     capability: "cliCommand",
     description:
       "Show errors captured by Obsidian's dev harness (`dev:errors`). Prefer obsidian_logs for " +
-      "live Playwright console streaming. " +
+      "live Playwright console streaming. Pass clear=true to wipe the harness buffer (mutates). " +
       CLOSED_VAULT_WARNING,
-    annotations: { readOnlyHint: true },
     inputSchema: {
-      clear: z.boolean().optional(),
-      ...vaultOpt,
+      clear: z
+        .boolean()
+        .optional()
+        .describe("When true, clear the captured error list after reading (mutates)"),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const tokens: string[] = [];
@@ -165,13 +169,13 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
     toolset: "devtools",
     capability: "screenshot",
     description:
-      "Capture the Obsidian OS window via Electron `capturePage()` (`dev:screenshot`). This is the " +
-      "full native window, complementary to Playwright web-contents screenshots in browser_* tools. " +
+      "Capture the Obsidian **OS window** via Electron `capturePage()` (`dev:screenshot`), including " +
+      "native chrome. This is different from browser_take_screenshot, which captures web contents only. " +
       CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
       path: z.string().optional().describe("Output path (default: under UOB output dir)"),
-      ...vaultOpt,
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const outPath =

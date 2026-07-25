@@ -54,6 +54,11 @@ export class BrowserProxy {
    * and individual calls can explain the problem.
    */
   async init(): Promise<boolean> {
+    // A prior CDP disconnect leaves a live Client pointing at a dead context.
+    if (this.client && !this.router.playwright.connected) {
+      await this.close().catch(() => undefined);
+    }
+
     if (this.client) return true;
     if (this.initializing) {
       await this.initializing;

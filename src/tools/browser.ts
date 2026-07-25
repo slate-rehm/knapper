@@ -17,14 +17,18 @@ const TARGET_HINT =
   "`element` is only a human-readable label for approval prompts, not a locator.";
 
 const VIRTUALIZED_TREE =
-  "Obsidian's file tree is virtualized: off-screen files are not in the DOM. " +
-  "List or search files with obsidian_search / vault tools; use the explorer only for visible rows.";
+  "Obsidian's file tree is virtualized: off-screen `.nav-file-title` elements do not exist in the DOM. " +
+  "Enumerate files via `app.vault` through obsidian_eval (or obsidian_search / vault tools); use the " +
+  "explorer DOM only for visible rows.";
 
 const OBSIDIAN_PROXY_NOTES: Record<string, string> = {
   browser_snapshot: `Full-page ARIA snapshot of the active Obsidian window. Prefer obsidian_snapshot when you only need a pane or modal — the full tree is large. ${TARGET_HINT}`,
   browser_click: `Click with real mouse events over CDP (required for drag handles and gutters). ${TARGET_HINT}`,
   browser_type: `Type into an editable control (e.g. .cm-content in source mode). ${TARGET_HINT}`,
-  browser_take_screenshot: `Capture the Obsidian UI. Defaults to viewport/element shots — avoid fullPage against a real desktop window (device metrics override is risky). ${TARGET_HINT}`,
+  browser_take_screenshot:
+    "Capture the Obsidian **web contents** (Playwright page screenshot), not the OS window chrome. " +
+    "For the full native Electron window via `capturePage()`, use obsidian_screenshot instead. " +
+    `Defaults to viewport/element shots — avoid fullPage against a real desktop window (device metrics override is risky). ${TARGET_HINT}`,
   browser_evaluate: `Run JavaScript in the Obsidian renderer. Prefer obsidian_eval for vault APIs; use this when you need DOM access in the same turn as a snapshot ref.`,
   browser_tabs:
     "List or select pages in the single CDP BrowserContext (all Obsidian windows and popouts).",

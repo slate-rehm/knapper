@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // live Obsidian, which is what keeps this suite CI-safe.
 const probeCdp = vi.fn();
 const readGlobalConfig = vi.fn();
+const isObsidianRunning = vi.fn();
 
 vi.mock("../../src/connection/cdp/discover.js", () => ({
   probeCdp: (...args: unknown[]) => probeCdp(...args),
@@ -13,6 +14,14 @@ vi.mock("../../src/connection/cdp/discover.js", () => ({
 vi.mock("../../src/connection/vaults.js", () => ({
   readGlobalConfig: (...args: unknown[]) => readGlobalConfig(...args),
 }));
+
+vi.mock("../../src/connection/health.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/connection/health.js")>();
+  return {
+    ...actual,
+    isObsidianRunning: (...args: unknown[]) => isObsidianRunning(...args),
+  };
+});
 
 const { CapabilityRouter } = await import("../../src/connection/router.js");
 const { loadConfig } = await import("../../src/config.js");
@@ -26,29 +35,41 @@ function makeRouter() {
 function bothAvailable() {
   probeCdp.mockResolvedValue({ Browser: "Chrome/142" });
   readGlobalConfig.mockResolvedValue({ cli: true, vaults: [], raw: {} });
+  isObsidianRunning.mockResolvedValue(true);
 }
 
 /** CLI enabled, no debug port — the common case for a normally-started Obsidian. */
 function cliOnly() {
   probeCdp.mockResolvedValue(undefined);
   readGlobalConfig.mockResolvedValue({ cli: true, vaults: [], raw: {} });
+  isObsidianRunning.mockResolvedValue(true);
 }
 
 /** Debug port open but the CLI toggle never enabled. */
 function playwrightOnly() {
   probeCdp.mockResolvedValue({ Browser: "Chrome/142" });
   readGlobalConfig.mockResolvedValue({ cli: false, vaults: [], raw: {} });
+  isObsidianRunning.mockResolvedValue(true);
 }
 
 /** Nothing reachable. */
 function nothingAvailable() {
   probeCdp.mockResolvedValue(undefined);
   readGlobalConfig.mockResolvedValue({ cli: false, vaults: [], raw: {} });
+  isObsidianRunning.mockResolvedValue(false);
+}
+
+/** CLI flag on but Obsidian not running — must not cold-start without CDP. */
+function cliEnabledButNotRunning() {
+  probeCdp.mockResolvedValue(undefined);
+  readGlobalConfig.mockResolvedValue({ cli: true, vaults: [], raw: {} });
+  isObsidianRunning.mockResolvedValue(false);
 }
 
 beforeEach(() => {
   probeCdp.mockReset();
   readGlobalConfig.mockReset();
+  isObsidianRunning.mockReset();
 });
 
 describe("refreshAvailability", () => {
@@ -154,6 +175,16 @@ describe("resolve failures name the right precondition", () => {
     await expect(makeRouter().resolve("evaluate")).rejects.toMatchObject({
       code: "OBSIDIAN_NOT_RUNNING",
       fixedBy: "obsidian_doctor",
+    });
+  });
+
+  it("does not treat CLI-enabled-but-not-running as an available CLI layer", async () => {
+    // Otherwise resolve succeeds and execFile cold-starts Obsidian without CDP.
+    cliEnabledButNotRunning();
+    const availability = await makeRouter().refreshAvailability();
+    expect(availability.cli).toBe(false);
+    await expect(makeRouter().resolve("cliCommand")).rejects.toMatchObject({
+      code: "OBSIDIAN_NOT_RUNNING",
     });
   });
 });
