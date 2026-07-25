@@ -246,10 +246,23 @@ npm run versions:check   # CI gate: fail on drift
 publishes `X.Y.Z-nightly.<date>.<sha>` to the `next` tag. It never writes that
 version back to the branch.
 
-**Production (`master`)** — after the promotion PR merges, cut it either way:
+**Production (`master`)** — the bump is an ordinary change, so it goes through the
+same flow as anything else:
 
-- **From the Actions tab** — run the _Release_ workflow and pick `patch` / `minor` / `major`. It bumps, syncs manifests, commits to `master`, tags, publishes to npm with provenance, and creates the GitHub Release. Tick _dry run_ to rehearse without publishing or tagging.
-- **From a tag** — `npm version minor && git push --follow-tags`. The workflow refuses to publish if the tag and `package.json` disagree, or if the commit is not on `master`.
+```bash
+git checkout -b release/v0.2.0 dev
+npm version minor --no-git-tag-version && npm run versions:sync
+# PR into dev, then promote dev -> master
+```
+
+Once the promotion PR merges, cut the release either way:
+
+- **From the Actions tab** — run the _Release_ workflow. It tags master's current HEAD with the version already in `package.json`, publishes to npm with provenance, and creates the GitHub Release. Tick _dry run_ to rehearse. It refuses if that version is already tagged.
+- **From a tag** — `git tag v0.2.0 && git push origin v0.2.0`.
+
+Either way the workflow refuses to publish a commit that is not on `master`, or a
+tag that disagrees with `package.json`. It never pushes commits to `master`, which
+is what lets branch protection stay strict.
 
 Publishing needs an `NPM_TOKEN` repository secret. Set the repository variable
 `PUBLISH_MCP_REGISTRY` to `true` to also push [`server.json`](server.json) to the
