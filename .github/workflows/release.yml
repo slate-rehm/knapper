@@ -1,0 +1,169 @@
+name: Release
+
+# Two ways in:
+#
+#  1. Push a tag (`git tag v0.2.0 && git push origin v0.2.0`) — publishes exactly
+#     that tag, and fails if it disagrees with package.json.
+#  2. Run this workflow from the Actions tab with a bump — it bumps package.json,
+#     syncs every manifest, commits, tags, pushes, and then publishes in the same
+#     run. The bump path exists because a tag pushed by GITHUB_TOKEN does not
+#     trigger other workflows, so a two-workflow handoff would silently stall.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump to cut from main"
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major]
+      dry_run:
+        description: "Build and validate, but do not publish or tag"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Reuse the exact CI gates rather than a weaker copy of them.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: publish
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: release
+    permissions:
+      contents: write # create the tag and the GitHub Release
+      id-token: write # npm provenance attestation
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history and a writable ref for the dispatch bump path.
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Fail early if the publish token is missing
+        if: ${{ !inputs.dry_run }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::NPM_TOKEN is not set. Add it under Settings → Secrets → Actions."
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Bump, sync manifests and tag
+        id: bump
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version "${{ inputs.bump }}" --no-git-tag-version
+          node scripts/sync-version.mjs
+          VERSION=$(node -p "require('./package.json').version")
+          git add package.json package-lock.json server.json \
+            .cursor-plugin/plugin.json .claude-plugin/plugin.json .codex-plugin/plugin.json
+          git commit -m "release: v$VERSION"
+          git tag "v$VERSION"
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            git push origin HEAD:main
+            git push origin "v$VERSION"
+          else
+            echo "dry run: not pushing v$VERSION"
+          fi
+
+      - name: Resolve and validate the release version
+        id: resolve
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            if [ "$TAG" != "v$VERSION" ]; then
+              echo "::error::tag $TAG does not match package.json version $VERSION"
+              exit 1
+            fi
+          fi
+          echo "Releasing v$VERSION"
+
+      - name: Manifests agree with package.json
+        run: node scripts/sync-version.mjs --check
+
+      - name: Build
+        run: npm run build
+
+      - name: Degraded-mode smoke test on the build
+        run: node scripts/ci-smoke.mjs
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # --provenance links the tarball to this workflow run; it needs id-token.
+        run: npm publish --provenance --access public
+
+      - name: Pack for the release artifact
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          echo "tarball=$(node -p "require('./pack.json')[0].filename")" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.resolve.outputs.version }}"
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes \
+            --verify-tag \
+            "${{ steps.pack.outputs.tarball }}"
+
+  # Opt-in: set the repository variable PUBLISH_MCP_REGISTRY to "true" once the
+  # server is claimed on the registry. Kept separate so a registry hiccup cannot
+  # fail a release that already published to npm.
+  mcp-registry:
+    name: publish to MCP registry
+    runs-on: ubuntu-latest
+    needs: release
+    if: ${{ vars.PUBLISH_MCP_REGISTRY == 'true' && !inputs.dry_run }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Install mcp-publisher
+        run: |
+          curl -sSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Authenticate with GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server.json
+        run: ./mcp-publisher publish

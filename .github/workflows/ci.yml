@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Let the release workflow reuse these exact gates instead of duplicating them.
+  workflow_call:
+
+# A new push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Obsidian is a desktop app and cannot run on a CI runner, so the live suites
+  # (scripts/acceptance.mjs, scripts/e2e.mjs) are deliberately not part of CI.
+  # Everything here must pass without a running Obsidian.
+  CI: "true"
+
+jobs:
+  verify:
+    name: verify (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor declared in package.json engines; 24 is current LTS.
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting and lint
+        # oxfmt/oxlint via the pinned vite-plus toolchain. Output is identical on
+        # every Node version, so running it once keeps the matrix signal clean.
+        if: matrix.node == '22'
+        run: npm run check
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Manifest versions agree with package.json
+        if: matrix.node == '22'
+        run: node scripts/sync-version.mjs --check
+
+  package:
+    name: package & install
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Create the tarball
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          TARBALL=$(node -p "require('./pack.json')[0].filename")
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "Packed $TARBALL"
+
+      - name: Tarball contains every published asset
+        run: |
+          TARBALL="${{ steps.pack.outputs.tarball }}"
+          LIST=$(tar -tzf "$TARBALL")
+          echo "$LIST" | head -40
+          missing=0
+          # The bin, plus one manifest per distribution channel. A missing dotfile
+          # here is the classic npm packaging failure: it works locally from a
+          # clone and silently breaks for everyone installing from the registry.
+          for required in \
+            package/dist/cli.js \
+            package/package.json \
+            package/server.json \
+            package/.mcp.json \
+            package/.cursor-plugin/plugin.json \
+            package/.claude-plugin/plugin.json \
+            package/.claude-plugin/marketplace.json \
+            package/.codex-plugin/plugin.json \
+            package/.agents/plugins/marketplace.json \
+            package/README.md \
+            package/LICENSE
+          do
+            if ! echo "$LIST" | grep -qx "$required"; then
+              echo "::error::missing from tarball: $required"
+              missing=1
+            fi
+          done
+          # The skills pack is what teaches an agent to drive this server.
+          if ! echo "$LIST" | grep -q "package/skills/.*SKILL.md"; then
+            echo "::error::no SKILL.md files in the tarball"
+            missing=1
+          fi
+          exit $missing
+
+      - name: Install the tarball like a real user would
+        run: |
+          TARBALL="$PWD/${{ steps.pack.outputs.tarball }}"
+          mkdir -p /tmp/install-test && cd /tmp/install-test
+          npm init -y >/dev/null
+          npm install "$TARBALL"
+          test -x node_modules/.bin/unified-obsidian-mcp \
+            || { echo "::error::bin is not executable after install"; exit 1; }
+          head -1 node_modules/unified-obsidian-mcp/dist/cli.js | grep -q '^#!/usr/bin/env node' \
+            || { echo "::error::missing shebang in dist/cli.js"; exit 1; }
+
+      - name: Installed server answers MCP over stdio without Obsidian
+        run: |
+          # Obsidian is absent on the runner, so this asserts the degraded-mode
+          # contract: the server must still start, hand back a tool list, and
+          # answer obsidian_status with a diagnosis rather than crashing.
+          cd /tmp/install-test
+          node "$GITHUB_WORKSPACE/scripts/ci-smoke.mjs" \
+            node_modules/unified-obsidian-mcp/dist/cli.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: ${{ steps.pack.outputs.tarball }}
+          retention-days: 14

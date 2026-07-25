@@ -11,6 +11,15 @@ import { join } from "node:path";
 import { isLogLevel, type LogLevel } from "./util/logger.js";
 import { parseToolsets, type Toolset } from "./toolsets.js";
 
+/** Transport the MCP server listens on. */
+export type TransportKind = "stdio" | "http";
+
+export const TRANSPORT_KINDS = ["stdio", "http"] as const;
+
+export function isTransportKind(value: string): value is TransportKind {
+  return (TRANSPORT_KINDS as readonly string[]).includes(value);
+}
+
 export interface Config {
   /** CDP endpoint to attach to. */
   cdpUrl: string;
@@ -20,6 +29,23 @@ export interface Config {
   obsidianBin: string;
   /** Target vault name, or undefined to let Obsidian resolve it. */
   vault?: string;
+  /**
+   * Substring matched against a window's title or URL when choosing a CDP target.
+   * Narrows selection when several Obsidian windows are attached; `vault` still
+   * wins because it is confirmed against the renderer rather than the title.
+   */
+  targetMatch?: string;
+  /** Which MCP transport to serve. */
+  transport: TransportKind;
+  /** Listen port for the http transport. */
+  httpPort: number;
+  /** Listen host for the http transport. Non-loopback values are warned about. */
+  httpHost: string;
+  /**
+   * How many tool calls may run at once. UI mutations are serialized regardless;
+   * this caps the read-only calls that are safe to overlap.
+   */
+  maxConcurrency: number;
   enabledToolsets: Set<Toolset>;
   unknownToolsets: string[];
   logLevel: LogLevel;
@@ -35,6 +61,11 @@ export interface ConfigOverrides {
   cdpUrl?: string;
   obsidianBin?: string;
   vault?: string;
+  targetMatch?: string;
+  transport?: string;
+  httpPort?: number;
+  httpHost?: string;
+  maxConcurrency?: number;
   toolsets?: string;
   logLevel?: string;
   telemetryBuffer?: number;
@@ -107,25 +138,38 @@ function numberFrom(raw: string | undefined, fallback: number): number {
 export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): Config {
   const cdpUrl = overrides.cdpUrl ?? env.OBSIDIAN_CDP_URL ?? DEFAULT_CDP_URL;
 
-  const rawLogLevel = overrides.logLevel ?? env.UOB_LOG_LEVEL ?? "info";
+  const rawLogLevel = overrides.logLevel ?? env.UOB_LOG_LEVEL ?? env.LOG_LEVEL ?? "info";
   const logLevel: LogLevel = isLogLevel(rawLogLevel) ? rawLogLevel : "info";
 
   const { enabled, unknown } = parseToolsets(overrides.toolsets ?? env.UOB_TOOLSETS);
 
   const vault = overrides.vault ?? env.OBSIDIAN_VAULT;
+  const targetMatch = overrides.targetMatch ?? env.OBSIDIAN_TARGET_MATCH;
+
+  const rawTransport = overrides.transport ?? env.MCP_TRANSPORT ?? "stdio";
+  const transport: TransportKind = isTransportKind(rawTransport) ? rawTransport : "stdio";
 
   return {
     cdpUrl,
     cdpPort: parsePort(cdpUrl),
     obsidianBin: overrides.obsidianBin ?? env.OBSIDIAN_BIN ?? defaultObsidianBin(),
     ...(vault !== undefined && vault !== "" ? { vault } : {}),
+    ...(targetMatch !== undefined && targetMatch !== "" ? { targetMatch } : {}),
+    transport,
+    httpPort: overrides.httpPort ?? numberFrom(env.MCP_PORT, 9223),
+    httpHost: overrides.httpHost ?? env.MCP_HOST ?? "127.0.0.1",
+    maxConcurrency: Math.max(1, overrides.maxConcurrency ?? numberFrom(env.UOB_MAX_CONCURRENCY, 4)),
     enabledToolsets: enabled,
     unknownToolsets: unknown,
     logLevel,
     telemetryBuffer: overrides.telemetryBuffer ?? numberFrom(env.UOB_TELEMETRY_BUFFER, 2000),
-    reconnectMs: overrides.reconnectMs ?? numberFrom(env.UOB_RECONNECT_MS, 2000),
+    reconnectMs:
+      overrides.reconnectMs ?? numberFrom(env.UOB_RECONNECT_MS ?? env.RECONNECT_MS, 2000),
     outputDir:
-      overrides.outputDir ?? env.UOB_SCREENSHOT_DIR ?? join(process.cwd(), ".unified-obsidian-mcp"),
+      overrides.outputDir ??
+      env.UOB_SCREENSHOT_DIR ??
+      env.SCREENSHOT_DIR ??
+      join(process.cwd(), ".unified-obsidian-mcp"),
     cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.UOB_CLI_TIMEOUT_MS, 15_000),
   };
 }

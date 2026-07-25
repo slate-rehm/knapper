@@ -110,17 +110,28 @@ Point your MCP client at `node /absolute/path/to/dist/cli.js` instead of `npx`.
 
 Set options via **environment variables** (and a subset via CLI flags). See [docs/configuration.md](docs/configuration.md) for examples.
 
-| Setting             | Env var                | CLI flag         | Default                        |
-| ------------------- | ---------------------- | ---------------- | ------------------------------ |
-| CDP URL             | `OBSIDIAN_CDP_URL`     | `--cdp-url`      | `http://127.0.0.1:9222`        |
-| Obsidian binary     | `OBSIDIAN_BIN`         | `--obsidian-bin` | OS default                     |
-| Default vault       | `OBSIDIAN_VAULT`       | `--vault`, `-v`  | (active / unset)               |
-| Toolsets            | `UOB_TOOLSETS`         | `--toolsets`     | `core,ui,telemetry,plugin-dev` |
-| Log level           | `UOB_LOG_LEVEL`        | `--log-level`    | `info`                         |
-| Telemetry buffer    | `UOB_TELEMETRY_BUFFER` | —                | `2000`                         |
-| CDP reconnect delay | `UOB_RECONNECT_MS`     | —                | `2000`                         |
-| Screenshot dir      | `UOB_SCREENSHOT_DIR`   | `--output-dir`   | `./.unified-obsidian-mcp`      |
-| CLI timeout         | `UOB_CLI_TIMEOUT_MS`   | —                | `15000`                        |
+| Setting             | Env var                 | CLI flag         | Default                        |
+| ------------------- | ----------------------- | ---------------- | ------------------------------ |
+| CDP URL             | `OBSIDIAN_CDP_URL`      | `--cdp-url`      | `http://127.0.0.1:9222`        |
+| Obsidian binary     | `OBSIDIAN_BIN`          | `--obsidian-bin` | OS default                     |
+| Default vault       | `OBSIDIAN_VAULT`        | `--vault`, `-v`  | (active / unset)               |
+| Toolsets            | `UOB_TOOLSETS`          | `--toolsets`     | `core,ui,telemetry,plugin-dev` |
+| Log level           | `UOB_LOG_LEVEL`         | `--log-level`    | `info`                         |
+| Telemetry buffer    | `UOB_TELEMETRY_BUFFER`  | —                | `2000`                         |
+| CDP reconnect delay | `UOB_RECONNECT_MS`      | —                | `2000`                         |
+| Screenshot dir      | `UOB_SCREENSHOT_DIR`    | `--output-dir`   | `./.unified-obsidian-mcp`      |
+| CLI timeout         | `UOB_CLI_TIMEOUT_MS`    | —                | `15000`                        |
+| Window match        | `OBSIDIAN_TARGET_MATCH` | `--target-match` | (unset)                        |
+| Transport           | `MCP_TRANSPORT`         | `--transport`    | `stdio`                        |
+| HTTP port           | `MCP_PORT`              | `--port`         | `9223`                         |
+| HTTP host           | `MCP_HOST`              | `--host`         | `127.0.0.1`                    |
+| Max concurrency     | `UOB_MAX_CONCURRENCY`   | —                | `4`                            |
+
+`LOG_LEVEL`, `RECONNECT_MS`, and `SCREENSHOT_DIR` are also accepted as aliases; the `UOB_`-prefixed name wins when both are set.
+
+The default `stdio` transport is what MCP clients use. `--transport http` is for
+remote or multi-client setups and binds to loopback only unless you override
+`MCP_HOST` — which exposes control of your live Obsidian UI to the network.
 
 Cursor plugin `variables` and Claude `userConfig` do not unify across hosts — use plain env vars in each MCP config.
 
@@ -177,16 +188,43 @@ Also:
 
 Obsidian checks for updates on startup and hourly. A downloaded `obsidian-<version>.asar` in userData takes precedence over the distro package, so DOM and API behavior can drift from the version your package manager reports. Re-run doctor and UI smoke tests after upgrades.
 
-## Plugin release versioning
+## Development
 
-npm uses `package.json` `version`. Plugin manifests **must pin the same version** or hosts may show `unknown`:
+```bash
+npm install          # installs the pinned toolchain too, no global tools needed
+npm run check        # format + lint (oxfmt / oxlint via vite-plus)
+npm run typecheck    # tsc --noEmit
+npm test             # unit tests (vitest)
+npm run build        # tsc -> dist/
+npm run smoke        # degraded-mode MCP check; needs no Obsidian
+```
 
-- [`.cursor-plugin/plugin.json`](.cursor-plugin/plugin.json)
-- [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
-- [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json)
-- [`server.json`](server.json) `version` and npm package entry
+Two suites need a **live Obsidian** launched with `--remote-debugging-port=9222` and are therefore not part of CI:
 
-On each release, bump `version` in all four files together with `package.json` (not duplicated here — edit `package.json` in the release PR).
+```bash
+npm run acceptance   # fast gate over the critical seams
+npm run e2e          # deep end-to-end: vault round-trips, UI, telemetry, dev cycle
+```
+
+## Releasing
+
+`package.json` is the single source of truth for the version. The same string is
+mirrored into six places across `server.json` and the three plugin manifests, so
+it is synced by script rather than by hand:
+
+```bash
+npm run versions:sync    # rewrite every manifest from package.json
+npm run versions:check   # CI gate: fail on drift
+```
+
+Cut a release either way:
+
+- **From the Actions tab** — run the _Release_ workflow and pick `patch` / `minor` / `major`. It bumps, syncs manifests, commits, tags, publishes to npm with provenance, and creates the GitHub Release. Tick _dry run_ to rehearse without publishing or tagging.
+- **From a tag** — `npm version minor && git push --follow-tags`. The workflow refuses to publish if the tag and `package.json` disagree.
+
+Publishing needs an `NPM_TOKEN` repository secret. Set the repository variable
+`PUBLISH_MCP_REGISTRY` to `true` to also push [`server.json`](server.json) to the
+MCP Registry after a successful npm publish.
 
 ## MCP Registry
 

@@ -47,9 +47,16 @@
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
     "check": "vp check",
+    "check:fix": "vp check --fix",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "smoke": "node scripts/ci-smoke.mjs",
+    "acceptance": "node scripts/acceptance.mjs",
+    "e2e": "node scripts/e2e.mjs",
+    "versions:check": "node scripts/sync-version.mjs --check",
+    "versions:sync": "node scripts/sync-version.mjs",
+    "prepublishOnly": "npm run versions:check && npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -61,6 +68,7 @@
     "@types/node": "^22.15.17",
     "@types/yargs": "^17.0.33",
     "typescript": "^5.8.3",
+    "vite-plus": "0.2.6",
     "vitest": "^4.1.1"
   },
   "devEngines": {

@@ -79,6 +79,45 @@ describe("loadConfig", () => {
   it("derives the port from a URL without one", () => {
     expect(loadConfig({ cdpUrl: "http://localhost" }, {}).cdpPort).toBe(80);
   });
+
+  it("defaults to the stdio transport on loopback", () => {
+    const config = loadConfig({}, {});
+    expect(config.transport).toBe("stdio");
+    expect(config.httpPort).toBe(9223);
+    expect(config.httpHost).toBe("127.0.0.1");
+  });
+
+  it("reads the transport settings from the environment", () => {
+    const config = loadConfig({}, { MCP_TRANSPORT: "http", MCP_PORT: "9999", MCP_HOST: "0.0.0.0" });
+    expect(config.transport).toBe("http");
+    expect(config.httpPort).toBe(9999);
+    expect(config.httpHost).toBe("0.0.0.0");
+  });
+
+  it("falls back to stdio for an unrecognized transport rather than failing to start", () => {
+    expect(loadConfig({}, { MCP_TRANSPORT: "carrier-pigeon" }).transport).toBe("stdio");
+  });
+
+  it("reads the target match filter", () => {
+    expect(loadConfig({}, { OBSIDIAN_TARGET_MATCH: "Sandbox" }).targetMatch).toBe("Sandbox");
+    expect(loadConfig({}, { OBSIDIAN_TARGET_MATCH: "" }).targetMatch).toBeUndefined();
+    expect(loadConfig({}, {}).targetMatch).toBeUndefined();
+  });
+
+  it("clamps concurrency to at least one, so a zero cannot wedge every tool call", () => {
+    expect(loadConfig({}, {}).maxConcurrency).toBe(4);
+    expect(loadConfig({}, { UOB_MAX_CONCURRENCY: "1" }).maxConcurrency).toBe(1);
+    expect(loadConfig({}, { UOB_MAX_CONCURRENCY: "0" }).maxConcurrency).toBe(1);
+    expect(loadConfig({}, { UOB_MAX_CONCURRENCY: "nope" }).maxConcurrency).toBe(4);
+  });
+
+  it("accepts the plan's canonical env names alongside the UOB_ prefixed ones", () => {
+    expect(loadConfig({}, { LOG_LEVEL: "warn" }).logLevel).toBe("warn");
+    expect(loadConfig({}, { RECONNECT_MS: "500" }).reconnectMs).toBe(500);
+    expect(loadConfig({}, { SCREENSHOT_DIR: "/tmp/shots" }).outputDir).toBe("/tmp/shots");
+    // The prefixed name wins where both are set, since it is the documented one.
+    expect(loadConfig({}, { UOB_LOG_LEVEL: "debug", LOG_LEVEL: "warn" }).logLevel).toBe("debug");
+  });
 });
 
 describe("capability model", () => {
