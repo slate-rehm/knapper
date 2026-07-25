@@ -12,6 +12,7 @@
 import type { Page } from "playwright-core";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { Logger } from "../util/logger.js";
+import { consoleMessageText } from "./console-format.js";
 import type { LogLevel, TelemetryStore } from "./store.js";
 
 /** Playwright console message types mapped onto our level vocabulary. */
@@ -46,6 +47,10 @@ export class TelemetryCapture {
 
   get isArmed(): boolean {
     return this.armed;
+  }
+
+  get isNetworkEnabled(): boolean {
+    return this.networkEnabled;
   }
 
   /**
@@ -91,15 +96,22 @@ export class TelemetryCapture {
     page.on("console", (msg) => {
       const location = msg.location();
       const url = location?.url;
-      this.store.add({
-        source: "console",
-        level: toLevel(msg.type()),
-        text: msg.text(),
-        ...(url ? { url } : {}),
-        ...(location?.lineNumber !== undefined
-          ? { meta: { line: location.lineNumber, column: location.columnNumber } }
-          : {}),
-      });
+      const level = toLevel(msg.type());
+      const meta =
+        location?.lineNumber !== undefined
+          ? { line: location.lineNumber, column: location.columnNumber }
+          : undefined;
+
+      void (async () => {
+        const text = await consoleMessageText(msg);
+        this.store.add({
+          source: "console",
+          level,
+          text,
+          ...(url ? { url } : {}),
+          ...(meta !== undefined ? { meta } : {}),
+        });
+      })().catch((e) => this.logger.debug("console format failed", { error: String(e) }));
     });
 
     page.on("pageerror", (error) => {

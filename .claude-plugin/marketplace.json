@@ -1,0 +1,15 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "unified-obsidian-mcp",
+  "owner": {
+    "name": "slate-rehm",
+    "url": "https://github.com/slate-rehm"
+  },
+  "plugins": [
+    {
+      "name": "unified-obsidian-mcp",
+      "source": "..",
+      "description": "Drive a live Obsidian desktop app for plugin development over MCP"
+    }
+  ]
+}

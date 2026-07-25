@@ -1,0 +1,20 @@
+{
+  "name": "unified-obsidian-mcp",
+  "interface": {
+    "displayName": "Unified Obsidian MCP"
+  },
+  "plugins": [
+    {
+      "name": "unified-obsidian-mcp",
+      "source": {
+        "source": "local",
+        "path": "../.."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

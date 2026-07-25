@@ -65,6 +65,62 @@ export function cliValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
 }
 
+/**
+ * Classify CLI stdout, since Obsidian reports failures as ordinary output with
+ * exit code 0 rather than as a non-zero exit. Pure, so the sentinel handling can
+ * be tested without spawning anything.
+ *
+ * Returns undefined when the output represents success.
+ */
+export function classifyCliOutput(stdout: string, vault?: string): UobError | undefined {
+  const trimmed = stdout.trim();
+
+  if (trimmed.includes(CLI_DISABLED_MARKER)) return cliDisabled();
+
+  if (trimmed === VAULT_NOT_FOUND_MARKER) {
+    return new UobError("VAULT_NOT_FOUND", `Obsidian does not know a vault named "${vault}".`, {
+      remediation: "List the registered vaults and use one of those names.",
+      details: { requested: vault },
+    });
+  }
+
+  // A surviving single-dash token in the distro wrapper's flags file lands in
+  // argv[0] and comes back as an unknown command.
+  const unknownCommand = /^Command "(-[^"]*)" not found\./.exec(trimmed);
+  if (unknownCommand) {
+    return new UobError(
+      "ARGV_CORRUPTION",
+      `Obsidian rejected "${unknownCommand[1]}" as a command name, which means a single-dash launch flag is leaking into CLI argv.`,
+      {
+        remediation:
+          "Edit Obsidian's user-flags.conf and use a double dash (e.g. `--disable-gpu`), or remove the line.",
+        details: { token: unknownCommand[1] },
+      },
+    );
+  }
+
+  return undefined;
+}
+
+/**
+ * Detect an in-page throw in `eval` output.
+ *
+ * The CLI prints a successful result prefixed with `=> ` and a thrown error bare,
+ * both with exit code 0. Without this distinction a thrown exception is
+ * indistinguishable from an evaluation that returned an error-shaped string.
+ */
+export function classifyEvalOutput(stdout: string, code: string): UobError | undefined {
+  const trimmed = stdout.trim();
+  if (trimmed.startsWith("=>")) return undefined;
+  if (!/^[A-Za-z]*Error: /.test(trimmed)) return undefined;
+
+  return new UobError("EVAL_FAILED", `Evaluation threw in the Obsidian renderer: ${trimmed}`, {
+    remediation:
+      "This is an error from your code running inside Obsidian, not a connection failure.",
+    details: { code, output: trimmed },
+  });
+}
+
 export class ObsidianCli {
   constructor(private readonly opts: CliOptions) {}
 
@@ -85,33 +141,9 @@ export class ObsidianCli {
     const timeout = overrides.timeoutMs ?? this.opts.timeoutMs;
 
     const { stdout } = await this.exec(args, timeout, command[0] ?? "(none)");
-    const trimmed = stdout.trim();
 
-    if (trimmed.includes(CLI_DISABLED_MARKER)) {
-      throw cliDisabled();
-    }
-
-    if (trimmed === VAULT_NOT_FOUND_MARKER) {
-      throw new UobError("VAULT_NOT_FOUND", `Obsidian does not know a vault named "${vault}".`, {
-        remediation: "List the registered vaults and use one of those names.",
-        details: { requested: vault },
-      });
-    }
-
-    // A surviving single-dash token in the distro wrapper's flags file lands in
-    // argv[0] and is reported as an unknown command.
-    const unknownCommand = /^Command "(-[^"]*)" not found\./.exec(trimmed);
-    if (unknownCommand) {
-      throw new UobError(
-        "ARGV_CORRUPTION",
-        `Obsidian rejected "${unknownCommand[1]}" as a command name, which means a single-dash launch flag is leaking into CLI argv.`,
-        {
-          remediation:
-            "Edit Obsidian's user-flags.conf and use a double dash (e.g. `--disable-gpu`), or remove the line.",
-          details: { token: unknownCommand[1] },
-        },
-      );
-    }
+    const failure = classifyCliOutput(stdout, vault);
+    if (failure) throw failure;
 
     return stdout;
   }
@@ -166,9 +198,22 @@ export class ObsidianCli {
     });
   }
 
-  /** Run `eval` and return the raw stdout. */
+  /**
+   * Run `eval` and return the raw stdout.
+   *
+   * Throws `EVAL_FAILED` when the code threw in the renderer. The CLI reports an
+   * in-page throw as ordinary stdout with exit code 0, so it must be detected by
+   * shape: a successful result is prefixed `=> `, whereas a throw is printed bare
+   * as `Error: <message>`. Without this check a thrown exception is indistinguishable
+   * from a successful evaluation that happened to return an error-shaped string.
+   */
   async evaluate(code: string): Promise<string> {
-    return this.run(["eval", `code=${cliValue(code)}`]);
+    const stdout = await this.run(["eval", `code=${cliValue(code)}`]);
+
+    const failure = classifyEvalOutput(stdout, code);
+    if (failure) throw failure;
+
+    return stdout;
   }
 
   /** Whether the CLI responds at all, used by the health probe. */

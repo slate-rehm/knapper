@@ -17,8 +17,7 @@ Thumbs.db
 .env.*
 
 # AI agents
-.claude/
-.agents/
+.claude/settings.local.json
 CLAUDE.md
 
 # Logs
@@ -27,3 +26,5 @@ npm-debug.log*
 
 # test vault
 test-vault/
+# Build output (published to npm from a clean build, never committed)
+dist/

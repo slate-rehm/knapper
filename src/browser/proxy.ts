@@ -18,34 +18,14 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Config } from "../config.js";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { Logger } from "../util/logger.js";
 import { UobError } from "../util/errors.js";
+import { BLOCKED_BROWSER_TOOLS, isAllowedBrowserTool } from "./allowlist.js";
 
-/**
- * Tools that are unsafe or meaningless against a live Obsidian window.
- *
- * `browser_close` calls `page.close()`, which closes one of the user's Obsidian
- * windows. `browser_navigate` would `page.goto()` away from the app shell, breaking
- * out of Obsidian entirely. The rest are either irrelevant to an attached Electron
- * app or actively disruptive to a daily-driver window.
- */
-export const BLOCKED_BROWSER_TOOLS = new Set([
-  "browser_close",
-  "browser_navigate",
-  "browser_navigate_back",
-  "browser_resize",
-  "browser_run_code_unsafe",
-  "browser_file_upload",
-  "browser_pdf_save",
-  // Storage tools operate on a profile we do not own and cannot meaningfully isolate.
-  "browser_storage_state",
-  "browser_set_storage_state",
-]);
-
-/** Capabilities we ask @playwright/mcp to enable. */
-const ENABLED_CAPABILITIES = ["vision", "testing"] as const;
+export { BLOCKED_BROWSER_TOOLS, ALLOWED_BROWSER_TOOLS } from "./allowlist.js";
 
 export interface ProxiedTool {
   name: string;
@@ -106,11 +86,11 @@ export class BrowserProxy {
 
     const server = await createConnection(
       {
-        capabilities: [...ENABLED_CAPABILITIES],
+        capabilities: ["vision", "testing"],
         browser: { isolated: false },
         outputDir: this.config.outputDir,
-      } as never,
-      async () => context as never,
+      },
+      async () => context,
     );
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -121,17 +101,27 @@ export class BrowserProxy {
 
     const listed = await client.listTools();
     const tools = listed.tools
-      .filter((t) => !BLOCKED_BROWSER_TOOLS.has(t.name))
+      .filter((t) => isAllowedBrowserTool(t.name))
       .map((t) => ({
         name: t.name,
         ...(t.description !== undefined ? { description: t.description } : {}),
         inputSchema: t.inputSchema as Record<string, unknown>,
       }));
 
+    const skipped = listed.tools.filter(
+      (t) => !isAllowedBrowserTool(t.name) && !BLOCKED_BROWSER_TOOLS.has(t.name),
+    );
+    if (skipped.length > 0) {
+      this.logger.debug("upstream tools not on ui allowlist", {
+        names: skipped.map((t) => t.name),
+      });
+    }
+
     this.client = client;
     this.tools = tools;
     this.logger.info(`browser proxy ready with ${tools.length} tools`, {
-      blocked: listed.tools.length - tools.length,
+      upstream: listed.tools.length,
+      blocked: listed.tools.filter((t) => BLOCKED_BROWSER_TOOLS.has(t.name)).length,
     });
   }
 
@@ -142,12 +132,12 @@ export class BrowserProxy {
   }
 
   /** Forward a tool call, translating unavailability into an actionable error. */
-  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    if (BLOCKED_BROWSER_TOOLS.has(name)) {
+  async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
+    if (!isAllowedBrowserTool(name)) {
       throw new UobError("INVALID_ARGUMENT", `The "${name}" tool is intentionally not exposed.`, {
         remediation:
-          "It is unsafe against a live Obsidian window — it would close, navigate away from, or " +
-          "resize the user's real application. Use an obsidian_* tool for that intent instead.",
+          "It is unsafe against a live Obsidian window, filtered from the ui allowlist, or " +
+          "reimplemented natively. Use obsidian_* tools or an allowed browser_* tool instead.",
       });
     }
 
@@ -165,7 +155,10 @@ export class BrowserProxy {
       );
     }
 
-    return this.client.callTool({ name, arguments: args });
+    return this.client.callTool({
+      name,
+      arguments: stripUndefined(args),
+    }) as Promise<CallToolResult>;
   }
 
   async close(): Promise<void> {
@@ -175,4 +168,21 @@ export class BrowserProxy {
     if (client) await client.close().catch(() => undefined);
     this.router.releaseDebugger("playwright");
   }
+}
+
+/**
+ * Drop keys whose value is `undefined` before forwarding.
+ *
+ * The MCP SDK materializes every optional property of a tool's schema, so an
+ * omitted argument arrives as an explicit `undefined`. Upstream then re-validates
+ * with its own zod schema, where an enum like `type: "png" | "jpeg"` rejects an
+ * explicit `undefined` even though the property is optional — which surfaced as
+ * `browser_take_screenshot` failing validation when called with no arguments.
+ */
+function stripUndefined(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
 }

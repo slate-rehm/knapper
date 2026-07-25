@@ -65,16 +65,20 @@ const SEVERITY: Record<LogLevel, number> = {
 };
 
 /**
- * Plugin ids appear in stack frames as `.obsidian/plugins/<id>/main.js`. Handles
- * both POSIX and Windows separators since stacks carry native paths.
+ * Plugin ids appear in stack frames as `.obsidian/plugins/<id>/main.js`, in
+ * Obsidian's `plugin:<id>:` source URLs, or as `app://…/plugins/<id>/`.
  */
-const PLUGIN_FRAME = /[/\\]plugins[/\\]([^/\\]+)[/\\]/;
+const PLUGIN_PATH_FRAME = /[/\\]plugins[/\\]([^/\\]+)[/\\]/;
+const PLUGIN_SOURCE_FRAME = /plugin:([^:/\s]+):/gi;
 
 export function attributePlugin(...texts: (string | undefined)[]): string | undefined {
   for (const text of texts) {
     if (!text) continue;
-    const match = PLUGIN_FRAME.exec(text);
-    if (match?.[1]) return match[1];
+    const pathMatch = PLUGIN_PATH_FRAME.exec(text);
+    if (pathMatch?.[1]) return pathMatch[1];
+    PLUGIN_SOURCE_FRAME.lastIndex = 0;
+    const sourceMatch = PLUGIN_SOURCE_FRAME.exec(text);
+    if (sourceMatch?.[1]) return sourceMatch[1];
   }
   return undefined;
 }
@@ -192,6 +196,7 @@ export class TelemetryStore {
   clear(): void {
     this.buffer.length = 0;
     this.droppedCount = 0;
+    this.seq = 0;
   }
 }
 

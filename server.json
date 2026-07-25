@@ -1,0 +1,70 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.slate-rehm/unified-obsidian-mcp",
+  "title": "Unified Obsidian MCP",
+  "description": "MCP server for Obsidian plugin development: live app automation over CDP, Playwright browser tools, telemetry, and dev-cycle workflows.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/slate-rehm/unified-obsidian-browser#readme",
+  "repository": {
+    "url": "https://github.com/slate-rehm/unified-obsidian-browser",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "unified-obsidian-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OBSIDIAN_CDP_URL",
+          "description": "CDP HTTP endpoint for Playwright attach (default http://127.0.0.1:9222)",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_BIN",
+          "description": "Path to the Obsidian executable",
+          "isRequired": false
+        },
+        {
+          "name": "OBSIDIAN_VAULT",
+          "description": "Default vault name for CLI calls",
+          "isRequired": false
+        },
+        {
+          "name": "UOB_TOOLSETS",
+          "description": "Comma-separated toolsets or \"all\" (default core,ui,telemetry,plugin-dev)",
+          "isRequired": false
+        },
+        {
+          "name": "UOB_LOG_LEVEL",
+          "description": "Server log level on stderr: debug, info, warn, error",
+          "isRequired": false
+        },
+        {
+          "name": "UOB_TELEMETRY_BUFFER",
+          "description": "Max retained console/error/network events",
+          "isRequired": false
+        },
+        {
+          "name": "UOB_RECONNECT_MS",
+          "description": "Backoff between CDP reconnect attempts",
+          "isRequired": false
+        },
+        {
+          "name": "UOB_SCREENSHOT_DIR",
+          "description": "Directory for screenshots and snapshot artifacts",
+          "isRequired": false
+        },
+        {
+          "name": "UOB_CLI_TIMEOUT_MS",
+          "description": "Timeout for a single Obsidian CLI invocation",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

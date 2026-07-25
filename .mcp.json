@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "obsidian-live": {
-      "command": "node",
-      "args": ["./build/cli.js"]
+    "obsidian": {
+      "command": "npx",
+      "args": ["-y", "unified-obsidian-mcp@latest"]
     }
   }
 }

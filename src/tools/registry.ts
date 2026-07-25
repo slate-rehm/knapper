@@ -15,12 +15,15 @@ import type { Toolset } from "../toolsets.js";
 import type { Logger } from "../util/logger.js";
 import { toUobError, UobError } from "../util/errors.js";
 import { renderResult } from "../util/serialize.js";
+import { jsonSchemaToZodShape } from "../browser/json-schema.js";
 
 /** What a tool handler may return; the registry normalizes it to MCP content. */
 export type ToolOutcome =
   | string
   | { text: string; json?: unknown; images?: ToolImage[]; isError?: boolean }
-  | { json: unknown; text?: string };
+  | { json: unknown; text?: string }
+  /** Pass through MCP content verbatim (used for proxied @playwright/mcp tools). */
+  | { mcp: McpToolResult };
 
 export interface ToolImage {
   /** Base64-encoded image data. */
@@ -41,7 +44,10 @@ export interface ToolDefinition<S extends ZodRawShape = ZodRawShape> {
   /** Capability required to serve this tool, if any. */
   capability?: Capability;
   description: string;
+  /** Zod shape for tools defined in this repo. */
   inputSchema?: S;
+  /** JSON Schema for proxied tools (converted to Zod at registration). */
+  jsonInputSchema?: Record<string, unknown>;
   annotations?: ToolAnnotations;
   handler: (args: Record<string, unknown>) => Promise<ToolOutcome>;
 }
@@ -57,6 +63,10 @@ export interface McpToolResult {
 }
 
 function normalize(outcome: ToolOutcome): McpToolResult {
+  if (typeof outcome === "object" && outcome !== null && "mcp" in outcome) {
+    return outcome.mcp;
+  }
+
   if (typeof outcome === "string") {
     return { content: [{ type: "text", text: outcome }] };
   }
@@ -152,7 +162,8 @@ export class ToolRegistry {
   bind(server: McpServer): void {
     for (const def of this.definitions.values()) {
       const config: Record<string, unknown> = { description: def.description };
-      if (def.inputSchema) config.inputSchema = def.inputSchema;
+      if (def.jsonInputSchema) config.inputSchema = jsonSchemaToZodShape(def.jsonInputSchema);
+      else if (def.inputSchema) config.inputSchema = def.inputSchema;
       if (def.annotations) config.annotations = def.annotations;
 
       server.registerTool(

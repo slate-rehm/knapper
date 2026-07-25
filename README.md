@@ -1,358 +1,198 @@
-# live-mcp-for-obsidian
+# unified-obsidian-mcp
 
-A live connection between AI assistants and your running Obsidian instance.
+MCP server that drives a **live Obsidian desktop app** for plugin development: native CLI commands, Playwright browser automation over CDP, telemetry with cursor-based tailing, and composite dev-cycle tools.
 
-> [!IMPORTANT]
-> **Disclaimer:** This project is not created by, affiliated with, or endorsed by Obsidian or Dynalist Inc. "Obsidian" is a trademark of Dynalist Inc. This project uses Obsidian's native CLI interface for interoperability.
+> This project is not affiliated with Obsidian or Dynalist Inc. “Obsidian” is a trademark of Dynalist Inc.
 
-Most Obsidian MCP servers treat your vault as a folder of files — read, write, search. This one connects to the **live application**. It can read your notes, but it can also click buttons, manage plugins, take screenshots, execute JavaScript, inspect the DOM, emulate mobile, and control the full Obsidian UI. 43 tools, zero plugins required.
+## Why two transports?
 
-## Demo
+Obsidian exposes two complementary automation surfaces. The server uses both; each tool picks the layer that can actually perform the work.
 
-https://github.com/user-attachments/assets/297fb0d5-f089-45b5-8038-5de2cbc0f4b7
+| Transport               | Enables                                                                                                                              | Tradeoffs                                                                                                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Obsidian CLI**        | ~100+ purpose-built commands, plugin reload, vault-scoped ops, live `__completions` (including plugin `registerCliHandler` commands) | Requires global `"cli": true` in `obsidian.json`. Cannot run headlessly. When disabled, stdout is literally `Command line interface is not enabled.` (exit 0).                     |
+| **Playwright over CDP** | Real mouse/keyboard input, actionability waiting, ARIA snapshots (`browser_*`), live console/network capture                         | Obsidian must be **cold-started** with `--remote-debugging-port`. Electron’s single-instance lock means adding the flag to an already-running app does nothing — fully quit first. |
 
-[More demos](./demo.md)
+Both can be active at the same time ([verified](docs/verified-environment.md)).
 
-## How is this different?
+```mermaid
+flowchart LR
+  subgraph Client["MCP client"]
+    AI[Agent]
+  end
+  subgraph Server["unified-obsidian-mcp"]
+    R[Capability router]
+    T[Toolsets]
+  end
+  subgraph Obsidian["Obsidian desktop"]
+    CLI[Native CLI]
+    CDP[Chromium CDP]
+    APP[Renderer app.*]
+  end
+  AI --> Server
+  R --> CLI
+  R --> CDP
+  CLI --> APP
+  CDP --> APP
+  T --> R
+```
 
-There are 20+ Obsidian MCP servers in the community. Nearly all of them do the same thing: expose vault files over HTTP or stdio so an AI can read and write markdown.
+## Quickstart
 
-This server operates at a fundamentally different level:
+1. Install the MCP server in your client (below).
+2. In chat, run **`obsidian_doctor`** and follow each remediation (or the suggested `fixedBy` tool).
+3. Run **`obsidian_launch`** if CDP is not up.
+4. Develop: link with **`obsidian_link_plugin`**, build locally, verify with **`obsidian_dev_cycle`**.
 
-|                           | File-based MCP servers | live-mcp-for-obsidian                  |
-| ------------------------- | ---------------------- | -------------------------------------- |
-| Read/write notes          | Yes                    | Yes                                    |
-| Search vault              | Yes                    | Yes                                    |
-| Interact with plugins     | No                     | Yes — enable, disable, reload, inspect |
-| Click UI elements         | No                     | Yes — any button, menu, or control     |
-| Take screenshots          | No                     | Yes — full window or targeted element  |
-| Execute JavaScript        | No                     | Yes — full `app.*` API access          |
-| Inspect DOM/CSS           | No                     | Yes — like Chrome DevTools             |
-| Mobile emulation          | No                     | Yes — test mobile layouts              |
-| Console/error capture     | No                     | Yes — live debugging                   |
-| Requires Obsidian plugins | Usually                | No — uses native CLI                   |
-
-**It's the difference between a file server and full app automation.**
-
-## Remote access
-
-With SSH access to the machine running Obsidian, you get full remote control — every tool works over an SSH session. No HTTP server, no OAuth, no Cloudflare Tunnel, no Tailscale. Just SSH in, run Claude Code, and you have a live connection to your Obsidian instance from anywhere.
-
-## Requirements
-
-- **Obsidian 1.12.4+** (with CLI support)
-- **Node.js 18+**
-- **macOS** (Linux/Windows: adjust the Obsidian binary path)
+Bundled **skills**, **commands**, and **agents** under this package teach the loop in more detail.
 
 ## Install
+
+### Cursor (one-click deeplink)
+
+Cursor’s public MCP directory is manually reviewed; the fastest path is the install deeplink for the root `.mcp.json` server block:
+
+[Install unified-obsidian-mcp in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=obsidian&config=eyJtY3BTZXJ2ZXJzIjp7Im9ic2lkaWFuIjp7ImNvbW1hbmQiOiJucHgiLCJhcmdzIjpbIi15IiwidW5pZmllZC1vYnNpZGlhbi1tY3BAbGF0ZXN0Il19fX0=)
+
+Equivalent config (what the base64 decodes to):
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "npx",
+      "args": ["-y", "unified-obsidian-mcp@latest"]
+    }
+  }
+}
+```
+
+Or copy [`.mcp.json`](.mcp.json) into your project, or add the same block in **Cursor Settings → MCP**.
+
+Optional plugin bundle (skills, rules, commands): install from this repository via `.cursor-plugin/plugin.json` (folder discovery for `skills/` — no manifest `skills` field).
 
 ### Claude Code
 
 ```bash
-claude mcp add obsidian-live -- npx live-mcp-for-obsidian
+# User scope
+claude mcp add obsidian -- npx -y unified-obsidian-mcp@latest
+
+# Project scope — uses .mcp.json in repo root
+claude mcp add obsidian --scope project -- npx -y unified-obsidian-mcp@latest
 ```
 
-With a specific vault:
+Marketplace metadata: [`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json).
+
+### Codex
+
+Add the server via [`.mcp.json`](.mcp.json). Plugin manifest: [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json). Repo marketplace entry: [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json).
+
+### npm
 
 ```bash
-claude mcp add obsidian-live -- npx live-mcp-for-obsidian --vault "My Vault"
+npx -y unified-obsidian-mcp@latest
 ```
 
-This registers the server in your user-level config (`~/.claude.json`), making it available in every Claude Code session on your machine. To limit it to a single project, add `--scope project` which writes to `.mcp.json` in the current directory instead.
-
-### Claude Desktop
-
-Add to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "obsidian-live": {
-      "command": "npx",
-      "args": ["live-mcp-for-obsidian"]
-    }
-  }
-}
-```
-
-With a specific vault:
-
-```json
-{
-  "mcpServers": {
-    "obsidian-live": {
-      "command": "npx",
-      "args": ["live-mcp-for-obsidian", "--vault", "My Vault"]
-    }
-  }
-}
-```
+Requires **Node.js 20+** and a running Obsidian **1.12+** with CLI support.
 
 ### From source
 
 ```bash
-git clone https://github.com/gapmiss/live-mcp-for-obsidian.git
-cd live-mcp-for-obsidian
-npm install
-npm run build
-claude mcp add obsidian-live -- node ./build/cli.js
+git clone https://github.com/slate-rehm/unified-obsidian-browser.git
+cd unified-obsidian-browser
+npm install && npm run build
+node dist/cli.js
 ```
 
-### CLI Options
+Point your MCP client at `node /absolute/path/to/dist/cli.js` instead of `npx`.
 
-| Flag              | Default                                              | Description                     |
-| ----------------- | ---------------------------------------------------- | ------------------------------- |
-| `--obsidian-path` | `/Applications/Obsidian.app/Contents/MacOS/Obsidian` | Path to Obsidian binary         |
-| `--vault`, `-v`   | Active vault                                         | Target a specific vault by name |
+## Configuration
 
-## What can it do?
+Set options via **environment variables** (and a subset via CLI flags). See [docs/configuration.md](docs/configuration.md) for examples.
 
-### Vault management
+| Setting             | Env var                | CLI flag         | Default                        |
+| ------------------- | ---------------------- | ---------------- | ------------------------------ |
+| CDP URL             | `OBSIDIAN_CDP_URL`     | `--cdp-url`      | `http://127.0.0.1:9222`        |
+| Obsidian binary     | `OBSIDIAN_BIN`         | `--obsidian-bin` | OS default                     |
+| Default vault       | `OBSIDIAN_VAULT`       | `--vault`, `-v`  | (active / unset)               |
+| Toolsets            | `UOB_TOOLSETS`         | `--toolsets`     | `core,ui,telemetry,plugin-dev` |
+| Log level           | `UOB_LOG_LEVEL`        | `--log-level`    | `info`                         |
+| Telemetry buffer    | `UOB_TELEMETRY_BUFFER` | —                | `2000`                         |
+| CDP reconnect delay | `UOB_RECONNECT_MS`     | —                | `2000`                         |
+| Screenshot dir      | `UOB_SCREENSHOT_DIR`   | `--output-dir`   | `./.unified-obsidian-mcp`      |
+| CLI timeout         | `UOB_CLI_TIMEOUT_MS`   | —                | `15000`                        |
 
-> "What files are in my Projects folder?"
-> "Create a new note called 'Meeting Notes' with a template"
-> "Move all files from Inbox/ to Archive/"
-> "Show me orphaned notes with no backlinks"
-> "What are my incomplete tasks across the vault?"
+Cursor plugin `variables` and Claude `userConfig` do not unify across hosts — use plain env vars in each MCP config.
 
-### Daily notes
+## Toolsets
 
-> "Read my daily note"
-> "Append '- Called dentist to reschedule' to today's daily note"
-> "What tasks are on today's daily note?"
+Gating keeps tool count manageable for model tool selection.
 
-### Session briefing
+| Toolset      | Default | Description                                                                                                           |
+| ------------ | ------- | --------------------------------------------------------------------------------------------------------------------- |
+| `core`       | yes     | Status, doctor, launch, eval, CLI, commands, attach                                                                   |
+| `ui`         | yes     | `browser_*` (from `@playwright/mcp`) for real UI interaction                                                          |
+| `telemetry`  | yes     | Console/error/network capture, cursor tailing                                                                         |
+| `plugin-dev` | yes     | Reload, manifest/settings, `obsidian_dev_cycle`, exercise/reset                                                       |
+| `vault`      | no      | Note/file CRUD, search, properties — **opt-in** because other Obsidian MCP servers already cover vault workflows well |
+| `devtools`   | no      | DOM/CSS/CDP passthrough, mobile emulation                                                                             |
+| `authoring`  | no      | Themes, snippets, daily notes, metadata                                                                               |
 
-> "Give me a briefing"
+Enable extras: `UOB_TOOLSETS=core,ui,telemetry,plugin-dev,vault` or `--toolsets all`.
 
-One call to `obsidian_briefing` returns the active file, open tabs, daily note status, recent files, vault stats, and any persistent instructions from a `CLAUDE.md` file in your vault root. Instant situational awareness — no setup, no storage, ~300 tokens.
+### Representative tools (default toolsets)
 
-### Live UI automation
+**Core & provisioning:** `obsidian_status`, `obsidian_doctor`, `obsidian_launch`, `obsidian_setup_cli`, `obsidian_setup_vault`, `obsidian_link_plugin`, `obsidian_list_targets`, `obsidian_attach`, `obsidian_eval`, `obsidian_cli`, `obsidian_commands`, `obsidian_command`
 
-> "Click the p2p-share status bar item and select 'Pair with device'"
-> "Toggle the theme mode button"
-> "Open the command palette and run 'Graph view: Open local graph'"
+**Plugin dev:** `obsidian_plugin_list`, `obsidian_plugin_manifest`, `obsidian_plugin_settings`, `obsidian_plugin_reload`, `obsidian_dev_cycle`, `obsidian_exercise_command`, `obsidian_reset_state`, `obsidian_plugin_health`
 
-The assistant can interact with any UI element via `obsidian_eval` — clicking buttons, opening menus, filling inputs, navigating the interface. Anything you can do with a mouse, the assistant can do programmatically.
+**Telemetry:** `obsidian_logs`, `obsidian_log_mark`, `obsidian_logs_clear`, `obsidian_telemetry_status`
 
-### Plugin development
+**UI:** `obsidian_snapshot` (scoped to a leaf, modal, or settings tab), plus `browser_snapshot`, `browser_click`, `browser_type`, `browser_press_key`, `browser_take_screenshot`, … — 32 tools proxied from `@playwright/mcp`, with the destructive ones (`browser_close`, `browser_navigate`, `browser_resize`, file upload, raw code execution) deliberately withheld because they would close, navigate away from, or resize the user's real Obsidian window.
 
-> "Reload my plugin so I can test the changes"
-> "What commands does my plugin register?"
-> "Take a screenshot of `.my-plugin-settings` so I can see how my settings tab looks"
-> "Show me the console errors after I triggered that bug"
-> "What CSS is applied to `.my-plugin-container`?"
-> "Toggle mobile emulation so I can test the mobile layout"
+**Vault (opt-in):** `obsidian_search`, `obsidian_read`, `obsidian_create`, and related file/note tools
 
-Full Chrome DevTools capabilities — DOM inspection, CSS debugging, console/error capture, screenshots, and arbitrary JS evaluation — plus Obsidian-specific tools like plugin reload and command listing.
+Browser tools are **snapshot-first**: call `browser_snapshot` (or the cheaper scoped `obsidian_snapshot`), then pass the returned ref as **`target`** (CSS selectors also work there). Prefer `obsidian_command` over menu clicking.
 
-### Screenshots
+## Troubleshooting
 
-> "Take a screenshot"
-> "Screenshot just the `.workspace-leaf.mod-active` element"
-> "Take a jpeg screenshot at 80% quality"
-> "Screenshot the sidebar: `.workspace-split.mod-left-split`"
+`obsidian_doctor` classifies failures into four distinct precondition states — do not treat them as a generic “cannot connect”:
 
-`obsidian_screenshot` uses Chrome DevTools Protocol for capture, supporting full-window or element-targeted screenshots via CSS selector. Choose between png, jpeg, or webp output, and control compression quality for jpeg/webp. Element targeting finds the first visible match — useful in Obsidian where multiple hidden duplicates of a selector may exist.
+| State                    | Symptom                                                                   | Fix                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **Obsidian not running** | `OBSIDIAN_NOT_RUNNING`                                                    | `obsidian_launch`                                                                       |
+| **CLI disabled**         | `CLI_DISABLED`, or stdout marker `Command line interface is not enabled.` | `obsidian_setup_cli` or Settings → Advanced → Command line interface                    |
+| **CDP port closed**      | `CDP_PORT_CLOSED`, attach timeouts                                        | Quit Obsidian completely; cold start with `--remote-debugging-port` (`obsidian_launch`) |
+| **Argv corruption**      | `ARGV_CORRUPTION`, `Command "-foo" not found`                             | Fix `user-flags.conf` to use `--double-dash` flags                                      |
 
-### Theme development
+Also:
 
-> "What CSS variables does the current theme define for text colors?"
-> "Inspect the computed styles on the sidebar"
-> "Screenshot the `.workspace-leaf-content`, then switch to dark mode and take another"
-> "Show me the CSS source locations for `.workspace-leaf`"
+- **`VAULT_NOT_FOUND`** — vault name not in `obsidian.json` registry.
+- **Stale UI refs** — `STALE_REF`; take a new `browser_snapshot`.
+- **Linux wrappers** — single-dash tokens in `user-flags.conf` break every CLI call.
 
-### Knowledge base queries
+## Version drift caveat
 
-> "List all tags sorted by frequency"
-> "What properties does this note have?"
-> "Show me the outline of my 'Architecture' note"
-> "What notes link to 'Project Alpha'?"
-> "Find all unresolved links in my vault"
+Obsidian checks for updates on startup and hourly. A downloaded `obsidian-<version>.asar` in userData takes precedence over the distro package, so DOM and API behavior can drift from the version your package manager reports. Re-run doctor and UI smoke tests after upgrades.
 
-### Automation
+## Plugin release versioning
 
-> "Execute the 'daily-notes:open' command"
-> "Disable the 'calendar' plugin"
-> "Set the 'status' property to 'done' on this note"
-> "Enable the minimal theme"
+npm uses `package.json` `version`. Plugin manifests **must pin the same version** or hosts may show `unknown`:
 
-The `obsidian_command` tool can trigger any registered command, and `obsidian_eval` can run arbitrary JavaScript for anything not covered by a dedicated tool.
+- [`.cursor-plugin/plugin.json`](.cursor-plugin/plugin.json)
+- [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json)
+- [`.codex-plugin/plugin.json`](.codex-plugin/plugin.json)
+- [`server.json`](server.json) `version` and npm package entry
 
-## Tools Reference
+On each release, bump `version` in all four files together with `package.json` (not duplicated here — edit `package.json` in the release PR).
 
-### Status & Vaults
+## MCP Registry
 
-| Tool              | Description                                                          |
-| ----------------- | -------------------------------------------------------------------- |
-| `obsidian_status` | Get Obsidian version, vault name, path, file/folder counts, and size |
-| `obsidian_vaults` | List all known vaults                                                |
-
-### Workspace
-
-| Tool                 | Description                             |
-| -------------------- | --------------------------------------- |
-| `obsidian_tabs`      | List all open tabs with their view type |
-| `obsidian_workspace` | Show the workspace tree layout          |
-| `obsidian_open`      | Open a file in Obsidian                 |
-
-### Files & Vault
-
-| Tool               | Description                                            |
-| ------------------ | ------------------------------------------------------ |
-| `obsidian_files`   | List files, optionally filtered by folder or extension |
-| `obsidian_read`    | Read the contents of a file                            |
-| `obsidian_create`  | Create a new file in the vault                         |
-| `obsidian_append`  | Append content to a file                               |
-| `obsidian_prepend` | Prepend content to a file                              |
-| `obsidian_delete`  | Delete a file (moves to trash by default)              |
-| `obsidian_move`    | Move or rename a file                                  |
-| `obsidian_search`  | Search files, tags, properties, or links in the vault  |
-
-### Notes & Metadata
-
-| Tool                    | Description                                         |
-| ----------------------- | --------------------------------------------------- |
-| `obsidian_properties`   | List properties in the vault or for a specific file |
-| `obsidian_property_set` | Set a property on a file                            |
-| `obsidian_tags`         | List tags in the vault or for a specific file       |
-| `obsidian_links`        | List outgoing links from a file                     |
-| `obsidian_backlinks`    | List backlinks to a file                            |
-| `obsidian_outline`      | Show headings for a file                            |
-| `obsidian_tasks`        | List tasks in the vault or a specific file          |
-| `obsidian_daily`        | Open or read the daily note                         |
-| `obsidian_daily_append` | Append content to the daily note                    |
-
-### Plugins & Commands
-
-| Tool                      | Description                                            |
-| ------------------------- | ------------------------------------------------------ |
-| `obsidian_plugins`        | List installed plugins with enabled/disabled state     |
-| `obsidian_plugin_info`    | Get detailed info about a specific plugin              |
-| `obsidian_plugin_enable`  | Enable a plugin                                        |
-| `obsidian_plugin_disable` | Disable a plugin                                       |
-| `obsidian_plugin_reload`  | Reload a plugin (useful during development)            |
-| `obsidian_commands`       | List available commands, optionally filtered by prefix |
-| `obsidian_command`        | Execute an Obsidian command by ID                      |
-
-### Themes & Appearance
-
-| Tool                | Description                                                  |
-| ------------------- | ------------------------------------------------------------ |
-| `obsidian_theme`    | Show active theme info or get details about a specific theme |
-| `obsidian_themes`   | List installed themes                                        |
-| `obsidian_snippets` | List installed CSS snippets                                  |
-
-### Developer Tools
-
-| Tool                  | Description                                                                                                                     |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `obsidian_eval`       | Execute JavaScript in Obsidian and return the result                                                                            |
-| `obsidian_dom`        | Query DOM elements by CSS selector                                                                                              |
-| `obsidian_console`    | Show captured console messages                                                                                                  |
-| `obsidian_errors`     | Show captured errors                                                                                                            |
-| `obsidian_screenshot` | Take a screenshot of the full window or a specific element via CSS selector. Supports png/jpeg/webp output and quality control. |
-| `obsidian_css`        | Inspect CSS with source locations for a selector                                                                                |
-| `obsidian_cdp`        | Run a Chrome DevTools Protocol command directly                                                                                 |
-| `obsidian_debug`      | Attach or detach the CDP debugger                                                                                               |
-| `obsidian_mobile`     | Toggle mobile emulation on or off                                                                                               |
-| `obsidian_devtools`   | Toggle Electron DevTools open/closed                                                                                            |
-
-### Memory
-
-| Tool                | Description                                                                                    |
-| ------------------- | ---------------------------------------------------------------------------------------------- |
-| `obsidian_briefing` | Snapshot of current state: active file, tabs, daily note, recent files, vault stats, CLAUDE.md |
-
-## How It Works
-
-This server is a thin MCP wrapper around Obsidian's native CLI. Each tool maps to one or more CLI commands:
-
-```
-obsidian_read { file: "My Note" }
-  → obsidian read file="My Note"
-
-obsidian_plugin_reload { id: "my-plugin" }
-  → obsidian plugin:reload id=my-plugin
-
-obsidian_dom { selector: ".workspace-leaf", text: true }
-  → obsidian dev:dom selector=".workspace-leaf" text
-
-obsidian_screenshot { selector: ".workspace-leaf", format: "jpeg", quality: 80 }
-  → CDP Page.captureScreenshot with element clip region
-```
-
-No network servers, no ports, no plugins to install. The CLI communicates with the running Obsidian instance directly.
-
-## Token usage
-
-Every MCP tool call consumes tokens — the tool description, the input parameters, and the response all count. This server is designed to be lightweight: most responses are raw CLI output with no wrapper text, and write operations return single-word confirmations like "Created" or "Deleted" (1-4 tokens).
-
-### What a typical session looks like
-
-| Action               | Tool calls                   | Typical tokens                         |
-| -------------------- | ---------------------------- | -------------------------------------- |
-| Session briefing     | 1 (`obsidian_briefing`)      | 100-400                                |
-| Read a note          | 1 (`obsidian_read`)          | 50-2,000+ (depends on note length)     |
-| Append to daily note | 1 (`obsidian_daily_append`)  | ~30 (input + "Appended to daily note") |
-| Take a screenshot    | 1 (`obsidian_screenshot`)    | ~30 (returns only a file path)         |
-| Enable a plugin      | 1 (`obsidian_plugin_enable`) | ~20 (returns "Enabled")                |
-| List vault files     | 1 (`obsidian_files`)         | 50-5,000+ (depends on vault size)      |
-
-Most interactions are small. A "read my daily note and append a task" flow is ~3 tool calls and a few hundred tokens total. The expensive operations are the ones that return large, unbounded content.
-
-### Tools with large outputs
-
-These tools can return substantial output depending on your vault size and content:
-
-| Tool                             | What drives size            | How to reduce it                                                     |
-| -------------------------------- | --------------------------- | -------------------------------------------------------------------- |
-| `obsidian_files`                 | Number of files in vault    | Use `folder`, `ext` filters, or `total: true` for count only         |
-| `obsidian_read`                  | Length of the note          | No built-in limit — large notes return in full                       |
-| `obsidian_tasks`                 | Number of tasks vault-wide  | Use `file`, `path`, `active`, `daily`, or `done`/`todo` filters      |
-| `obsidian_commands`              | Number of installed plugins | Use `filter` to match by command ID prefix                           |
-| `obsidian_dom`                   | DOM complexity              | Avoid `all: true` on broad selectors; use `text: true` for text-only |
-| `obsidian_eval` / `obsidian_cdp` | Whatever your code returns  | Design your code to return only what you need                        |
-| `obsidian_briefing`              | CLAUDE.md file size         | Keep your vault's CLAUDE.md concise                                  |
-
-### Built-in efficiency features
-
-Several tools include parameters specifically for reducing output:
-
-- **`total: true`** on `obsidian_files`, `obsidian_links`, `obsidian_backlinks` — returns only a count instead of the full list
-- **`format`** on `obsidian_tags`, `obsidian_tasks`, `obsidian_properties`, `obsidian_plugins`, `obsidian_backlinks` — choose `tsv` or `csv` for compact tabular output, `json` for structured data
-- **`filter`** on `obsidian_plugins` (by type), `obsidian_commands` (by ID prefix) — narrow results before they're returned
-- **`done` / `todo`** on `obsidian_tasks` — get only completed or incomplete tasks
-- **`active` / `daily`** on `obsidian_tasks`, `obsidian_tags`, `obsidian_properties` — scope to current file or daily note instead of full vault
-- **`text: true`** on `obsidian_dom` — return text content instead of raw HTML
-- **`limit`** on `obsidian_console` — cap the number of console messages returned
-
-### Tips for keeping token usage low
-
-1. **Start with `obsidian_briefing`** — one call gives you active file, open tabs, daily note status, recent files, and vault stats. Much cheaper than calling each tool separately.
-2. **Use filters on list tools** — `obsidian_files` with `ext=md` and `folder=Projects` is dramatically cheaper than listing the entire vault.
-3. **Prefer `total: true` when you only need a count** — "how many markdown files?" costs ~20 tokens instead of listing thousands of paths.
-4. **Scope tasks and tags to a file** — vault-wide `obsidian_tasks` on a large vault can be expensive; `obsidian_tasks` with `active: true` is not.
-5. **Use `text: true` with `obsidian_dom`** — raw HTML is verbose; text content is usually what you need.
-6. **Keep your vault's CLAUDE.md short** — `obsidian_briefing` includes it in full. A few focused lines is better than a wall of text.
-
-## FAQ
-
-**Is this safe?** This server runs locally and communicates only via stdio — there's no network exposure. Destructive tools like `obsidian_delete` require confirmation from your MCP client before executing. See [SECURITY.md](SECURITY.md) for the full trust model.
-
-**Why does it need `obsidian_eval`?** Obsidian has 800+ API methods. 42 tools cover the common operations. Eval is the escape hatch for everything else — and it's what makes use cases like "click that button" or "check the graph view" possible.
-
-**What if I don't want the powerful tools?** Your MCP client controls which tool calls are approved. Claude Code and Claude Desktop both show you the tool call and its arguments before executing. You can deny any call you're not comfortable with.
+[`server.json`](server.json) lists `io.github.slate-rehm/unified-obsidian-mcp` for the [MCP Registry](https://modelcontextprotocol.io/registry/about) (npm package `unified-obsidian-mcp`, stdio transport).
 
 ## Security
 
-This server executes commands against a running Obsidian instance. Tools like `obsidian_eval` and `obsidian_cdp` are powerful by design — they provide full JavaScript execution and DevTools access for app automation.
-
-See [SECURITY.md](SECURITY.md) for the full trust model, input handling details, and security considerations.
-
-## Disclaimer
-
-This project is not created by, affiliated with, or endorsed by [Obsidian](https://obsidian.md/) or Dynalist Inc. "Obsidian" is a trademark of Dynalist Inc. This project uses Obsidian's native CLI interface for interoperability purposes only.
+This server executes against your local Obsidian instance. Tools such as `obsidian_eval` and proxied CDP capabilities are powerful by design. Use a dev vault, review tool approvals in your client, and see [SECURITY.md](SECURITY.md) if present.
 
 ## License
 

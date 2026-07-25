@@ -54,17 +54,26 @@ const config = loadConfig({
 
 const { server, ctx } = await createServer(config);
 
-const shutdown = async (signal: string): Promise<void> => {
-  ctx.logger.info(`received ${signal}, shutting down`);
+let shuttingDown = false;
+const shutdown = async (reason: string): Promise<void> => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  ctx.logger.info(`${reason}, shutting down`);
   await ctx.browserProxy.close().catch(() => undefined);
   await ctx.router.dispose().catch(() => undefined);
   process.exit(0);
 };
 
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("received SIGINT"));
+process.on("SIGTERM", () => void shutdown("received SIGTERM"));
+
+// An MCP client signals shutdown by closing stdin. Without this the attached CDP
+// websocket keeps the event loop alive and the process lingers after every session.
+process.stdin.on("close", () => void shutdown("stdin closed"));
+process.stdin.on("end", () => void shutdown("stdin ended"));
 
 const transport = new StdioServerTransport();
+transport.onclose = () => void shutdown("transport closed");
 await server.connect(transport);
 ctx.logger.info("unified-obsidian-mcp ready", {
   toolsets: [...config.enabledToolsets],

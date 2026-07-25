@@ -1,0 +1,40 @@
+---
+description: Guidance for AI assistants working in an Obsidian community plugin repository with unified-obsidian-mcp.
+globs:
+  - "**/*.ts"
+  - "**/manifest.json"
+  - "**/styles.css"
+alwaysApply: false
+---
+
+# Obsidian plugin repo conventions
+
+## Dev loop
+
+- Build on the host (`npm run build`); the MCP server does not compile TypeScript.
+- Link into a dev vault with `obsidian_link_plugin` (symlink), never copy artifacts manually each time.
+- Verify with `obsidian_dev_cycle` after changes; read attributed errors from the response or `obsidian_logs(since=…)`.
+- Prefer `obsidian_command` / `obsidian_exercise_command` over browser menu automation.
+
+## API vs DOM
+
+- Read vault and workspace state with `obsidian_eval` (`app.vault`, `app.workspace`, `app.plugins`).
+- The file tree is virtualized — do not scrape `.nav-file-title` for full file lists.
+- UI work: `browser_snapshot` then pass refs as **`target`** to `browser_click` / `browser_type`.
+
+## CLI extension
+
+- `Plugin.prototype.registerCliHandler` is supported; completions are introspected live in `obsidian_commands`.
+- Duplicate CLI ids throw at registration — names must be unique.
+
+## Safety
+
+- Use a scratch dev vault for `obsidian_reset_state` and destructive tests.
+- Run `obsidian_doctor` when transports fail; quit Obsidian fully before expecting CDP after adding `--remote-debugging-port`.
+
+## Tool discovery
+
+- Core: status, doctor, launch, eval, cli, commands.
+- Plugin-dev: reload, manifest, settings, dev_cycle, exercise_command.
+- Telemetry: logs with cursor `since`, log_mark.
+- UI: `browser_*` (requires CDP).

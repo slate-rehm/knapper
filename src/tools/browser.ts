@@ -1,3 +1,171 @@
-import type { ServerContext } from "../server.js";
+/**
+ * Layer 4 — browser automation over the live Obsidian renderer.
+ *
+ * Proxies a curated subset of @playwright/mcp and adds Obsidian-scoped snapshots plus
+ * skillOnly helpers upstream omits from MCP.
+ */
 
-export async function registerBrowserTools(_ctx: ServerContext): Promise<void> {}
+import { z } from "zod";
+import type { ServerContext } from "../server.js";
+import { passthroughMcpResult } from "../browser/forward.js";
+import { checkTarget, keyDown, keyUp, pressSequentially, reloadWindow } from "../browser/native.js";
+import { takeObsidianSnapshot, obsidianSnapshotSchema } from "../browser/obsidian-snapshot.js";
+import type { ProxiedTool } from "../browser/proxy.js";
+
+const TARGET_HINT =
+  "Use the `target` parameter with a snapshot ref (e.g. e5) or a stable CSS selector from docs/dom-hooks.md. " +
+  "`element` is only a human-readable label for approval prompts, not a locator.";
+
+const VIRTUALIZED_TREE =
+  "Obsidian's file tree is virtualized: off-screen files are not in the DOM. " +
+  "List or search files with obsidian_search / vault tools; use the explorer only for visible rows.";
+
+const OBSIDIAN_PROXY_NOTES: Record<string, string> = {
+  browser_snapshot: `Full-page ARIA snapshot of the active Obsidian window. Prefer obsidian_snapshot when you only need a pane or modal — the full tree is large. ${TARGET_HINT}`,
+  browser_click: `Click with real mouse events over CDP (required for drag handles and gutters). ${TARGET_HINT}`,
+  browser_type: `Type into an editable control (e.g. .cm-content in source mode). ${TARGET_HINT}`,
+  browser_take_screenshot: `Capture the Obsidian UI. Defaults to viewport/element shots — avoid fullPage against a real desktop window (device metrics override is risky). ${TARGET_HINT}`,
+  browser_evaluate: `Run JavaScript in the Obsidian renderer. Prefer obsidian_eval for vault APIs; use this when you need DOM access in the same turn as a snapshot ref.`,
+  browser_tabs:
+    "List or select pages in the single CDP BrowserContext (all Obsidian windows and popouts).",
+  browser_find: `Search the accessibility tree. ${VIRTUALIZED_TREE}`,
+  browser_mouse_click_xy:
+    "Click at viewport coordinates — use when canvas/graph views lack refs (vision capability).",
+};
+
+function describeProxiedTool(tool: ProxiedTool): string {
+  const base = tool.description ?? tool.name;
+  const extra = OBSIDIAN_PROXY_NOTES[tool.name];
+  if (extra) return extra;
+  if (tool.name.startsWith("browser_verify_")) {
+    return `${base} Assertions run against the live Obsidian window; combine with browser_snapshot when debugging failures.`;
+  }
+  if (tool.name.startsWith("browser_mouse_")) {
+    return `${base} Coordinate input against the attached Obsidian window (vision capability).`;
+  }
+  return `${base} Runs against the user's live Obsidian window — prefer obsidian_command over menu clicking when possible.`;
+}
+
+function annotationsFor(name: string) {
+  if (name === "browser_evaluate") {
+    return { destructiveHint: true, openWorldHint: true };
+  }
+  if (name.startsWith("browser_verify_")) {
+    return { readOnlyHint: true };
+  }
+  if (
+    name === "browser_snapshot" ||
+    name === "browser_console_messages" ||
+    name === "browser_tabs" ||
+    name === "browser_find" ||
+    name === "browser_generate_locator"
+  ) {
+    return { readOnlyHint: true };
+  }
+  return undefined;
+}
+
+export async function registerBrowserTools(ctx: ServerContext): Promise<void> {
+  const { registry, browserProxy, router } = ctx;
+
+  let proxied: ProxiedTool[] = [];
+  try {
+    proxied = await browserProxy.listTools();
+  } catch (e) {
+    ctx.logger.warn("browser proxy init failed during registration; tools will error on call", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  for (const tool of proxied) {
+    registry.add({
+      name: tool.name,
+      toolset: "ui",
+      capability: tool.name === "browser_snapshot" ? "ariaSnapshot" : "realInput",
+      description: describeProxiedTool(tool),
+      jsonInputSchema: tool.inputSchema,
+      ...(annotationsFor(tool.name) ? { annotations: annotationsFor(tool.name) } : {}),
+      handler: async (args) => {
+        const result = await browserProxy.callTool(tool.name, args);
+        return passthroughMcpResult(result);
+      },
+    });
+  }
+
+  registry.add({
+    name: "obsidian_snapshot",
+    toolset: "ui",
+    capability: "ariaSnapshot",
+    description:
+      "ARIA snapshot scoped to part of Obsidian (active leaf, workspace, modal, settings, or a custom selector). " +
+      "Much smaller than browser_snapshot for everyday navigation. Refs in the output work as browser_* `target` values. " +
+      VIRTUALIZED_TREE,
+    annotations: { readOnlyHint: true },
+    inputSchema: obsidianSnapshotSchema,
+    handler: async (args) => takeObsidianSnapshot(router, args),
+  });
+
+  registry.add({
+    name: "browser_reload",
+    toolset: "ui",
+    capability: "realInput",
+    description:
+      "Reload the Obsidian window. Tries the in-app app:reload command first; falls back to page.reload(). " +
+      "This reloads the whole renderer — for plugin changes prefer obsidian_dev_cycle instead.",
+    annotations: { destructiveHint: true },
+    inputSchema: {},
+    handler: async () => reloadWindow(router),
+  });
+
+  registry.add({
+    name: "browser_check",
+    toolset: "ui",
+    capability: "realInput",
+    description: `Check a checkbox or radio in Obsidian. ${TARGET_HINT}`,
+    inputSchema: {
+      target: z.string().describe("Snapshot ref or CSS selector"),
+      element: z.string().optional().describe("Human-readable label for approval prompts"),
+    },
+    handler: async (args) => checkTarget(router, args),
+  });
+
+  registry.add({
+    name: "browser_press_sequentially",
+    toolset: "ui",
+    capability: "realInput",
+    description:
+      "Type text one key at a time on the focused element — use when Obsidian key handlers ignore fill(). " +
+      "Focus the editor (.cm-content) or a search field first.",
+    inputSchema: {
+      text: z.string().describe("Text to type"),
+      submit: z.boolean().optional().describe("Press Enter after typing"),
+    },
+    handler: async (args) => pressSequentially(router, args),
+  });
+
+  registry.add({
+    name: "browser_keydown",
+    toolset: "ui",
+    capability: "realInput",
+    description:
+      "Hold a key down (modifiers, chords). Pair with browser_keyup. Does not target an element — focus first.",
+    inputSchema: {
+      key: z.string().describe("Key name such as Shift, Control, or ArrowDown"),
+    },
+    handler: async (args) => keyDown(router, args),
+  });
+
+  registry.add({
+    name: "browser_keyup",
+    toolset: "ui",
+    capability: "realInput",
+    description:
+      "Release a key previously held with browser_keydown. Always pair the two, or the modifier " +
+      "stays logically held down and corrupts every later keystroke in the session. Does not " +
+      "target an element — focus first.",
+    inputSchema: {
+      key: z.string().describe("Key name matching the prior keydown"),
+    },
+    handler: async (args) => keyUp(router, args),
+  });
+}
