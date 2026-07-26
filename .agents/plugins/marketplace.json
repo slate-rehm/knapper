@@ -1,11 +1,13 @@
 {
   "name": "knapper",
+  "description": "Drive a live Obsidian desktop app for plugin development over MCP",
   "interface": {
-    "displayName": "Unified Obsidian MCP"
+    "displayName": "Knapper"
   },
   "plugins": [
     {
       "name": "knapper",
+      "description": "Drive a live Obsidian desktop app for plugin development over MCP",
       "source": {
         "source": "local",
         "path": "./"

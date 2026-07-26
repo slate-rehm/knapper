@@ -177,6 +177,30 @@ back any console errors attributed to it.
 If you installed the plugin bundle, the `obsidian-instance-setup` and
 `obsidian-plugin-dev` skills walk an agent through this without you prompting it.
 
+## Test vaults
+
+Never point an agent at a vault you care about. `obsidian_create_vault` makes a
+disposable one and registers it:
+
+```text
+obsidian_create_vault path=~/obsidian-test-vaults/scratch open=true
+```
+
+`open=true` cold-restarts Obsidian, which is required — Obsidian reads its vault
+registry once at startup, so a newly registered vault is invisible until it
+restarts.
+
+`obsidian_remove_vault` unregisters it, and deletes the directory with
+`deleteFiles=true`. **It refuses to touch any vault knapper did not create.** The
+contract is a `.knapper-managed` marker file written at creation time; without one
+the tool fails with `VAULT_NOT_MANAGED` and changes nothing. Creation also refuses
+to adopt a directory that already contains files, so an existing vault can never
+acquire a marker by accident. Delete real vaults yourself from Obsidian's vault
+switcher.
+
+`obsidian_doctor` tags which registered vaults are knapper-managed, so an agent can
+tell scratch space from your real notes.
+
 ## Configuration
 
 Set options via **environment variables** (and a subset via CLI flags). See [docs/configuration.md](docs/configuration.md) for examples.
@@ -227,7 +251,7 @@ Enable extras: `KNAP_TOOLSETS=core,ui,telemetry,plugin-dev,vault` or `--toolsets
 
 ### Representative tools (default toolsets)
 
-**Core & provisioning:** `obsidian_status`, `obsidian_doctor`, `obsidian_launch`, `obsidian_setup_cli`, `obsidian_setup_vault`, `obsidian_link_plugin`, `obsidian_list_targets`, `obsidian_attach`, `obsidian_eval`, `obsidian_cli`, `obsidian_commands`, `obsidian_command`
+**Core & provisioning:** `obsidian_status`, `obsidian_doctor`, `obsidian_launch`, `obsidian_setup_cli`, `obsidian_setup_vault`, `obsidian_create_vault`, `obsidian_remove_vault`, `obsidian_link_plugin`, `obsidian_list_targets`, `obsidian_attach`, `obsidian_eval`, `obsidian_cli`, `obsidian_commands`, `obsidian_command`
 
 **Plugin dev:** `obsidian_plugin_list`, `obsidian_plugin_manifest`, `obsidian_plugin_settings`, `obsidian_plugin_reload`, `obsidian_dev_cycle`, `obsidian_exercise_command`, `obsidian_reset_state`, `obsidian_plugin_health`
 
