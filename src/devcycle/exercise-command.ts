@@ -43,12 +43,25 @@ export async function runExerciseCommand(
   const mark = telemetry.mark(`exercise:${commandId}:${Date.now()}`);
   const before = (await workspaceSnapshot(router)) ?? emptySnap();
 
-  const runCode = `return app.commands.executeCommandById(${escEvalString(commandId)})`;
+  // `=== true` normalizes the result across both transports, since the CLI path
+  // round-trips through JSON and would otherwise blur false into undefined.
+  const runCode = `return app.commands.executeCommandById(${escEvalString(commandId)}) === true`;
   let executed = false;
   let execError: string | undefined;
   try {
-    await rendererEval(router, runCode);
-    executed = true;
+    const dispatched = await rendererEval<boolean>(router, runCode);
+    // executeCommandById returns false for an id Obsidian does not know, and for a
+    // command whose availability check declines. Discarding that return value made
+    // this tool report "Executed command fake:nope." — a green result for a command
+    // that never ran, which is precisely what it exists to detect.
+    if (dispatched === false) {
+      execError =
+        `Obsidian did not run "${commandId}": executeCommandById returned false. ` +
+        "Either no command has that id, or its checkCallback declined in the current context. " +
+        "List real ids with obsidian_plugin_commands or obsidian_commands.";
+    } else {
+      executed = true;
+    }
   } catch (e) {
     execError = e instanceof Error ? e.message : String(e);
   }

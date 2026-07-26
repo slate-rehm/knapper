@@ -104,7 +104,17 @@ export function registerProvisioningTools(ctx: ServerContext): void {
 
       let version = "";
       try {
-        version = (await router.cli.run(["version"], { timeoutMs: 5000 })).trim();
+        // A cold-starting Obsidian prints startup lines ("Loaded main app package
+        // …") on the same stdout, and taking the whole buffer made doctor report a
+        // log excerpt as the version — in exactly the broken state doctor exists to
+        // diagnose. Pick the line that actually looks like a version.
+        const raw = await router.cli.run(["version"], { timeoutMs: 5000 });
+        const line = raw
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l !== "")
+          .find((l) => /^v?\d+\.\d+\.\d+/.test(l));
+        version = line ?? "(unavailable)";
       } catch {
         version = "(unavailable)";
       }
