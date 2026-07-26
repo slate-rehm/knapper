@@ -162,15 +162,40 @@ export class BrowserProxy {
     if (!(await this.init()) || !this.client) return false;
     const session = this.router.playwright;
     try {
-      const page = await session.page();
-      const context = await session.connect();
-      const index = context.pages().indexOf(page);
-      if (index < 0) return false;
+      const title = await (await session.page()).title();
+
+      // The index must come from upstream's own tab list, not from
+      // context.pages(). Those are different index spaces: context.pages() also
+      // contains metadata workers and blob pages, while upstream lists only real
+      // windows. Indexing the former into the latter selected an unrelated tab
+      // (or none) and quietly left the pin unhonored — it happened to line up in
+      // one arrangement of windows, which is worse than failing outright.
+      const listed = await this.client.callTool({
+        name: "browser_tabs",
+        arguments: { action: "list" },
+      });
+      const text = (listed as CallToolResult).content
+        .map((c) => (c.type === "text" ? c.text : ""))
+        .join("\n");
+
+      // Lines look like `- 0: (current) [Title](url)`.
+      const tabs = [...text.matchAll(/^-\s*(\d+):\s*(?:\(current\)\s*)?\[(.+?)\]\(/gm)].map(
+        (m) => ({ index: Number(m[1]), title: m[2] ?? "" }),
+      );
+
+      // Every Obsidian window shares app://obsidian.md/index.html, so the title —
+      // "<note> - <vault> - Obsidian <version>" — is the only distinguishing field.
+      const match = tabs.find((t) => t.title === title);
+      if (!match) {
+        this.logger.warn("pinned window is not in the proxy's tab list", { title });
+        return false;
+      }
+
       await this.client.callTool({
         name: "browser_tabs",
-        arguments: { action: "select", index },
+        arguments: { action: "select", index: match.index },
       });
-      this.logger.debug("browser proxy following pin", { index });
+      this.logger.debug("browser proxy following pin", { index: match.index, title });
       return true;
     } catch (e) {
       this.logger.warn("could not point the browser proxy at the pinned window", {
