@@ -8,9 +8,15 @@ import { parseCliJson, renderResult } from "../util/serialize.js";
 import type { ToolOutcome } from "../tools/registry.js";
 
 /** Shown on tools that may open a closed vault in a new window. */
+/**
+ * Appended to ~60 tool descriptions, so it has to stay short.
+ *
+ * The long form ran to 27 words and repeated on every vault-scoped tool including
+ * pure readers, which buried the half of each description that actually
+ * distinguishes one tool from another — the opposite of what helps tool selection.
+ */
 export const CLOSED_VAULT_WARNING =
-  "Side effect: if the target vault is registered but not open, Obsidian silently opens it in a " +
-  "new 800×600 unfocused window, which can change your window layout.";
+  "Opens the vault in a new window if it is registered but closed.";
 
 export function vaultName(args: Record<string, unknown>, config: Config): string | undefined {
   const v = args.vault as string | undefined;

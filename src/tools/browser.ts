@@ -37,17 +37,33 @@ const OBSIDIAN_PROXY_NOTES: Record<string, string> = {
     "Click at viewport coordinates — use when canvas/graph views lack refs (vision capability).",
 };
 
+/** Upstream descriptions do not all end in a period, so joining needs one added. */
+function sentence(base: string, suffix: string): string {
+  const trimmed = base.trim();
+  const punctuated = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  return `${punctuated} ${suffix}`;
+}
+
 function describeProxiedTool(tool: ProxiedTool): string {
   const base = tool.description ?? tool.name;
   const extra = OBSIDIAN_PROXY_NOTES[tool.name];
   if (extra) return extra;
   if (tool.name.startsWith("browser_verify_")) {
-    return `${base} Assertions run against the live Obsidian window; combine with browser_snapshot when debugging failures.`;
+    return sentence(
+      base,
+      "Assertions run against the live Obsidian window; combine with browser_snapshot when debugging failures.",
+    );
   }
   if (tool.name.startsWith("browser_mouse_")) {
-    return `${base} Coordinate input against the attached Obsidian window (vision capability).`;
+    return sentence(
+      base,
+      "Coordinate input against the attached Obsidian window (vision capability).",
+    );
   }
-  return `${base} Runs against the user's live Obsidian window — prefer obsidian_command over menu clicking when possible.`;
+  return sentence(
+    base,
+    "Runs against the user's live Obsidian window — prefer obsidian_command over menu clicking when possible.",
+  );
 }
 
 function annotationsFor(name: string) {
