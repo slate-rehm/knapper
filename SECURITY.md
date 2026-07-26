@@ -68,6 +68,23 @@ The same capability by way of `@playwright/mcp`.
 
 Moves files to the system trash. `permanent: true` must be set explicitly to bypass it.
 
+### `obsidian_remove_vault` — `destructiveHint`
+
+Can delete an entire vault directory, so it is gated on provenance rather than on a
+confirmation flag an agent would happily set itself.
+
+A vault is removable **only** if it carries a `.knapper-managed` marker file, which is written
+by `obsidian_create_vault` and by nothing else. Any other vault — including every vault you
+made yourself — fails with `VAULT_NOT_MANAGED` and nothing is changed, unregistered, or
+deleted. `obsidian_create_vault` in turn refuses to adopt a directory that already contains
+files, so an existing vault cannot acquire a marker by accident.
+
+Two further refusals apply regardless of the marker: a path that is your home directory, a
+filesystem root, or a top-level system directory, and a path that contains another registered
+vault (which would take that vault with it).
+
+Deleting the marker from a vault makes it permanent again.
+
 ### Withheld browser tools
 
 knapper proxies `@playwright/mcp` through an **allowlist**, not a blocklist
@@ -81,13 +98,14 @@ means navigating or closing _the user's actual Obsidian_.
 
 knapper is not a read-only bridge. It writes, outside the vault as well as inside it:
 
-| Path                                       | Written by                                   | Why                                                                    |
-| ------------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------- |
-| `<userData>/obsidian.json`                 | `obsidian_setup_cli`, `obsidian_setup_vault` | Flips the global `cli` flag; registers a vault                         |
-| `<vault>/.obsidian/plugins/<id>`           | `obsidian_link_plugin`                       | Creates or replaces a **symlink**. Refuses to clobber a real directory |
-| `<vault>/.obsidian/plugins/<id>/data.json` | `obsidian_reset_state`                       | Overwrites plugin settings with `{}`; returns the previous contents    |
-| `./.knapper/`                              | screenshot and snapshot tools                | Output artifacts, under `KNAP_SCREENSHOT_DIR`                          |
-| The vault itself                           | the `vault` and `authoring` toolsets         | Note CRUD, frontmatter, daily notes                                    |
+| Path                                       | Written by                                                             | Why                                                                    |
+| ------------------------------------------ | ---------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `<userData>/obsidian.json`                 | `obsidian_setup_cli`, `obsidian_create_vault`, `obsidian_remove_vault` | Flips the global `cli` flag; registers and unregisters vaults          |
+| `<vault>/.knapper-managed`                 | `obsidian_create_vault`                                                | Provenance marker; the only thing that permits later removal           |
+| `<vault>/.obsidian/plugins/<id>`           | `obsidian_link_plugin`                                                 | Creates or replaces a **symlink**. Refuses to clobber a real directory |
+| `<vault>/.obsidian/plugins/<id>/data.json` | `obsidian_reset_state`                                                 | Overwrites plugin settings with `{}`; returns the previous contents    |
+| `./.knapper/`                              | screenshot and snapshot tools                                          | Output artifacts, under `KNAP_SCREENSHOT_DIR`                          |
+| The vault itself                           | the `vault` and `authoring` toolsets                                   | Note CRUD, frontmatter, daily notes                                    |
 
 ## Input handling
 

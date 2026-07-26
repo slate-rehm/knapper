@@ -32,7 +32,29 @@ src/
   telemetry/             console/error/network ring buffer, plugin attribution
   devcycle/              composites (dev_cycle, exercise, reset_state)
 scripts/                 acceptance, e2e, ci-smoke, version sync
+
+skills/                  plugin skills (obsidian-debugging, -instance-setup,
+                         -plugin-dev, -ui-automation), shipped to installers
+commands/                plugin slash commands (obsidian-dev, obsidian-doctor)
+rules/                   plugin rules (obsidian-plugin.mdc)
+agents/                  plugin subagents
 ```
+
+This repo is packaged as a **plugin**, so `skills/`, `commands/`, `rules/`, and
+`agents/` sit at the top level rather than under a dot-directory — that is the
+plugin convention, not a mistake. `.agents/skills` and `.claude/skills` are symlinks
+to `skills/` so the skills also load while working inside this repo.
+
+### Plugin manifests
+
+Four manifests describe the same plugin and **must be updated together**:
+
+- `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `.cursor-plugin/plugin.json`
+  — identical content, one per harness.
+- `.claude-plugin/marketplace.json` (Claude marketplace schema) and
+  `.agents/plugins/marketplace.json` (`.agents` plugin schema) — **different schemas
+  by design**, so they cannot be merged; keep name, description, and version aligned
+  by hand.
 
 ## Commands
 

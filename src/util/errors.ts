@@ -21,6 +21,8 @@ export type ErrorCode =
   | "TIMEOUT"
   | "INVALID_ARGUMENT"
   | "PLUGIN_NOT_FOUND"
+  /** Refused to touch a vault knapper did not create. Never downgrade this. */
+  | "VAULT_NOT_MANAGED"
   | "INTERNAL";
 
 export interface UobErrorOptions {
