@@ -84,3 +84,24 @@ Obsidian checks for updates on startup and hourly. A downloaded `obsidian-<versi
 - **obsidian-plugin-dev** — after setup, link and reload plugins.
 - **obsidian-ui-automation** — requires CDP.
 - **obsidian-debugging** — telemetry after connection works.
+
+## VAULT_NOT_AUTHORIZED
+
+knapper refuses any vault the user has not authorized, so a fresh install reaches
+nothing. This is a fifth precondition state alongside the four transport ones, and
+unlike those, **no tool fixes it**.
+
+`obsidian_doctor` and `obsidian_status` list every registered vault with its
+authorization state, so start there.
+
+- Need throwaway space? `obsidian_create_vault` — it authorizes what it creates, and
+  is the right answer for almost every experiment.
+- Need a _specific existing_ vault? Only the user can grant that, by running
+  `knapper authorize <path>` in their own terminal. It requires an interactive TTY and
+  a retyped vault name, so you cannot run it yourself — spawning the binary will just
+  refuse.
+
+Do not volunteer the authorize command. An agent that answers every refusal with
+"run this to grant me access" trains users to authorize reflexively, which is the
+habit the fence exists to prevent. Surface it only when the user has asked to work in
+that vault.

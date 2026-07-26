@@ -3,6 +3,7 @@
  * Cached in-process because the set reflects enabled core plugins and dev plugin handlers.
  */
 
+import { rethrowIfRefused } from "../util/errors.js";
 import type { CapabilityRouter } from "../connection/router.js";
 import { parseCliJson } from "../util/serialize.js";
 
@@ -83,7 +84,8 @@ export async function cliCommandIds(
   let stdout: string;
   try {
     stdout = await router.cliCommand(tokens, vault !== undefined ? { vault } : {});
-  } catch {
+  } catch (e) {
+    rethrowIfRefused(e);
     const fallback = ["commands"];
     if (filter !== undefined && filter !== "") fallback.push(`filter=${filter}`);
     stdout = await router.cliCommand(fallback, vault !== undefined ? { vault } : {});

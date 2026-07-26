@@ -7,6 +7,11 @@
  *
  * Capture is idempotent and re-arms itself after a reconnect, because Obsidian
  * restarts are routine during plugin development.
+ *
+ * Only windows belonging to an authorized vault are wired. Console lines and page
+ * errors routinely quote note titles and file contents, so subscribing to an
+ * unauthorized vault's stream would exfiltrate through the back door what the
+ * vault fence blocks at the front.
  */
 
 import type { BrowserContext, Page } from "playwright-core";
@@ -30,6 +35,33 @@ function toLevel(type: string): LogLevel {
       return "info";
     default:
       return "log";
+  }
+}
+
+/**
+ * Wait for a page to become identifiable, then answer whether it is authorized.
+ *
+ * A window fires `page` the moment it exists, well before its renderer has an
+ * `app` object or a title carrying the vault name. Deciding at that instant makes
+ * every new window look unidentifiable — and since a page is only ever offered
+ * once, a single early "no" would drop its console stream for the life of the
+ * session. That is what made a freshly opened vault silently produce no telemetry.
+ *
+ * Still fails closed: an unauthorized window never becomes authorized by waiting,
+ * so this only costs time on windows knapper was never going to wire anyway.
+ */
+async function waitForAuthorized(
+  session: CapabilityRouter["playwright"],
+  page: Page,
+  timeoutMs = 5000,
+  stepMs = 250,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (page.isClosed()) return false;
+    if (await session.isPageAuthorized(page)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, stepMs));
   }
 }
 
@@ -107,24 +139,39 @@ export class TelemetryCapture {
       this.subscribedContext = context;
     }
 
-    // Catch windows opened after we attach (popouts, new vault windows).
+    // Catch windows opened after we attach (popouts, new vault windows). A window
+    // that opens an unauthorized vault must stay unwired, so the check runs here
+    // too rather than only over the initial enumeration.
     if (!this.armed) {
       context.on("page", (page) => {
-        void this.wirePage(page, this.networkEnabled || opts.network === true).catch((e) =>
-          this.logger.debug("failed to wire new page", { error: String(e) }),
-        );
+        void (async () => {
+          if (!(await waitForAuthorized(session, page))) {
+            this.logger.debug("skipping telemetry for an unauthorized window");
+            return;
+          }
+          await this.wirePage(page, this.networkEnabled || opts.network === true);
+        })().catch((e) => this.logger.debug("failed to wire new page", { error: String(e) }));
       });
     }
 
     let count = 0;
+    let skipped = 0;
     for (const page of context.pages()) {
       if (page.isClosed()) continue;
+      if (!(await session.isPageAuthorized(page))) {
+        skipped++;
+        continue;
+      }
       if (await this.wirePage(page, opts.network === true || this.networkEnabled)) count++;
     }
 
     this.armed = true;
     if (opts.network === true) this.networkEnabled = true;
-    this.logger.debug("telemetry armed", { pages: count, network: this.networkEnabled });
+    this.logger.debug("telemetry armed", {
+      pages: count,
+      skippedUnauthorized: skipped,
+      network: this.networkEnabled,
+    });
     return { armed: true, pages: count };
   }
 

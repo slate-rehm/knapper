@@ -27,7 +27,6 @@ import {
 
 export interface CliOptions {
   obsidianBin: string;
-  vault?: string;
   timeoutMs: number;
 }
 
@@ -70,14 +69,45 @@ export function cliSocketPath(): string {
 }
 
 /**
+ * Commands that genuinely have no vault to scope to.
+ *
+ * Everything else must carry `vault=`. These three answer questions about the
+ * installation rather than about notes, and the health probe needs `version` to
+ * work before any vault has been resolved.
+ */
+export const VAULT_AGNOSTIC_COMMANDS = new Set(["version", "help", "__completions"]);
+
+/**
  * Build the argv for an Obsidian CLI call.
  *
  * `vault=` must be the very first token, before the command name. Obsidian's own
  * pre-filter drops every `--`-prefixed token except a small whitelist, so callers
  * must express options as `key=value` or bare flags rather than `--flag`.
+ *
+ * Omitting `vault=` is not "use the default" — Obsidian falls back to whichever
+ * vault the user last focused, which makes the target a property of where they
+ * happened to click last. That silent coin flip is why this throws instead of
+ * building an unscoped call: the fence resolves a vault up front, and a command
+ * arriving here without one means a caller bypassed it.
  */
 export function buildArgs(command: string[], vault?: string): string[] {
-  return vault !== undefined && vault !== "" ? [`vault=${vault}`, ...command] : [...command];
+  if (vault !== undefined && vault !== "") return [`vault=${vault}`, ...command];
+
+  const name = command[0] ?? "";
+  if (!VAULT_AGNOSTIC_COMMANDS.has(name)) {
+    throw new UobError(
+      "VAULT_NOT_AUTHORIZED",
+      `Refusing to run the Obsidian CLI command "${name}" without a vault.`,
+      {
+        remediation:
+          "With no `vault=` token Obsidian targets whichever vault was last focused, so this call " +
+          "could land anywhere. Pass an explicit `vault` argument, or set OBSIDIAN_VAULT for the " +
+          "session. This is a bug in knapper if you did not call the CLI directly.",
+        details: { command: name },
+      },
+    );
+  }
+  return [...command];
 }
 
 /** Quote a value for the `key=value` grammar, escaping newlines and tabs. */
@@ -264,7 +294,10 @@ export class ObsidianCli {
     command: string[],
     overrides: { vault?: string; timeoutMs?: number } = {},
   ): Promise<string> {
-    const vault = overrides.vault ?? this.opts.vault;
+    // No session-default fallback on purpose. A default here would silently
+    // re-scope any call whose vault the fence failed to resolve, which is exactly
+    // the class of bug the fence exists to make impossible.
+    const vault = overrides.vault;
     const args = buildArgs(command, vault);
     const timeout = overrides.timeoutMs ?? this.opts.timeoutMs;
 
@@ -340,7 +373,12 @@ export class ObsidianCli {
   }
 
   /**
-   * Run `eval` and return the raw stdout.
+   * Run `eval` and return the raw stdout, scoped to `vault`.
+   *
+   * The vault is a required argument rather than the session default because this
+   * method used to read `this.opts.vault` and ignore per-call overrides entirely —
+   * so every routed `evaluate` silently ran against the session default no matter
+   * which vault the caller asked for.
    *
    * Throws `EVAL_FAILED` when the code threw in the renderer. The CLI reports an
    * in-page throw as ordinary stdout with exit code 0, so it must be detected by
@@ -348,8 +386,7 @@ export class ObsidianCli {
    * as `Error: <message>`. Without this check a thrown exception is indistinguishable
    * from a successful evaluation that happened to return an error-shaped string.
    */
-  async evaluate(code: string): Promise<string> {
-    const vault = this.opts.vault;
+  async evaluate(code: string, vault: string): Promise<string> {
     const stdout = await this.runForEval(code, vault, this.opts.timeoutMs);
 
     const failure = classifyEvalOutput(stdout, code);

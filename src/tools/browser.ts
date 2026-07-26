@@ -11,6 +11,7 @@ import { passthroughMcpResult } from "../browser/forward.js";
 import { checkTarget, keyDown, keyUp, pressSequentially, reloadWindow } from "../browser/native.js";
 import { takeObsidianSnapshot, obsidianSnapshotSchema } from "../browser/obsidian-snapshot.js";
 import type { ProxiedTool } from "../browser/proxy.js";
+import { runExerciseHotkey } from "../devcycle/exercise-hotkey.js";
 
 const TARGET_HINT =
   "Use the `target` parameter with a snapshot ref (e.g. e5) or a stable CSS selector from docs/dom-hooks.md. " +
@@ -176,6 +177,51 @@ export async function registerBrowserTools(ctx: ServerContext): Promise<void> {
       key: z.string().describe("Key name such as Shift, Control, or ArrowDown"),
     },
     handler: async (args) => keyDown(router, args),
+  });
+
+  registry.add({
+    name: "obsidian_exercise_hotkey",
+    toolset: "ui",
+    capability: "realInput",
+    handlesOwnTelemetry: true,
+    description:
+      "Press a real keyboard chord and report whether it actually did anything: workspace state " +
+      "before/after plus console output since a telemetry mark. Use this to test that a hotkey " +
+      "*binding* works — browser_press_key only tells you the keys were delivered, which they " +
+      "almost always are. Works with Obsidian in the background. Cannot trigger Electron menu " +
+      "accelerators (the app-level Cmd+Q class), which never reach the renderer. " +
+      "To just run a command, prefer obsidian_command; this is for exercising the binding.",
+    inputSchema: {
+      keys: z
+        .string()
+        .describe('Chord in Playwright syntax, e.g. "Control+p", "Shift+Alt+F", "Escape"'),
+      focus: z
+        .string()
+        .optional()
+        .describe(
+          'CSS selector to focus first, e.g. ".cm-content" for editor-scoped hotkeys. Page focus ' +
+            "is emulated automatically; this picks the focused element within it.",
+        ),
+      waitMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe("Milliseconds to wait after the chord before sampling (default 600)"),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
+    },
+    handler: async (args) =>
+      runExerciseHotkey(
+        router,
+        ctx.config,
+        ctx.telemetry,
+        {
+          keys: args.keys as string,
+          focus: args.focus as string | undefined,
+          waitMs: args.waitMs as number | undefined,
+        },
+        args,
+      ),
   });
 
   registry.add({

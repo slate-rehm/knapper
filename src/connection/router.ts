@@ -23,12 +23,14 @@ import {
   obsidianNotRunning,
   UobError,
 } from "../util/errors.js";
-import { ObsidianCli } from "./cli/exec.js";
+import { ObsidianCli, VAULT_AGNOSTIC_COMMANDS } from "./cli/exec.js";
 import { PlaywrightSession } from "./cdp/session.js";
 import { ConnectionSupervisor } from "./supervisor.js";
 import { isObsidianRunning, probeHealth, type HealthReport } from "./health.js";
 import { probeCdp } from "./cdp/discover.js";
 import { readGlobalConfig } from "./vaults.js";
+import { VaultFence, type AuthorizedVault } from "./fence.js";
+import { FocusEmulator } from "../browser/focus.js";
 
 export interface LayerAvailability {
   playwright: boolean;
@@ -40,6 +42,18 @@ export interface LayerAvailability {
 export class CapabilityRouter {
   readonly cli: ObsidianCli;
   readonly playwright: PlaywrightSession;
+  /**
+   * The vault fence. Owned here because the router is the one place both transports
+   * pass through, so a single instance keeps their caches — and therefore their
+   * answers — consistent within a call.
+   */
+  readonly fence: VaultFence;
+  /**
+   * Scoped focus emulation for input tools. Owned here so the native tools and the
+   * @playwright/mcp proxy share one refcount per page — they drive the same window,
+   * and two independent counters would let one revert the other's hold.
+   */
+  readonly focus: FocusEmulator;
   /**
    * Owned here rather than by the server so the existing shutdown path —
    * `cli.ts` calls only `router.dispose()` — stops its timer.
@@ -63,17 +77,22 @@ export class CapabilityRouter {
     private readonly config: Config,
     private readonly logger: Logger,
   ) {
+    this.fence = new VaultFence({
+      ...(config.vault !== undefined ? { defaultVault: config.vault } : {}),
+      logger: logger.child("fence"),
+    });
     this.cli = new ObsidianCli({
       obsidianBin: config.obsidianBin,
-      ...(config.vault !== undefined ? { vault: config.vault } : {}),
       timeoutMs: config.cliTimeoutMs,
     });
     this.playwright = new PlaywrightSession({
       cdpUrl: config.cdpUrl,
-      ...(config.vault !== undefined ? { vault: config.vault } : {}),
+      resolveVault: (requested) => this.fence.resolve(requested),
+      isVaultAuthorized: async (name) => (await this.fence.isAuthorized(name)) !== undefined,
       ...(config.targetMatch !== undefined ? { targetMatch: config.targetMatch } : {}),
       logger: logger.child("cdp"),
     });
+    this.focus = new FocusEmulator(this.playwright, logger.child("focus"));
     this.supervisor = new ConnectionSupervisor({
       session: this.playwright,
       logger: logger.child("supervisor"),
@@ -166,13 +185,17 @@ export class CapabilityRouter {
    * Evaluate JavaScript in the renderer through whichever layer is available.
    * Returns the value plus which layer served it.
    */
-  async evaluate<T>(code: string): Promise<{ value: T; layer: Layer }> {
+  async evaluate<T>(
+    code: string,
+    opts: { vault?: string } = {},
+  ): Promise<{ value: T; layer: Layer }> {
+    const vault = await this.fence.resolve(opts.vault);
     const layer = await this.resolve("evaluate");
     if (layer === "playwright") {
       this.claimDebugger("playwright");
-      return { value: await this.playwright.evaluate<T>(code), layer };
+      return { value: await this.playwright.evaluate<T>(code, vault.name), layer };
     }
-    const stdout = await this.cli.evaluate(code);
+    const stdout = await this.cli.evaluate(code, vault.name);
     const { parseCliJson } = await import("../util/serialize.js");
     const parsed = parseCliJson<T>(stdout);
     return { value: (parsed ?? (stdout.trim() as unknown)) as T, layer };
@@ -182,17 +205,24 @@ export class CapabilityRouter {
    * Evaluate and require a JSON result. Used by tools that need structured data
    * regardless of which transport answered.
    */
-  async evaluateJson<T>(code: string): Promise<{ value: T; layer: Layer }> {
+  async evaluateJson<T>(
+    code: string,
+    opts: { vault?: string } = {},
+  ): Promise<{ value: T; layer: Layer }> {
+    const vault = await this.fence.resolve(opts.vault);
     const layer = await this.resolve("evaluate");
     if (layer === "playwright") {
       this.claimDebugger("playwright");
-      return { value: await this.playwright.evaluate<T>(code), layer };
+      return { value: await this.playwright.evaluate<T>(code, vault.name), layer };
     }
     // The CLI returns strings, so ask the page to stringify before it crosses over.
     // Use wrapExpression so IIFEs and bare expressions keep their return values —
     // a naive `{ ${code} }` body discards an IIFE result and yields `(no output)`.
     const { parseCliJson, wrapExpression } = await import("../util/serialize.js");
-    const stdout = await this.cli.evaluate(`JSON.stringify((() => { ${wrapExpression(code)} })())`);
+    const stdout = await this.cli.evaluate(
+      `JSON.stringify((() => { ${wrapExpression(code)} })())`,
+      vault.name,
+    );
     const parsed = parseCliJson<T>(stdout);
     if (parsed === undefined) {
       const cleaned = stdout.trim().replace(/^=>\s*/, "");
@@ -210,10 +240,27 @@ export class CapabilityRouter {
     return { value: parsed, layer };
   }
 
-  /** Run an Obsidian CLI command, requiring the CLI layer. */
+  /**
+   * Run an Obsidian CLI command, requiring the CLI layer.
+   *
+   * The vault is resolved through the fence here rather than trusted from the
+   * caller, so a handler that forgets to resolve still cannot produce an unscoped
+   * call. Vault-agnostic commands (`version`, `help`, `__completions`) skip the
+   * fence — they answer questions about the installation, not about notes, and
+   * `version` has to work before anything is authorized.
+   */
   async cliCommand(command: string[], overrides: { vault?: string } = {}): Promise<string> {
     await this.resolve("cliCommand");
-    return this.cli.run(command, overrides);
+    if (VAULT_AGNOSTIC_COMMANDS.has(command[0] ?? "")) {
+      return this.cli.run(command);
+    }
+    const vault = await this.fence.resolve(overrides.vault);
+    return this.cli.run(command, { vault: vault.name });
+  }
+
+  /** The vault a call will target, or a typed refusal. */
+  async resolveVault(requested?: string): Promise<AuthorizedVault> {
+    return this.fence.resolve(requested);
   }
 
   async health(opts: { skipCliProbe?: boolean } = {}): Promise<HealthReport> {
@@ -230,6 +277,9 @@ export class CapabilityRouter {
     if (this.disposed) return;
     this.disposed = true;
     this.supervisor.stop();
+    // Before closing the connection: a held key or a live emulation override must
+    // not outlive the session on the user's window.
+    await this.focus.dispose().catch(() => undefined);
     await this.playwright.close();
   }
 

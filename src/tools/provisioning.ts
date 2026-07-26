@@ -13,16 +13,12 @@ import {
   createManagedVault,
   findVault,
   readGlobalConfig,
-  readManagedMarker,
   removeManagedVault,
   writeCliFlag,
   MANAGED_MARKER,
 } from "../connection/vaults.js";
 import { UobError } from "../util/errors.js";
 import { contentOutcome, runCli } from "../obsidian/helpers.js";
-
-const TEST_VAULT_HINT =
-  "Use vault=uob-test-vault for automated testing; avoid writing to production vaults.";
 
 async function vaultAutomationState(
   ctx: ServerContext,
@@ -147,19 +143,30 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         );
       }
 
-      // Flag which vaults are disposable, so an agent picking somewhere to write
-      // can tell a scratch vault from someone's real notes without guessing.
-      const managed = new Set<string>();
-      for (const v of health.vaults) {
-        if (await readManagedMarker(v.path)) managed.add(v.path);
-      }
+      // Authorization is the first thing an agent needs from the doctor now: a
+      // refusal from any vault-scoped tool is diagnosed here, and "created" vs
+      // "adopted" tells it whether the vault is scratch space or someone's notes.
+      const vaultStatus = await router.fence.status();
+      const authorizedCount = vaultStatus.filter((v) => v.authorized).length;
 
-      lines.push("", "Registered vaults:");
-      for (const v of health.vaults) {
-        const tags = [v.open ? "open" : "", managed.has(v.path) ? "knapper test vault" : ""]
-          .filter((t) => t !== "")
-          .join(", ");
-        lines.push(`  - ${v.name}${tags === "" ? "" : ` (${tags})`} → ${v.path}`);
+      lines.push("", `Registered vaults (${authorizedCount} authorized):`);
+      for (const v of vaultStatus) {
+        const grantTag =
+          v.grant === "created"
+            ? "authorized, knapper-created (removable)"
+            : v.grant === "adopted"
+              ? "authorized by the user (never deleted by knapper)"
+              : "NOT AUTHORIZED — vault-scoped tools will refuse";
+        const tags = [v.open ? "open" : "", grantTag].filter((t) => t !== "").join(", ");
+        lines.push(`  - ${v.name} (${tags}) → ${v.path}`);
+      }
+      if (authorizedCount === 0) {
+        lines.push(
+          "  No vault is authorized. Every vault-scoped tool will refuse until the user runs",
+          "  `npx knapper authorize <vault path>` themselves, or obsidian_create_vault makes a",
+          "  throwaway one. Do not suggest the authorize command unless the user asked to work",
+          "  in a specific existing vault.",
+        );
       }
 
       if (vaultState && targetVault) {
@@ -196,7 +203,13 @@ export function registerProvisioningTools(ctx: ServerContext): void {
           binary: config.obsidianBin,
           version,
           argvCorruption: health.argvCorruption ?? null,
-          vaults: health.vaults.map((v) => ({ ...v, knapperManaged: managed.has(v.path) })),
+          vaults: vaultStatus.map((v) => ({
+            ...v,
+            // Retained for compatibility with the pre-fence shape; `grant` is the
+            // field to read now, since it distinguishes created from adopted.
+            knapperManaged: v.grant === "created",
+          })),
+          authorizedVaultCount: authorizedCount,
           targetVault: targetVault ?? null,
           vaultState: vaultState ?? null,
           toolsets,
@@ -319,7 +332,6 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     description:
       "Prepare a vault for plugin development: turn off restricted mode, enable community plugins " +
       "in app.json, and optionally enable a plugin by id. " +
-      TEST_VAULT_HINT +
       " " +
       "May open a closed vault in a new window.",
     inputSchema: {

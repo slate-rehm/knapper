@@ -99,3 +99,46 @@ Blocked browser tools (would harm a daily-driver window): navigate, close, resiz
 - **obsidian-plugin-dev** — reload and verify after UI changes.
 - **obsidian-debugging** — correlate UI steps with `obsidian_logs` cursors.
 - **obsidian-instance-setup** — CDP launch and doctor fixes.
+
+## Background input and hotkeys
+
+knapper emulates page focus around every input dispatch, so clicks and keystrokes
+land in Obsidian **even when it is not the foreground window**. You do not need to
+raise or focus the app first, and knapper deliberately never does — it will not steal
+the user's window.
+
+Page focus is not element focus. Emulation makes the document believe it is focused;
+it does not choose an `activeElement`. A chord bound to the editor still needs the
+editor focused, which is what the `focus` argument is for.
+
+Testing a hotkey binding:
+
+```text
+obsidian_hotkeys                                  # discover bindings
+obsidian_hotkeys commandId=editor:toggle-bold     # look one up
+obsidian_exercise_hotkey keys=Control+p           # press it, and report if it fired
+obsidian_exercise_hotkey keys=Control+b focus=.cm-content
+```
+
+`obsidian_exercise_hotkey` reports a **verdict**, not just success: it samples the
+workspace before and after and tells you whether anything moved. `browser_press_key`
+only tells you the keys were delivered, which they almost always are — that is the
+difference worth caring about when a binding is broken.
+
+A `no-change` verdict is not proof of failure: a command that toggles a setting or
+writes a file changes nothing the workspace sample sees. Check the logs it returns.
+
+**Cannot be triggered this way:** Electron menu accelerators (the app-level `Cmd+Q` /
+`Cmd+W` class) never reach the renderer, so no CDP input fires them. Every ordinary
+Obsidian command binding does work.
+
+**Prefer `obsidian_command`** to _do_ something. Reach for the hotkey tools when the
+binding itself is what you are testing.
+
+## Vault access
+
+Every tool here is fenced to vaults the user has authorized. A `VAULT_NOT_AUTHORIZED`
+refusal is not a bug and not something you can work around — no tool grants access.
+Report the situation and stop; only mention the `knapper authorize` command if the
+user has asked to work in that specific vault. Use `obsidian_create_vault` for
+throwaway work, which authorizes what it creates.

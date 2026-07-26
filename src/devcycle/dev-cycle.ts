@@ -70,7 +70,7 @@ export async function runDevCycle(
     limit: 50,
   });
   const { verdict, text: verdictLine } = verdictText(input.pluginId, reloadOk, slice);
-  const screenshot = await captureScreenshot(router);
+  const screenshot = await captureScreenshot(router, input.vault);
 
   const lines = [
     verdictLine,
