@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { wrapExpression } from "../../util/serialize.js";
 import {
   CLI_DISABLED_MARKER,
   VAULT_NOT_FOUND_MARKER,
@@ -82,6 +83,32 @@ export function buildArgs(command: string[], vault?: string): string[] {
 /** Quote a value for the `key=value` grammar, escaping newlines and tabs. */
 export function cliValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t");
+}
+
+/**
+ * Make a program safe to send through the `key=value` argv grammar.
+ *
+ * `cliValue` escapes a newline to the two characters `\` and `n`, and nothing on
+ * Obsidian's side turns them back. For most commands that is right — the value is
+ * data. For `eval` the value is *source code*, so those two characters land in the
+ * middle of a program and it dies with `Invalid or unexpected token`, which reads
+ * like a syntax error in the caller's own JavaScript rather than a transport bug.
+ * Every multi-line eval failed this way.
+ *
+ * Base64 sidesteps the grammar: the payload becomes one line of `[A-Za-z0-9+/=]`
+ * with nothing left for the escaper to touch. Single-line code is passed through
+ * untouched so the common case stays readable in logs.
+ *
+ * The payload runs as a `new Function` body, not through `eval`, because this
+ * tool's contract is "a bare expression, or a statement body with an explicit
+ * return" — and a top-level `return` is a syntax error inside eval. `wrapExpression`
+ * supplies the `return` for a bare expression and leaves an existing one alone.
+ * The body still sees globals, which is where `app` lives.
+ */
+export function encodeEvalSource(code: string): string {
+  if (!/[\n\r]/.test(code)) return code;
+  const b64 = Buffer.from(wrapExpression(code), "utf8").toString("base64");
+  return `new Function(atob(${JSON.stringify(b64)}))()`;
 }
 
 export interface ClassifyCliOptions {
@@ -255,7 +282,7 @@ export class ObsidianCli {
     vault: string | undefined,
     timeoutMs: number,
   ): Promise<string> {
-    const args = buildArgs(["eval", `code=${cliValue(code)}`], vault);
+    const args = buildArgs(["eval", `code=${cliValue(encodeEvalSource(code))}`], vault);
     const { stdout } = await this.exec(args, timeoutMs, "eval");
     const failure = classifyCliOutput(stdout, vault, { allowEvalErrors: true });
     if (failure) throw failure;

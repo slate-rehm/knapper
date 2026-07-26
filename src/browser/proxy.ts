@@ -27,6 +27,9 @@ import { BLOCKED_BROWSER_TOOLS, isAllowedBrowserTool } from "./allowlist.js";
 
 export { BLOCKED_BROWSER_TOOLS, ALLOWED_BROWSER_TOOLS } from "./allowlist.js";
 
+/** Playwright's wording when the page, context, or browser died under us. */
+const STALE_TARGET = /(target|page|context|browser).{0,40}(has been closed|closed)/i;
+
 export interface ProxiedTool {
   name: string;
   description?: string;
@@ -86,7 +89,7 @@ export class BrowserProxy {
     const { createConnection } = await import("@playwright/mcp");
 
     const session = this.router.playwright;
-    const context = await session.connect();
+    await session.connect();
     this.router.claimDebugger("playwright");
 
     const server = await createConnection(
@@ -95,7 +98,13 @@ export class BrowserProxy {
         browser: { isolated: false },
         outputDir: this.config.outputDir,
       },
-      async () => context,
+      // Resolve the context per call rather than capturing one. Obsidian restarting
+      // gives the session a brand-new BrowserContext, and a captured one stayed
+      // pinned to the dead browser — every browser_* tool then failed forever with
+      // "Target page, context or browser has been closed" while knapper's own CDP
+      // tools had already recovered. session.connect() reuses a live connection and
+      // rebuilds a dead one.
+      async () => session.connect(),
     );
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -136,6 +145,41 @@ export class BrowserProxy {
     return this.tools ?? [];
   }
 
+  /**
+   * Point the proxied server at the window knapper is pinned to.
+   *
+   * We hand `createConnection` the whole BrowserContext, so @playwright/mcp keeps
+   * its *own* notion of the current tab and never consults our pin. That made
+   * `obsidian_attach` a half-truth: knapper's own CDP tools followed it while every
+   * browser_* tool stayed on whatever page the proxy latched onto first — so an
+   * agent could pin to a scratch vault and still be typing into a real one.
+   *
+   * `browser_tabs select` is the only lever upstream exposes for this, so the pin
+   * is translated into a tab index. Best effort: a failure here must not take down
+   * the attach call, which still succeeds for the native layer.
+   */
+  async selectPinnedPage(): Promise<boolean> {
+    if (!(await this.init()) || !this.client) return false;
+    const session = this.router.playwright;
+    try {
+      const page = await session.page();
+      const context = await session.connect();
+      const index = context.pages().indexOf(page);
+      if (index < 0) return false;
+      await this.client.callTool({
+        name: "browser_tabs",
+        arguments: { action: "select", index },
+      });
+      this.logger.debug("browser proxy following pin", { index });
+      return true;
+    } catch (e) {
+      this.logger.warn("could not point the browser proxy at the pinned window", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return false;
+    }
+  }
+
   /** Forward a tool call, translating unavailability into an actionable error. */
   async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
     if (!isAllowedBrowserTool(name)) {
@@ -160,10 +204,47 @@ export class BrowserProxy {
       );
     }
 
-    return this.client.callTool({
-      name,
-      arguments: stripUndefined(args),
-    }) as Promise<CallToolResult>;
+    const call = async (): Promise<CallToolResult> =>
+      this.client!.callTool({
+        name,
+        arguments: stripUndefined(args),
+      }) as Promise<CallToolResult>;
+
+    try {
+      return await call();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (!STALE_TARGET.test(message)) throw e;
+
+      // The upstream server can still be holding a page from a window that has
+      // since closed. Rebuild once; the raw upstream text carries no code,
+      // remediation, or fixedBy, so an agent seeing it has nothing to act on.
+      this.logger.info("browser proxy hit a closed target; reinitializing", { tool: name });
+      await this.close().catch(() => undefined);
+      if (!(await this.init()) || !this.client) {
+        throw new UobError("CDP_PORT_CLOSED", `Lost the Obsidian window while calling ${name}.`, {
+          remediation:
+            "Obsidian was closed or restarted. Relaunch it with the debug port, then retry.",
+          fixedBy: "obsidian_launch",
+        });
+      }
+      try {
+        return await call();
+      } catch (retryError) {
+        const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        throw new UobError(
+          "TARGET_NOT_FOUND",
+          `${name} could not reach an Obsidian window after reconnecting.`,
+          {
+            remediation:
+              "Take a fresh browser_snapshot — refs from before the reconnect are stale. If the " +
+              "window is gone, list targets and attach again.",
+            fixedBy: "obsidian_list_targets",
+            details: { tool: name, upstream: retryMessage.slice(0, 400) },
+          },
+        );
+      }
+    }
   }
 
   async close(): Promise<void> {

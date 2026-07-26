@@ -116,9 +116,20 @@ export function registerCoreTools(ctx: ServerContext): void {
     handler: async (args) => {
       const targetId = args.targetId as string | undefined;
       router.playwright.attachTo(targetId);
-      return targetId === undefined
-        ? "Cleared the target pin; window selection is automatic again."
-        : `Pinned subsequent calls to target ${targetId}.`;
+
+      // The proxied @playwright/mcp server tracks its own current tab and does not
+      // consult our pin, so without this the browser_* tools keep driving whatever
+      // window they latched onto — the pin would silently cover only half the tools.
+      const followed = targetId === undefined ? false : await ctx.browserProxy.selectPinnedPage();
+
+      if (targetId === undefined) {
+        return "Cleared the target pin; window selection is automatic again.";
+      }
+      return followed
+        ? `Pinned subsequent calls to target ${targetId}, including browser_* tools.`
+        : `Pinned subsequent calls to target ${targetId}. The browser_* tools could not be ` +
+            "repointed (CDP unavailable, or the window is not a tab in this context) — verify with " +
+            "browser_snapshot before clicking or typing.";
     },
   });
 
@@ -165,6 +176,9 @@ export function registerCoreTools(ctx: ServerContext): void {
         .describe('Additional tokens, e.g. ["path=Notes/Today.md", "format=json"]'),
       vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
+    // Dispatches any command in Obsidian's table, including delete and plugin
+    // management, so it is at least as powerful as the tools that wrap them.
+    annotations: { destructiveHint: true },
     handler: async (args) => {
       const command = args.command as string;
       const extra = (args.args as string[] | undefined) ?? [];

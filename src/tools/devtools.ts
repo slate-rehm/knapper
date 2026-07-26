@@ -2,7 +2,7 @@
  * Developer tooling: DOM/CSS inspection, CDP passthrough, screenshots (toolset: devtools).
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import type { ServerContext } from "../server.js";
@@ -121,16 +121,20 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
     toolset: "devtools",
     capability: "cliCommand",
     description:
-      "Toggle Obsidian mobile layout emulation via `dev:mobile`. " + CLOSED_VAULT_WARNING,
+      "Turn Obsidian's mobile layout emulation on or off via `dev:mobile`. `enabled` is required — " +
+      "this reflows the whole workspace, so there is no default. " +
+      CLOSED_VAULT_WARNING,
     inputSchema: {
-      on: z.boolean().optional().describe("Enable mobile layout emulation"),
-      off: z.boolean().optional().describe("Disable mobile layout emulation"),
+      enabled: z.boolean().describe("true to enable mobile layout emulation, false to disable"),
       ...vaultOpt,
     },
+    // Reflows the user's workspace; not destructive, but far from read-only.
     handler: async (args) => {
+      // A single required boolean rather than the old on/off pair, where passing
+      // neither silently enabled emulation — a layout-mutating tool should never
+      // default to "on".
       const tokens: string[] = [];
-      pushFlag(tokens, "on", args.on as boolean | undefined);
-      pushFlag(tokens, "off", args.off as boolean | undefined);
+      pushFlag(tokens, args.enabled === true ? "on" : "off", true);
       const { stdout } = await runCli(router, {
         command: "dev:mobile",
         args: tokens,
@@ -177,13 +181,21 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
       CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
     inputSchema: {
-      path: z.string().optional().describe("Output path (default: under UOB output dir)"),
+      path: z
+        .string()
+        .optional()
+        .describe("Output path (default: a timestamped file under the configured output dir)"),
       vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const outPath =
         (args.path as string | undefined) ??
         join(config.outputDir, `obsidian-window-${Date.now()}.png`);
+      // Obsidian's dev:screenshot does not create the directory, so a first run in
+      // a fresh working directory failed with ENOENT on the default path — the tool
+      // was unusable out of the box until someone happened to mkdir it.
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(dirname(outPath), { recursive: true }).catch(() => undefined);
       const tokens = [`path=${cliValue(outPath)}`];
       await runCli(router, {
         command: "dev:screenshot",
