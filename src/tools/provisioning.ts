@@ -9,7 +9,15 @@ import type { ServerContext } from "../server.js";
 import { TOOLSET_DESCRIPTIONS, type Toolset } from "../toolsets.js";
 import { launchObsidian } from "../connection/launch.js";
 import { isObsidianRunning } from "../connection/health.js";
-import { findVault, readGlobalConfig, writeCliFlag } from "../connection/vaults.js";
+import {
+  createManagedVault,
+  findVault,
+  readGlobalConfig,
+  readManagedMarker,
+  removeManagedVault,
+  writeCliFlag,
+  MANAGED_MARKER,
+} from "../connection/vaults.js";
 import { UobError } from "../util/errors.js";
 import { contentOutcome, runCli } from "../obsidian/helpers.js";
 
@@ -129,9 +137,19 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         );
       }
 
+      // Flag which vaults are disposable, so an agent picking somewhere to write
+      // can tell a scratch vault from someone's real notes without guessing.
+      const managed = new Set<string>();
+      for (const v of health.vaults) {
+        if (await readManagedMarker(v.path)) managed.add(v.path);
+      }
+
       lines.push("", "Registered vaults:");
       for (const v of health.vaults) {
-        lines.push(`  - ${v.name}${v.open ? " (open)" : ""} → ${v.path}`);
+        const tags = [v.open ? "open" : "", managed.has(v.path) ? "knapper test vault" : ""]
+          .filter((t) => t !== "")
+          .join(", ");
+        lines.push(`  - ${v.name}${tags === "" ? "" : ` (${tags})`} → ${v.path}`);
       }
 
       if (vaultState && targetVault) {
@@ -168,7 +186,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
           binary: config.obsidianBin,
           version,
           argvCorruption: health.argvCorruption ?? null,
-          vaults: health.vaults,
+          vaults: health.vaults.map((v) => ({ ...v, knapperManaged: managed.has(v.path) })),
           targetVault: targetVault ?? null,
           vaultState: vaultState ?? null,
           toolsets,
@@ -341,6 +359,107 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       return {
         text: `Vault "${vault}" is automation-ready (restrict off, community plugins on).`,
         json: { vault, pluginId: pluginId ?? null, state },
+      };
+    },
+  });
+
+  registry.add({
+    name: "obsidian_create_vault",
+    toolset: "core",
+    description:
+      "Create a disposable test vault and register it with Obsidian. Writes a " +
+      `\`${MANAGED_MARKER}\` marker into the directory, which is the only thing that later lets ` +
+      "obsidian_remove_vault delete it — a vault you made by hand can never be removed by that " +
+      "tool. Refuses to adopt a directory that already contains files. Obsidian caches the vault " +
+      "registry at startup, so the new vault is not usable until a cold restart.",
+    inputSchema: {
+      path: z.string().describe("Absolute path for the vault directory (created if missing)"),
+      open: z
+        .boolean()
+        .optional()
+        .describe("Cold-restart Obsidian afterwards so the vault is immediately usable"),
+    },
+    handler: async (args) => {
+      const path = args.path as string;
+      const result = await createManagedVault(path, new Date());
+
+      let restarted = false;
+      if (args.open === true) {
+        // A running instance holds obsidian.json in memory and rewrites it on exit,
+        // so the registry edit only takes effect after a genuine cold start.
+        await launchObsidian({
+          obsidianBin: config.obsidianBin,
+          port: config.cdpPort,
+          restart: true,
+          logger: ctx.logger,
+        });
+        await router.refreshAvailability(true);
+        restarted = true;
+      }
+
+      return {
+        text: [
+          `Created test vault "${result.name}" at ${result.path}`,
+          result.createdDirectory
+            ? "Directory created."
+            : "Directory already existed and was empty.",
+          `Marker written: ${MANAGED_MARKER}`,
+          restarted
+            ? "Obsidian was cold-restarted, so the vault is registered and usable now."
+            : "Obsidian caches the vault registry at startup — call obsidian_launch with restart=true (or re-run this with open=true) before using the vault.",
+        ].join("\n"),
+        json: { ...result, restarted },
+      };
+    },
+  });
+
+  registry.add({
+    name: "obsidian_remove_vault",
+    toolset: "core",
+    description:
+      "Remove a test vault created by obsidian_create_vault: unregister it from Obsidian and, with " +
+      "deleteFiles=true, delete its directory. " +
+      `**Refuses outright unless the vault carries a \`${MANAGED_MARKER}\` marker**, so vaults you ` +
+      "created yourself are never touched — delete those from Obsidian's vault switcher by hand. " +
+      "Also refuses a path that contains another registered vault.",
+    inputSchema: {
+      vault: z
+        .string()
+        .describe("Registered vault name, or an absolute path to the vault directory"),
+      deleteFiles: z
+        .boolean()
+        .optional()
+        .describe("Also delete the directory and its contents (default: unregister only)"),
+    },
+    annotations: { destructiveHint: true },
+    handler: async (args) => {
+      const wanted = args.vault as string;
+      const deleteFiles = args.deleteFiles === true;
+
+      const global = await readGlobalConfig();
+      const vaults = global?.vaults ?? [];
+      // Accept a path so an unregistered leftover directory can still be cleaned up.
+      const entry = global ? findVault(global, wanted) : undefined;
+      const targetPath = entry?.path ?? (wanted.startsWith("/") ? wanted : undefined);
+      if (targetPath === undefined) {
+        throw new UobError("VAULT_NOT_FOUND", `Unknown vault "${wanted}".`, {
+          remediation:
+            vaults.length > 0
+              ? `Known: ${vaults.map((v) => v.name).join(", ")}. An absolute path also works.`
+              : "Pass an absolute path to the vault directory.",
+          details: { known: vaults.map((v) => v.name) },
+        });
+      }
+
+      const result = await removeManagedVault(targetPath, vaults, deleteFiles);
+      return {
+        text: [
+          `Removed test vault at ${result.path}`,
+          result.unregistered ? "Unregistered from obsidian.json." : "Was not registered.",
+          result.deletedDirectory ? "Directory deleted." : "Directory left on disk.",
+          "Obsidian caches the registry at startup; restart it to drop the entry from the switcher.",
+        ].join("\n"),
+        json: result,
       };
     },
   });
