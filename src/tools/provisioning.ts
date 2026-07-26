@@ -384,18 +384,79 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       const result = await createManagedVault(path, new Date());
 
       let restarted = false;
+      let automationReady = false;
+      let restartError: string | undefined;
       if (args.open === true) {
         // A running instance holds obsidian.json in memory and rewrites it on exit,
         // so the registry edit only takes effect after a genuine cold start.
-        await launchObsidian({
-          obsidianBin: config.obsidianBin,
-          port: config.cdpPort,
-          restart: true,
-          logger: ctx.logger,
-        });
-        await router.refreshAvailability(true);
-        restarted = true;
+        try {
+          await launchObsidian({
+            obsidianBin: config.obsidianBin,
+            port: config.cdpPort,
+            restart: true,
+            logger: ctx.logger,
+          });
+          await router.refreshAvailability(true);
+          restarted = true;
+
+          // A brand-new vault has community plugins off, so plugin tools fail on
+          // first use. Write app.json directly instead of going through the CLI:
+          // Obsidian only registers a vault's commands once it has opened that
+          // vault, so `plugins:restrict` is genuinely absent this early and the
+          // filesystem is the only thing that works.
+          try {
+            const appDir = join(result.path, ".obsidian");
+            const { writeFile, mkdir } = await import("node:fs/promises");
+            await mkdir(appDir, { recursive: true });
+            let appCfg: Record<string, unknown> = {};
+            try {
+              appCfg = JSON.parse(await readFile(join(appDir, "app.json"), "utf8")) as Record<
+                string,
+                unknown
+              >;
+            } catch {
+              appCfg = {};
+            }
+            appCfg.communityPluginEnabled = true;
+            await writeFile(
+              join(appDir, "app.json"),
+              `${JSON.stringify(appCfg, null, 2)}\n`,
+              "utf8",
+            );
+            automationReady = true;
+
+            // Best effort on top; only works once Obsidian has opened the vault,
+            // and the app.json write above already covers what matters.
+            try {
+              await runCli(router, {
+                command: "plugins:restrict",
+                args: ["off"],
+                vault: result.name,
+              });
+            } catch {
+              // expected on a vault Obsidian has not opened yet
+            }
+          } catch (e) {
+            ctx.logger.warn("created vault but could not make it automation-ready", {
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+        } catch (e) {
+          // The vault is already created and registered by this point. Throwing
+          // would hide that and invite a retry that then trips the
+          // already-exists path, so report it as partial success instead.
+          restartError = e instanceof Error ? e.message : String(e);
+        }
       }
+
+      const status = restarted
+        ? automationReady
+          ? "Obsidian was cold-restarted and the vault is automation-ready (restricted mode off, community plugins on)."
+          : "Obsidian was cold-restarted, but making the vault automation-ready failed — run obsidian_setup_vault before using plugin tools."
+        : restartError !== undefined
+          ? `The vault exists and is registered, but the restart failed: ${restartError} ` +
+            "Quit Obsidian yourself and call obsidian_launch to finish."
+          : "Obsidian caches the vault registry at startup — call obsidian_launch with restart=true (or re-run this with open=true) before using the vault.";
 
       return {
         text: [
@@ -404,11 +465,9 @@ export function registerProvisioningTools(ctx: ServerContext): void {
             ? "Directory created."
             : "Directory already existed and was empty.",
           `Marker written: ${MANAGED_MARKER}`,
-          restarted
-            ? "Obsidian was cold-restarted, so the vault is registered and usable now."
-            : "Obsidian caches the vault registry at startup — call obsidian_launch with restart=true (or re-run this with open=true) before using the vault.",
+          status,
         ].join("\n"),
-        json: { ...result, restarted },
+        json: { ...result, restarted, automationReady, restartError: restartError ?? null },
       };
     },
   });

@@ -1,13 +1,13 @@
 {
   "name": "knapper",
-  "description": "Drive a live Obsidian desktop app for plugin development over MCP",
+  "description": "Drive a live Obsidian desktop app over MCP: develop and test Obsidian plugins, automate the vault and UI, and read console output. Use for anything involving Obsidian, its vaults, notes, or plugins.",
   "interface": {
     "displayName": "Knapper"
   },
   "plugins": [
     {
       "name": "knapper",
-      "description": "Drive a live Obsidian desktop app for plugin development over MCP",
+      "description": "Drive a live Obsidian desktop app over MCP: develop and test Obsidian plugins, automate the vault and UI, and read console output. Use for anything involving Obsidian, its vaults, notes, or plugins.",
       "source": {
         "source": "local",
         "path": "./"

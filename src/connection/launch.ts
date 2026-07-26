@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { obsidianUserDataDir } from "../config.js";
 import { childEnv } from "./cli/exec.js";
 import { probeCdp } from "./cdp/discover.js";
-import { isObsidianRunning } from "./health.js";
+import { isObsidianCmdline, isObsidianRunning } from "./health.js";
 import { UobError } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
 
@@ -81,6 +81,14 @@ export async function quitObsidian(timeoutMs = 15_000): Promise<boolean> {
   return !(await isObsidianRunning());
 }
 
+/**
+ * PIDs of running Obsidian processes.
+ *
+ * Shares `isObsidianCmdline` with the health probe deliberately. These were once
+ * two copies of the same matching rule, and fixing only the probe left this one
+ * blind: `isObsidianRunning()` reported true, this returned nothing, and quitting
+ * failed with a timeout that blamed the app for not closing.
+ */
 async function findObsidianPids(): Promise<number[]> {
   if (process.platform !== "linux") return [];
   const { readdir, readFile } = await import("node:fs/promises");
@@ -90,8 +98,7 @@ async function findObsidianPids(): Promise<number[]> {
     for (const entry of entries) {
       if (!/^\d+$/.test(entry)) continue;
       try {
-        const cmdline = await readFile(`/proc/${entry}/cmdline`, "utf8");
-        if (cmdline.includes("obsidian.asar") || /obsidian/i.test(cmdline.split("\0")[0] ?? "")) {
+        if (isObsidianCmdline(await readFile(`/proc/${entry}/cmdline`, "utf8"))) {
           out.push(Number(entry));
         }
       } catch {

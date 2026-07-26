@@ -50,9 +50,27 @@ async function packageVersion(): Promise<string> {
  * advises keeping the first 512 characters self-contained, so the essentials come
  * first and the detail follows.
  */
-const INSTRUCTIONS = `Drives a live Obsidian desktop app for plugin development. Two transports: Obsidian's native CLI (needs the "cli" setting enabled, no restart) and Playwright over CDP (needs Obsidian launched with --remote-debugging-port). Run obsidian_doctor first — it reports which transports are available and names the tool that fixes each problem. Use obsidian_* tools for app and vault state, browser_* tools for real UI interaction, and obsidian_logs for console output.
+/**
+ * Shown to the agent at initialize. It has to answer "should I reach for this?"
+ * before it answers "how do I drive it?", because an agent that does not connect
+ * a request to this server never reads the second half.
+ */
+const INSTRUCTIONS = `knapper drives a **live Obsidian desktop application** (the Markdown note-taking app by Dynalist) over MCP. It automates the real running app on this machine — not a copy of the vault on disk, and not a web service.
 
-Browser tools are snapshot-first: call browser_snapshot, then pass the returned ref as "target". A raw CSS selector also works as "target" when refs are unavailable. Prefer obsidian_command over clicking through menus. obsidian_dev_cycle is the fastest way to answer "did my plugin change work?".`;
+USE THIS SERVER WHEN the task involves:
+- Developing, building, reloading, or testing an **Obsidian plugin** or theme — this is its primary purpose. obsidian_dev_cycle answers "did my plugin change work?" in one call.
+- Reading, creating, editing, moving, or searching notes in an **Obsidian vault**.
+- Driving the Obsidian **UI**: clicking, typing, opening the command palette, screenshotting, inspecting the DOM or accessibility tree.
+- Reading Obsidian's **console output, errors, or plugin stack traces**.
+- Anything phrased as "in Obsidian", "my vault", "my notes", "this plugin", when Obsidian is the app in question.
+
+DO NOT USE IT FOR: general web browsing or automating other websites (the browser_* tools here are bound to the Obsidian window), editing this project's own source files, or reading Markdown that merely happens to live outside a vault — ordinary file tools are better for that.
+
+GETTING STARTED: run **obsidian_doctor** first. It reports the four precondition states separately and names the tool that fixes each one (usually obsidian_setup_cli, then obsidian_launch). Two transports reach the app: Obsidian's native CLI (needs its "cli" setting on; no restart) and Playwright over CDP (needs Obsidian cold-started with --remote-debugging-port). Tools pick a transport per call.
+
+SAFETY: this drives the user's real Obsidian, and tools annotated destructiveHint can delete notes or run arbitrary JavaScript. For anything experimental, make a throwaway vault with **obsidian_create_vault** rather than working in the user's own. obsidian_remove_vault only ever deletes vaults knapper itself created.
+
+CONVENTIONS: use obsidian_* tools for app, vault, and plugin state; browser_* tools for real input. Browser tools are snapshot-first — call browser_snapshot (or the cheaper obsidian_snapshot), then pass a returned ref as "target"; a CSS selector also works. Prefer obsidian_command over clicking through menus. Read console output with obsidian_logs, passing the previous call's cursor as "since" to see only what is new.`;
 
 export async function createServerContext(config: Config): Promise<ServerContext> {
   const logger = createLogger(config.logLevel);
