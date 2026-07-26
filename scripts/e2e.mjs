@@ -12,6 +12,7 @@
  *
  * Prerequisites: Obsidian launched with --remote-debugging-port=9222, the CLI
  * toggle enabled, and the uob-test-vault scratch vault present.
+ * The suite authorizes that vault for knapper itself (see authorize-test-vault.mjs).
  *
  *   node scripts/e2e.mjs           # full run
  *   VERBOSE=1 node scripts/e2e.mjs # stream server stderr
@@ -19,6 +20,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { authorizeTestVault } from "./authorize-test-vault.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { readFile, rm, stat } from "node:fs/promises";
@@ -227,6 +229,7 @@ async function freePort() {
 
 // ------------------------------------------------------------------ preflight
 
+console.log(`scratch vault: ${await authorizeTestVault()}`);
 console.log("\n\x1b[1m=== Unified Obsidian MCP — comprehensive E2E ===\x1b[0m");
 
 const cdpUp = await fetch("http://127.0.0.1:9222/json/version")

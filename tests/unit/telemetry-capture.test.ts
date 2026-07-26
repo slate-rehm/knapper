@@ -37,18 +37,48 @@ function fakeContext(pages: ReturnType<typeof fakePage>[]) {
   };
 }
 
-function makeCapture(context: ReturnType<typeof fakeContext>) {
+function makeCapture(context: ReturnType<typeof fakeContext>, pageAuthorized = true) {
   const store = new TelemetryStore(100);
+  const isPageAuthorized = vi.fn().mockResolvedValue(pageAuthorized);
   const router = {
     refreshAvailability: vi.fn().mockResolvedValue({ playwright: true }),
     claimDebugger: vi.fn(),
     playwright: {
       connect: vi.fn().mockResolvedValue(context),
+      isPageAuthorized,
     },
   };
   const capture = new TelemetryCapture(router as never, store, createLogger("silent"));
-  return { capture, router, store, context };
+  return { capture, router, store, context, isPageAuthorized };
 }
+
+describe("TelemetryCapture.arm — the vault fence", () => {
+  it("REFUSES to wire a window whose vault is not authorized", async () => {
+    // Console lines and page errors quote note titles and file contents, so an
+    // unauthorized window's stream would exfiltrate exactly what the fence blocks
+    // on the tool surface.
+    const page = fakePage();
+    const context = fakeContext([page]);
+    const { capture } = makeCapture(context, false);
+
+    const result = await capture.arm();
+
+    expect(page.listenerCount("console")).toBe(0);
+    expect(page.listenerCount("pageerror")).toBe(0);
+    expect(result.pages).toBe(0);
+  });
+
+  it("still reports itself armed so a later authorized window gets wired", async () => {
+    const page = fakePage();
+    const context = fakeContext([page]);
+    const { capture } = makeCapture(context, false);
+
+    const result = await capture.arm();
+
+    expect(result.armed).toBe(true);
+    expect(context.listenerCount("page")).toBe(1);
+  });
+});
 
 describe("TelemetryCapture.arm", () => {
   it("does not double-subscribe console listeners on a second arm", async () => {

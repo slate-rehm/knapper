@@ -21,8 +21,14 @@ export type ErrorCode =
   | "TIMEOUT"
   | "INVALID_ARGUMENT"
   | "PLUGIN_NOT_FOUND"
-  /** Refused to touch a vault knapper did not create. Never downgrade this. */
+  /** Refused to *delete* a vault knapper did not create. Never downgrade this. */
   | "VAULT_NOT_MANAGED"
+  /**
+   * Refused to *operate on* a vault the user never authorized. A fifth precondition
+   * state, deliberately distinct from VAULT_NOT_MANAGED: that one is about deletion
+   * provenance, this one is about consent to touch the vault at all.
+   */
+  | "VAULT_NOT_AUTHORIZED"
   | "INTERNAL";
 
 export interface UobErrorOptions {
@@ -170,6 +176,101 @@ export function debuggerConflict(holder: string): UobError {
       details: { holder },
     },
   );
+}
+
+/** The command a user runs, in their own terminal, to authorize a vault. */
+export function authorizeCommand(vaultPath: string): string {
+  return `npx knapper authorize ${JSON.stringify(vaultPath)}`;
+}
+
+/**
+ * How the fence explains itself to an agent.
+ *
+ * The remediation deliberately tells the agent *not* to volunteer this command.
+ * An agent that answers every refusal with "run this to grant me access" trains
+ * the user to authorize reflexively, which is the exact habit the fence exists to
+ * prevent. It also cannot run the command itself — `knapper authorize` refuses
+ * without an interactive TTY — so suggesting it as a self-service fix is a dead
+ * end that reads like a bug.
+ *
+ * `fixedBy` stays unset on purpose: no tool fixes this, which is the point.
+ */
+function authorizationRemediation(vaultPath: string | undefined, authorized: string[]): string {
+  const known =
+    authorized.length > 0
+      ? `Authorized vaults: ${authorized.join(", ")}.`
+      : "No vaults are authorized yet.";
+  const grant =
+    vaultPath !== undefined
+      ? `The user can grant access by running ${authorizeCommand(vaultPath)} in their own terminal.`
+      : "The user grants access by running `npx knapper authorize <vault path>` in their own terminal.";
+  return (
+    `${known} ${grant} Surface that command only if the user has asked to work in this vault — ` +
+    "do not volunteer it, and do not run it yourself; it requires an interactive terminal and " +
+    "will refuse. To work in throwaway space instead, use obsidian_create_vault, which authorizes " +
+    "what it creates."
+  );
+}
+
+/** A named vault exists but the user has not authorized knapper to touch it. */
+export function vaultNotAuthorized(
+  vault: { name: string; path?: string },
+  authorized: string[],
+): UobError {
+  return new UobError(
+    "VAULT_NOT_AUTHORIZED",
+    `Refusing to touch "${vault.name}" — it has not been authorized for knapper.`,
+    {
+      remediation: authorizationRemediation(vault.path, authorized),
+      details: {
+        requested: vault.name,
+        ...(vault.path !== undefined ? { path: vault.path } : {}),
+        authorizedVaults: authorized,
+      },
+    },
+  );
+}
+
+/**
+ * No vault was named and the fence cannot pick one.
+ *
+ * Guessing here is what the fence exists to stop: with no `vault=` token the
+ * Obsidian CLI silently targets whichever vault the user last focused.
+ */
+export function vaultTargetAmbiguous(authorized: string[]): UobError {
+  const message =
+    authorized.length === 0
+      ? "No vault is authorized for knapper, so there is nothing safe to target."
+      : `More than one vault is authorized (${authorized.join(", ")}), so the target is ambiguous.`;
+  return new UobError("VAULT_NOT_AUTHORIZED", message, {
+    remediation:
+      authorized.length === 0
+        ? authorizationRemediation(undefined, authorized)
+        : "Pass an explicit `vault` argument naming one of them, or set OBSIDIAN_VAULT so every " +
+          "call in this session resolves the same way. knapper will not guess: with no vault " +
+          "named, Obsidian's CLI silently targets whichever vault was last focused.",
+    details: { authorizedVaults: authorized },
+  });
+}
+
+/**
+ * Re-throw refusals that a fallback path must never swallow.
+ *
+ * Several tools try one transport and fall back to another when it fails. That is
+ * right for "the CLI is disabled" and wrong for "you may not touch this vault": the
+ * answer will not change on a second path, and a fallback is usually *less* scoped
+ * than the call it replaces — `obsidian_search` fell back to a metadata scan with
+ * no vault at all, turning a clean refusal into an unscoped read attempt.
+ *
+ * Call this first in any `catch` that leads to a retry.
+ */
+export function rethrowIfRefused(e: unknown): void {
+  if (
+    e instanceof UobError &&
+    (e.code === "VAULT_NOT_AUTHORIZED" || e.code === "VAULT_NOT_FOUND")
+  ) {
+    throw e;
+  }
 }
 
 /** Normalize any thrown value into a UobError. */

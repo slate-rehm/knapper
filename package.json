@@ -1,6 +1,6 @@
 {
   "name": "knapper",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Drive a live Obsidian desktop app over MCP: develop and test Obsidian plugins, automate the vault and UI, and read console output. Use for anything involving Obsidian, its vaults, notes, or plugins.",
   "keywords": [
     "automation",
@@ -24,7 +24,8 @@
     "url": "git+https://github.com/slate-rehm/knapper.git"
   },
   "bin": {
-    "knap": "./dist/cli.js"
+    "knap": "./dist/cli.js",
+    "knapper": "./dist/cli.js"
   },
   "files": [
     "dist",
@@ -51,6 +52,8 @@
     "test:watch": "vitest",
     "smoke": "node scripts/ci-smoke.mjs",
     "acceptance": "node scripts/acceptance.mjs",
+    "fence": "node scripts/fence-live.mjs",
+    "bg-input": "node scripts/background-input-live.mjs",
     "e2e": "node scripts/e2e.mjs",
     "versions:check": "node scripts/sync-version.mjs --check",
     "versions:sync": "node scripts/sync-version.mjs",

@@ -86,25 +86,51 @@ export async function writeCliFlag(enabled: boolean, path = obsidianConfigPath()
 }
 
 /** Resolve a vault by name or id, matching names case-insensitively. */
-export function findVault(config: ObsidianGlobalConfig, nameOrId: string): VaultEntry | undefined {
+export function findVaultEntry(
+  vaults: readonly VaultEntry[],
+  nameOrId: string,
+): VaultEntry | undefined {
   const wanted = nameOrId.toLowerCase();
-  return config.vaults.find((v) => v.id === nameOrId || v.name.toLowerCase() === wanted);
+  return vaults.find((v) => v.id === nameOrId || v.name.toLowerCase() === wanted);
+}
+
+/** Resolve a vault by name or id within a parsed `obsidian.json`. */
+export function findVault(config: ObsidianGlobalConfig, nameOrId: string): VaultEntry | undefined {
+  return findVaultEntry(config.vaults, nameOrId);
 }
 
 /**
- * Marker file written into every vault knapper creates.
+ * Marker file written into every vault knapper may touch.
  *
- * This is the whole safety contract for `obsidian_remove_vault`: a vault is
- * removable if and only if it carries this file. The marker lives inside the
- * vault rather than in `obsidian.json` on purpose — a user who copies, moves, or
- * re-registers the directory keeps the provenance with it, and a user's own vault
- * can never acquire one by accident.
+ * This is the whole safety contract: a vault is reachable if and only if it
+ * carries this file. The marker lives inside the vault rather than in
+ * `obsidian.json` on purpose — a user who copies, moves, or re-registers the
+ * directory keeps the provenance with it, and a user's own vault can never
+ * acquire one by accident.
  */
 export const MANAGED_MARKER = ".knapper-managed";
+
+/**
+ * How knapper came to manage a vault, and the reason this file has two contracts
+ * rather than one.
+ *
+ * `created` — `obsidian_create_vault` made the directory. Disposable, so
+ * `obsidian_remove_vault` may delete it.
+ * `adopted` — the user ran `knapper authorize` against a vault they already
+ * owned. Grants the right to *operate* in it and never the right to *delete* it,
+ * because the notes in it are real.
+ *
+ * Absent on markers written before the fence existed, which were all `created` —
+ * `createManagedVault` was the only writer.
+ */
+export type MarkerGrant = "created" | "adopted";
 
 export interface ManagedMarker {
   managedBy: "knapper";
   createdAt: string;
+  grant?: MarkerGrant;
+  /** When the user authorized an existing vault. Absent on created vaults. */
+  authorizedAt?: string;
   note: string;
 }
 
@@ -112,7 +138,12 @@ export function markerPath(vaultPath: string): string {
   return resolve(vaultPath, MANAGED_MARKER);
 }
 
-/** Read the marker, or undefined when this is not a knapper-created vault. */
+/** A marker's grant, treating pre-fence markers as `created`. */
+export function markerGrant(marker: ManagedMarker): MarkerGrant {
+  return marker.grant === "adopted" ? "adopted" : "created";
+}
+
+/** Read the marker, or undefined when knapper may not touch this vault. */
 export async function readManagedMarker(vaultPath: string): Promise<ManagedMarker | undefined> {
   try {
     const parsed = JSON.parse(await readFile(markerPath(vaultPath), "utf8")) as ManagedMarker;
@@ -122,18 +153,43 @@ export async function readManagedMarker(vaultPath: string): Promise<ManagedMarke
   }
 }
 
-export async function writeManagedMarker(vaultPath: string, now: Date): Promise<ManagedMarker> {
+const CREATED_NOTE =
+  "Created by knapper as a disposable test vault. Deleting this file revokes knapper's access " +
+  "and makes the vault permanent: obsidian_remove_vault will refuse to touch it.";
+
+const ADOPTED_NOTE =
+  "Authorized by the user with `knapper authorize`. knapper may read and modify this vault. It " +
+  "will NOT delete it: obsidian_remove_vault only removes vaults knapper created itself. Delete " +
+  "this file (or run `knapper revoke`) to withdraw access.";
+
+export async function writeManagedMarker(
+  vaultPath: string,
+  now: Date,
+  grant: MarkerGrant = "created",
+): Promise<ManagedMarker> {
   const marker: ManagedMarker = {
     managedBy: "knapper",
     createdAt: now.toISOString(),
-    note: "Created by knapper as a disposable test vault. Deleting this file makes the vault permanent: obsidian_remove_vault will refuse to touch it.",
+    grant,
+    ...(grant === "adopted" ? { authorizedAt: now.toISOString() } : {}),
+    note: grant === "adopted" ? ADOPTED_NOTE : CREATED_NOTE,
   };
   await writeFile(markerPath(vaultPath), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
   return marker;
 }
 
+/** Withdraw access by removing the marker. Returns false when there was none. */
+export async function removeManagedMarker(vaultPath: string): Promise<boolean> {
+  try {
+    await rm(markerPath(vaultPath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Paths that must never be a vault root, regardless of any marker. */
-function forbiddenRoot(path: string): string | undefined {
+export function forbiddenRoot(path: string): string | undefined {
   const p = resolve(path);
   if (p === resolve(homedir())) return "your home directory";
   if (p === resolve("/")) return "the filesystem root";
@@ -188,6 +244,23 @@ export async function assertVaultRemovable(
           "only ones obsidian_create_vault made. Remove a real vault yourself from Obsidian's vault " +
           "switcher; this tool will not do it for you.",
         details: { path: target, marker: markerPath(target) },
+      },
+    );
+  }
+
+  // Authorization is not permission to delete. `knapper authorize` exists so a
+  // user can point knapper at a vault of real notes; letting that same grant feed
+  // the delete path would turn a consent step into a loaded gun.
+  if (markerGrant(marker) === "adopted") {
+    throw new UobError(
+      "VAULT_NOT_MANAGED",
+      `Refusing to remove "${basename(target)}" — it is an authorized vault, not one knapper created.`,
+      {
+        remediation:
+          "The user authorized knapper to read and modify this vault, not to delete it. Only " +
+          "vaults made by obsidian_create_vault can be removed. Delete this one yourself from " +
+          "Obsidian's vault switcher if that is really what you want.",
+        details: { path: target, grant: "adopted", authorizedAt: marker.authorizedAt },
       },
     );
   }

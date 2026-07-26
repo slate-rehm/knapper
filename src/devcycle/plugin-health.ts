@@ -25,6 +25,7 @@ export async function runPluginHealth(
   router: CapabilityRouter,
   telemetry: TelemetryStore,
   pluginId: string,
+  vault?: string,
 ): Promise<ToolOutcome> {
   const info = await rendererEval<PluginHealthInfo>(
     router,
@@ -68,6 +69,7 @@ export async function runPluginHealth(
 
       return { id, exists: kind !== "unknown", kind, loaded, enabled, name, version, commands };
     })()`,
+    vault,
   );
 
   const recentErrors = telemetry.query({

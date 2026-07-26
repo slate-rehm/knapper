@@ -9,9 +9,47 @@ import { startHttpTransport, type HttpTransportHandle } from "./transport/http.j
 import { TOOLSETS, DEFAULT_TOOLSETS } from "./toolsets.js";
 import { LOG_LEVELS } from "./util/logger.js";
 
+/**
+ * Subcommands, with the server as the default command.
+ *
+ * `knapper` with no verb still starts the MCP server, so every existing client
+ * config keeps working untouched. The authorize/revoke verbs are terminal-only
+ * utilities that never start a server — see `src/authorize.ts` for why they are
+ * not MCP tools.
+ */
 const argv = await yargs(hideBin(process.argv))
-  .scriptName("knap")
+  .scriptName("knapper")
   .usage("$0 [options]\n\nMCP server for Obsidian plugin development.")
+  .command(
+    "authorize <vault>",
+    "Grant knapper access to a vault (interactive; run this yourself)",
+    (y) =>
+      y.positional("vault", {
+        type: "string",
+        describe: "Vault directory path, or the name of a registered vault",
+      }),
+    async (a) => {
+      const { runAuthorize, terminalIo } = await import("./authorize.js");
+      process.exit(await runAuthorize(String(a.vault), terminalIo()));
+    },
+  )
+  .command(
+    "revoke <vault>",
+    "Withdraw knapper's access to a vault",
+    (y) =>
+      y.positional("vault", {
+        type: "string",
+        describe: "Vault directory path, or the name of a registered vault",
+      }),
+    async (a) => {
+      const { runRevoke, terminalIo } = await import("./authorize.js");
+      process.exit(await runRevoke(String(a.vault), terminalIo()));
+    },
+  )
+  .command("authorizations", "List which vaults knapper may touch", {}, async () => {
+    const { runListAuthorizations, terminalIo } = await import("./authorize.js");
+    process.exit(await runListAuthorizations(terminalIo()));
+  })
   .option("cdp-url", {
     type: "string",
     describe: `CDP endpoint of a running Obsidian (default: ${DEFAULT_CDP_URL})`,
@@ -57,9 +95,14 @@ const argv = await yargs(hideBin(process.argv))
   })
   .example("$0 --toolsets all", "Enable every toolset")
   .example("$0 --vault 'My Vault'", "Pin all operations to one vault")
+  .example("$0 authorize ~/vaults/scratch", "Let knapper touch that vault")
+  .example("$0 authorizations", "Show which vaults knapper may touch")
   .help()
   .version(false)
   .parseAsync();
+
+// A subcommand handler calls process.exit, so reaching here means the default
+// command: start the server.
 
 const config = loadConfig({
   ...(argv["cdp-url"] !== undefined ? { cdpUrl: argv["cdp-url"] } : {}),

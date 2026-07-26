@@ -177,10 +177,34 @@ back any console errors attributed to it.
 If you installed the plugin bundle, the `obsidian-instance-setup` and
 `obsidian-plugin-dev` skills walk an agent through this without you prompting it.
 
+## Vault access
+
+knapper refuses to touch any vault you have not authorized. Fresh out of the box it
+can reach nothing, and every vault-scoped tool answers `VAULT_NOT_AUTHORIZED` until
+you say otherwise.
+
+```text
+knapper authorizations              # what knapper may touch
+knapper authorize ~/vaults/scratch  # grant access (interactive)
+knapper revoke ~/vaults/scratch     # withdraw it
+```
+
+`authorize` runs in **your** terminal, not through a tool. It requires an interactive
+TTY and makes you retype the vault name, so an agent cannot complete it even though
+it can spawn the binary — the grant has to come from a person. `revoke` bites
+immediately, without restarting the server.
+
+Authorizing is a real grant: it lets any agent driving knapper read every note in
+that vault into its context, edit or delete notes, and run arbitrary JavaScript
+against it. For experiments, make throwaway space instead — see below.
+
+`obsidian_doctor` and `obsidian_status` show which vaults are authorized and how, so
+an agent can diagnose a refusal without guessing.
+
 ## Test vaults
 
 Never point an agent at a vault you care about. `obsidian_create_vault` makes a
-disposable one and registers it:
+disposable one, registers it, and authorizes it in one step:
 
 ```text
 obsidian_create_vault path=~/obsidian-test-vaults/scratch open=true
@@ -193,14 +217,11 @@ on first use without a separate `obsidian_setup_vault` call.
 
 `obsidian_remove_vault` unregisters it, and deletes the directory with
 `deleteFiles=true`. **It refuses to touch any vault knapper did not create.** The
-contract is a `.knapper-managed` marker file written at creation time; without one
-the tool fails with `VAULT_NOT_MANAGED` and changes nothing. Creation also refuses
-to adopt a directory that already contains files, so an existing vault can never
-acquire a marker by accident. Delete real vaults yourself from Obsidian's vault
-switcher.
-
-`obsidian_doctor` tags which registered vaults are knapper-managed, so an agent can
-tell scratch space from your real notes.
+contract is the `.knapper-managed` marker, which records _how_ access was granted:
+only a vault knapper created itself is removable. A vault you authorized by hand is
+readable and writable but never deletable, so pointing `knapper authorize` at real
+notes cannot arm the delete path. Anything else fails with `VAULT_NOT_MANAGED` and
+changes nothing. Delete real vaults yourself from Obsidian's vault switcher.
 
 ## Configuration
 
@@ -361,8 +382,12 @@ are needed beyond the automatic `GITHUB_TOKEN`.
 
 This server drives your real Obsidian instance: it can execute arbitrary JavaScript
 in the renderer (`obsidian_eval`), send real input, and modify vault files. Treat it
-like granting desktop control. Use a scratch vault for agent work, review tool
-approvals in your client, and keep the HTTP transport on loopback. See
+like granting desktop control.
+
+Two boundaries apply. Your MCP client decides which **tools** may run; the vault
+fence, enforced inside knapper, decides what those tools may **touch** — and that one
+holds even if the client approves everything. Use a scratch vault for agent work,
+review tool approvals in your client, and keep the HTTP transport on loopback. See
 [SECURITY.md](SECURITY.md).
 
 ## License

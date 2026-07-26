@@ -51,6 +51,58 @@ export function registerObsidianTools(ctx: ServerContext): void {
   });
 
   registry.add({
+    name: "obsidian_hotkeys",
+    toolset: "core",
+    capability: "cliCommand",
+    description:
+      "List Obsidian's keyboard bindings, or look one up by command id. Use this to discover the " +
+      "chord for a command before exercising it with obsidian_exercise_hotkey, and to confirm " +
+      "whether a plugin's binding registered at all. Bindings are reported, not triggered. " +
+      CLOSED_VAULT_WARNING,
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      commandId: z
+        .string()
+        .optional()
+        .describe("Look up one command's binding instead of listing all, e.g. editor:toggle-bold"),
+      all: z
+        .boolean()
+        .optional()
+        .describe("Include commands that have no binding (ignored with commandId)"),
+      verbose: z.boolean().optional().describe("Show whether each binding is a custom override"),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
+    },
+    handler: async (args) => {
+      const commandId = args.commandId as string | undefined;
+      const vault = vaultName(args, config);
+
+      // Two CLI commands behind one tool, matching obsidian_theme's shape: the
+      // per-item lookup and the listing answer the same question at two scales.
+      if (commandId !== undefined && commandId !== "") {
+        const tokens = [`id=${commandId}`];
+        pushFlag(tokens, "verbose", args.verbose as boolean | undefined);
+        const { stdout, parsed } = await runCli(router, {
+          command: "hotkey",
+          args: tokens,
+          ...(vault !== undefined ? { vault } : {}),
+        });
+        return cliOutcome(stdout, parsed, `No hotkey is bound to ${commandId}.`);
+      }
+
+      const tokens: string[] = [];
+      pushFlag(tokens, "all", args.all as boolean | undefined);
+      pushFlag(tokens, "verbose", args.verbose as boolean | undefined);
+      const { stdout, parsed } = await runCli(router, {
+        command: "hotkeys",
+        args: tokens,
+        json: true,
+        ...(vault !== undefined ? { vault } : {}),
+      });
+      return cliOutcome(stdout, parsed, "No hotkeys reported.");
+    },
+  });
+
+  registry.add({
     name: "obsidian_command",
     toolset: "core",
     capability: "cliCommand",
@@ -237,11 +289,12 @@ export function registerObsidianTools(ctx: ServerContext): void {
     handler: async (args) => {
       const id = args.id as string;
       const data = args.data as Record<string, unknown> | undefined;
+      const vault = vaultName(args, config);
       if (data !== undefined) {
-        await writePluginData(router, id, data);
+        await writePluginData(router, id, data, vault);
         return contentOutcome(`Saved settings for ${id}.`);
       }
-      const value = await readPluginData(router, id);
+      const value = await readPluginData(router, id, vault);
       return { text: "Plugin settings loaded.", json: { id, data: value } };
     },
   });
@@ -280,7 +333,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
     inputSchema: {
       vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
-    handler: async () => {
+    handler: async (args) => {
       const code = `(() => {
         const leaves = [];
         app.workspace.iterateAllLeaves((leaf) => {
@@ -299,7 +352,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
           leaves,
         };
       })()`;
-      const value = await evalJson<unknown>(router, code);
+      const value = await evalJson<unknown>(router, code, vaultName(args, config));
       return { text: "Navigation state captured.", json: value };
     },
   });
@@ -316,13 +369,15 @@ export function registerObsidianTools(ctx: ServerContext): void {
     inputSchema: {
       message: z.string().describe("Notice text"),
       duration: z.number().optional().describe("Duration in ms (default 4000)"),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
       const message = args.message as string;
       const duration = (args.duration as number | undefined) ?? 4000;
+      const vault = vaultName(args, config);
       // Return a primitive — Notice objects are circular and fail Playwright serialization.
       const code = `(() => { new Notice(${JSON.stringify(message)}, ${duration}); return true; })()`;
-      await router.evaluate(code);
+      await router.evaluate(code, vault !== undefined ? { vault } : {});
       return contentOutcome(`Notice shown: ${message}`);
     },
   });

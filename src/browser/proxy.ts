@@ -19,11 +19,17 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { Page } from "playwright-core";
 import type { Config } from "../config.js";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { Logger } from "../util/logger.js";
 import { UobError } from "../util/errors.js";
-import { BLOCKED_BROWSER_TOOLS, isAllowedBrowserTool } from "./allowlist.js";
+import {
+  ALLOWED_TABS_ACTIONS,
+  BLOCKED_BROWSER_TOOLS,
+  isAllowedBrowserTool,
+  isInputBrowserTool,
+} from "./allowlist.js";
 
 export { BLOCKED_BROWSER_TOOLS, ALLOWED_BROWSER_TOOLS } from "./allowlist.js";
 
@@ -160,9 +166,29 @@ export class BrowserProxy {
    */
   async selectPinnedPage(): Promise<boolean> {
     if (!(await this.init()) || !this.client) return false;
-    const session = this.router.playwright;
     try {
-      const title = await (await session.page()).title();
+      const page = await this.router.playwright.page();
+      return await this.pointProxyAt(page);
+    } catch (e) {
+      this.logger.warn("could not point the browser proxy at the pinned window", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Make upstream's "current tab" be `page`.
+   *
+   * Returns false rather than throwing so `obsidian_attach` can report partial
+   * success, but `callTool` treats false as a refusal: forwarding real input to
+   * whatever tab the proxy happened to latch onto is the failure mode this exists
+   * to prevent.
+   */
+  private async pointProxyAt(page: Page): Promise<boolean> {
+    if (!this.client) return false;
+    try {
+      const title = await page.title();
 
       // The index must come from upstream's own tab list, not from
       // context.pages(). Those are different index spaces: context.pages() also
@@ -179,26 +205,32 @@ export class BrowserProxy {
         .join("\n");
 
       // Lines look like `- 0: (current) [Title](url)`.
-      const tabs = [...text.matchAll(/^-\s*(\d+):\s*(?:\(current\)\s*)?\[(.+?)\]\(/gm)].map(
-        (m) => ({ index: Number(m[1]), title: m[2] ?? "" }),
-      );
+      const tabs = [...text.matchAll(/^-\s*(\d+):\s*(\(current\)\s*)?\[(.+?)\]\(/gm)].map((m) => ({
+        index: Number(m[1]),
+        current: m[2] !== undefined,
+        title: m[3] ?? "",
+      }));
 
       // Every Obsidian window shares app://obsidian.md/index.html, so the title —
       // "<note> - <vault> - Obsidian <version>" — is the only distinguishing field.
       const match = tabs.find((t) => t.title === title);
       if (!match) {
-        this.logger.warn("pinned window is not in the proxy's tab list", { title });
+        this.logger.warn("target window is not in the proxy's tab list", { title });
         return false;
       }
+
+      // Skip the round-trip when upstream is already there. This runs before every
+      // input call now, not just on attach, so the common case has to be cheap.
+      if (match.current) return true;
 
       await this.client.callTool({
         name: "browser_tabs",
         arguments: { action: "select", index: match.index },
       });
-      this.logger.debug("browser proxy following pin", { index: match.index, title });
+      this.logger.debug("browser proxy retargeted", { index: match.index, title });
       return true;
     } catch (e) {
-      this.logger.warn("could not point the browser proxy at the pinned window", {
+      this.logger.warn("could not point the browser proxy at the target window", {
         error: e instanceof Error ? e.message : String(e),
       });
       return false;
@@ -215,6 +247,24 @@ export class BrowserProxy {
       });
     }
 
+    // `select` and `close` would move upstream off the window the fence just
+    // approved, which would make every later input call target something else.
+    if (name === "browser_tabs") {
+      const action = args.action;
+      if (typeof action === "string" && !ALLOWED_TABS_ACTIONS.has(action)) {
+        throw new UobError(
+          "INVALID_ARGUMENT",
+          `browser_tabs "${action}" is not available; only ${[...ALLOWED_TABS_ACTIONS].join(", ")} is.`,
+          {
+            remediation:
+              "Switching or closing tabs behind knapper's back would retarget every later input " +
+              "call. Use obsidian_attach to choose a window; it repoints the proxy for you.",
+            fixedBy: "obsidian_attach",
+          },
+        );
+      }
+    }
+
     const ready = await this.init();
     if (!ready || !this.client) {
       throw new UobError(
@@ -229,11 +279,45 @@ export class BrowserProxy {
       );
     }
 
-    const call = async (): Promise<CallToolResult> =>
+    const forward = async (): Promise<CallToolResult> =>
       this.client!.callTool({
         name,
         arguments: stripUndefined(args),
       }) as Promise<CallToolResult>;
+
+    /**
+     * Real input needs two things upstream cannot give us, both resolved here
+     * because @playwright/mcp is a black box we forward to rather than a library
+     * we can reach inside.
+     *
+     * The fence: `page()` throws unless the window belongs to an authorized vault,
+     * and `pointProxyAt` makes upstream's own current-tab notion agree. Without
+     * this the proxy keeps driving whichever tab it latched onto first.
+     *
+     * Focus emulation: set over a *separate* CDP session on the same target, so it
+     * applies to upstream's dispatches without upstream knowing about it. That is
+     * what makes background input work through the proxy at all.
+     */
+    const call = async (): Promise<CallToolResult> => {
+      if (!isInputBrowserTool(name)) return forward();
+
+      const page = await this.router.playwright.page();
+      if (!(await this.pointProxyAt(page))) {
+        throw new UobError(
+          "TARGET_NOT_FOUND",
+          `Refusing to run ${name}: could not point the browser proxy at the authorized window.`,
+          {
+            remediation:
+              "The window may have closed, or its title changed mid-call. Take a fresh " +
+              "browser_snapshot and retry. knapper will not forward real input without first " +
+              "confirming which window will receive it.",
+            fixedBy: "obsidian_list_targets",
+            details: { tool: name },
+          },
+        );
+      }
+      return this.router.focus.run(page, forward);
+    };
 
     try {
       return await call();

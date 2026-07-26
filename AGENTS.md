@@ -68,24 +68,46 @@ npm run smoke      # degraded-mode MCP check, no Obsidian required
 
 Live suites need Obsidian cold-started with `--remote-debugging-port=9222` and the
 `uob-test-vault` scratch vault. **Never point these at a real vault** — they create,
-rename, and delete notes.
+rename, and delete notes. They authorize that vault for knapper themselves
+(`scripts/authorize-test-vault.mjs`), writing the marker directly rather than going
+through `knapper authorize`, which requires a TTY a test runner does not have.
 
 ```bash
 npm run acceptance  # 23 checks over the critical seams
 npm run e2e         # 79 checks: vault round-trips, UI, telemetry, dev cycle, errors
 ```
 
+```bash
+npm run fence      # 14 live checks: refusals against a real unauthorized vault
+npm run bg-input   # 6 live checks: input with Obsidian unfocused, emulation reverted
+```
+
 `npm run check && npm run typecheck && npm test && npm run acceptance` is the
 minimum before proposing a change. Run `npm run e2e` for anything touching the
 router, a tool handler, or the CLI argv grammar.
+
+`npm run fence` needs one authorized and one unauthorized vault open at once — the
+situation no mock reproduces. `npm run bg-input` is only meaningful when Obsidian is
+**not** the foreground window; run it from a terminal without clicking into Obsidian
+first, or it proves nothing.
 
 ## Conventions that matter
 
 **Comments explain constraints, not narration.** The valuable comments here record
 things the code cannot show: why `noDefaults: true` is mandatory on
-`connectOverCDP` (without it Playwright flips the user's theme and forces focus
-emulation), why pages are re-enumerated per call (handles go stale), why `rename`
-takes `name=` while `move` takes `to=`. Match that register.
+`connectOverCDP` (it flips the user's theme and forces focus emulation _permanently_
+— `src/browser/focus.ts` re-enables emulation per input dispatch and reverts it,
+which is how background input works), why pages are re-enumerated per call (handles
+go stale), why `rename` takes `name=` while `move` takes `to=`. Match that register.
+
+**The vault fence is not optional plumbing.** `src/connection/fence.ts` resolves the
+target vault for every call, and both transports fail closed: `buildArgs` throws
+rather than emit a CLI command with no `vault=` token, and `PlaywrightSession.page()`
+refuses rather than fall back to another window. A new code path that reaches
+Obsidian must go through `router.cliCommand` / `router.evaluate` / `session.page()`,
+which fence for you. If you add a fallback that catches and retries, call
+`rethrowIfRefused` first — `obsidian_search` used to swallow a refusal and retry the
+read unscoped.
 
 **Errors are a feature.** Use typed `UobError` from `src/util/errors.ts` with a
 `remediation` and, where possible, a `fixedBy` naming the tool that fixes it. The

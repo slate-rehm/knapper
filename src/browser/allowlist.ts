@@ -60,3 +60,44 @@ export const ALLOWED_BROWSER_TOOLS = new Set([
 export function isAllowedBrowserTool(name: string): boolean {
   return ALLOWED_BROWSER_TOOLS.has(name) && !BLOCKED_BROWSER_TOOLS.has(name);
 }
+
+/**
+ * Proxied tools that deliver real mouse or keyboard input.
+ *
+ * Two things key off this set. The vault fence re-points the proxy at the
+ * authorized window before each of these, and `FocusEmulator` wraps them so the
+ * input lands even when Obsidian is not the foreground window. Read-only tools are
+ * excluded on purpose: they need neither, and holding a shared lock while toggling
+ * emulation would let a reader flip it off under a concurrent write.
+ */
+export const INPUT_BROWSER_TOOLS = new Set([
+  "browser_click",
+  "browser_drag",
+  "browser_drop",
+  "browser_fill_form",
+  "browser_handle_dialog",
+  "browser_hover",
+  "browser_mouse_click_xy",
+  "browser_mouse_down",
+  "browser_mouse_drag_xy",
+  "browser_mouse_move_xy",
+  "browser_mouse_up",
+  "browser_mouse_wheel",
+  "browser_press_key",
+  "browser_select_option",
+  "browser_type",
+]);
+
+export function isInputBrowserTool(name: string): boolean {
+  return INPUT_BROWSER_TOOLS.has(name);
+}
+
+/**
+ * `browser_tabs` actions knapper will forward.
+ *
+ * `select` and `close` are the only allowlisted levers that can move the proxy off
+ * the window the fence just pointed it at — `select` silently, `close` permanently.
+ * Listing tabs is the useful half and cannot retarget anything, so that is the half
+ * we keep. knapper drives tab selection itself via `obsidian_attach`.
+ */
+export const ALLOWED_TABS_ACTIONS = new Set(["list"]);
