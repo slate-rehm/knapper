@@ -188,7 +188,8 @@ obsidian_create_vault path=~/obsidian-test-vaults/scratch open=true
 
 `open=true` cold-restarts Obsidian, which is required — Obsidian reads its vault
 registry once at startup, so a newly registered vault is invisible until it
-restarts.
+restarts. It also enables community plugins in the new vault, so plugin tools work
+on first use without a separate `obsidian_setup_vault` call.
 
 `obsidian_remove_vault` unregisters it, and deletes the directory with
 `deleteFiles=true`. **It refuses to touch any vault knapper did not create.** The
