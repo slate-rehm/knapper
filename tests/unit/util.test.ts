@@ -10,6 +10,7 @@ import {
   toUobError,
 } from "../../src/util/errors.js";
 import { checkUserFlags } from "../../src/connection/vaults.js";
+import { isObsidianCmdline } from "../../src/connection/health.js";
 import { buildArgs, cliValue } from "../../src/connection/cli/exec.js";
 import { writeFile, mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
@@ -216,5 +217,40 @@ describe("error contract", () => {
   it("omits absent optional fields from the JSON payload", () => {
     const err = new UobError("INTERNAL", "bare");
     expect(err.toJSON()).toEqual({ code: "INTERNAL", message: "bare" });
+  });
+});
+
+describe("isObsidianCmdline", () => {
+  const cmd = (...argv: string[]) => argv.join("\0") + "\0";
+
+  it("detects the distro packaging: shared electron plus app.asar", () => {
+    // Arch. The archive is app.asar; only its parent directory says obsidian.
+    expect(
+      isObsidianCmdline(
+        cmd("/usr/lib/electron39/electron", "/usr/lib/obsidian/app.asar", "--disable-gpu"),
+      ),
+    ).toBe(true);
+  });
+
+  it("detects the official build, where argv[0] is the binary", () => {
+    expect(isObsidianCmdline(cmd("/opt/Obsidian/obsidian", "--remote-debugging-port=9222"))).toBe(
+      true,
+    );
+    expect(isObsidianCmdline(cmd("obsidian"))).toBe(true);
+    expect(isObsidianCmdline(cmd("C:\\Users\\x\\Obsidian\\Obsidian.exe"))).toBe(true);
+  });
+
+  it("does not mistake a shell that merely mentions obsidian for the app", () => {
+    // This process exists whenever someone just tried to launch it; counting it
+    // would report Obsidian as running when it is not.
+    expect(
+      isObsidianCmdline(cmd("/usr/bin/bash", "-c", "nohup obsidian --remote-debugging-port")),
+    ).toBe(false);
+    expect(isObsidianCmdline(cmd("/usr/bin/node", "/home/u/obsidian-notes/build.js"))).toBe(false);
+  });
+
+  it("ignores an empty or malformed cmdline", () => {
+    expect(isObsidianCmdline("")).toBe(false);
+    expect(isObsidianCmdline("\0\0")).toBe(false);
   });
 });

@@ -40,6 +40,37 @@ export interface HealthProblem {
   fixedBy?: string;
 }
 
+/**
+ * Does this /proc cmdline belong to an Obsidian process?
+ *
+ * Two packagings to cover, and one trap:
+ *
+ *  - Official build: argv[0] is the Obsidian binary itself.
+ *  - Distro packages (Arch, and any that unbundle Electron): argv[0] is a *shared*
+ *    Electron and the app archive is argv[1] —
+ *    `/usr/lib/electron39/electron /usr/lib/obsidian/app.asar --disable-gpu`.
+ *    Note the archive is `app.asar`, not `obsidian.asar`; only its parent directory
+ *    carries the name.
+ *
+ * The trap is that a plain substring search over the whole cmdline matches any shell
+ * that merely *mentions* obsidian — `bash -c "nohup obsidian …"` is itself a process.
+ * That would report Obsidian as running whenever someone had just tried to start it.
+ * So match structurally, per argv token, never across the whole buffer.
+ */
+export function isObsidianCmdline(cmdline: string): boolean {
+  const argv = cmdline.split("\0").filter((t) => t !== "");
+  if (argv.length === 0) return false;
+
+  // `<anything>/obsidian/<name>.asar`, or a literally named obsidian.asar.
+  const asar = argv.some(
+    (t) => /(^|[/\\])obsidian[/\\][^/\\]*\.asar$/i.test(t) || /(^|[/\\])obsidian\.asar$/i.test(t),
+  );
+  if (asar) return true;
+
+  // argv[0] is the executable itself: `obsidian`, `Obsidian.exe`, `/opt/Obsidian/obsidian`.
+  return /(^|[/\\])obsidian(\.exe)?$/i.test(argv[0] ?? "");
+}
+
 /** Detect a live Obsidian process without spawning the binary. */
 export async function isObsidianRunning(): Promise<boolean> {
   // Reading /proc avoids a shell round-trip on Linux; other platforms fall back to
@@ -52,9 +83,7 @@ export async function isObsidianRunning(): Promise<boolean> {
       try {
         const { readFile } = await import("node:fs/promises");
         const cmdline = await readFile(`/proc/${entry}/cmdline`, "utf8");
-        if (cmdline.includes("obsidian.asar") || /obsidian/i.test(cmdline.split("\0")[0] ?? "")) {
-          return true;
-        }
+        if (isObsidianCmdline(cmdline)) return true;
       } catch {
         // process exited between readdir and read
       }

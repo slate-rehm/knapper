@@ -1,6 +1,6 @@
 {
   "name": "knapper",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for Obsidian plugin development: CLI + Playwright over CDP, telemetry, dev-cycle workflows, and browser automation.",
   "author": {
     "name": "slate-rehm",
