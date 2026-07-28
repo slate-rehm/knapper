@@ -88,28 +88,29 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
   const key = mintSessionKey(label, env);
   const paths = sessionPaths(key, env);
 
-  const seeded = await seedSessionProfile({
-    key,
-    ...(opts.vaultPath !== undefined ? { vaultPath: opts.vaultPath } : {}),
-    ...(opts.adoptVault !== undefined ? { vaultPath: opts.adoptVault, adopt: true } : {}),
-    now,
-    env,
-  });
-
-  // Link before launch so the plugin is present when Obsidian first enumerates the
-  // vault, sparing the agent a reload it would otherwise have to know to do.
+  let seeded;
   let plugin: SessionDescriptor["plugin"];
-  if (opts.pluginSourceDir !== undefined) {
-    const linked = await linkPlugin(
-      seeded.vault.path,
-      opts.pluginSourceDir,
-      opts.pluginId ?? undefined,
-    );
-    plugin = { id: linked.pluginId, sourceDir: linked.sourceDir, linkPath: linked.linkPath };
-  }
-
   let launched;
   try {
+    seeded = await seedSessionProfile({
+      key,
+      ...(opts.vaultPath !== undefined ? { vaultPath: opts.vaultPath } : {}),
+      ...(opts.adoptVault !== undefined ? { vaultPath: opts.adoptVault, adopt: true } : {}),
+      now,
+      env,
+    });
+
+    // Link before launch so the plugin is present when Obsidian first enumerates
+    // the vault, sparing the agent a reload it would otherwise have to know to do.
+    if (opts.pluginSourceDir !== undefined) {
+      const linked = await linkPlugin(
+        seeded.vault.path,
+        opts.pluginSourceDir,
+        opts.pluginId ?? undefined,
+      );
+      plugin = { id: linked.pluginId, sourceDir: linked.sourceDir, linkPath: linked.linkPath };
+    }
+
     launched = await launchObsidian({
       obsidianBin: opts.obsidianBin,
       userDataDir: paths.userDataDir,
@@ -122,9 +123,12 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
     });
   } catch (e) {
-    // Leave nothing half-provisioned: an un-launchable session would otherwise sit
-    // in the registry forever, since the reaper's "no live process" rule alone
-    // cannot tell it apart from one that is merely stopped.
+    // Leave nothing half-provisioned: a session that failed anywhere before its
+    // descriptor exists would otherwise sit on disk forever, since the reaper's
+    // "no live process" rule alone cannot tell it apart from one merely stopped.
+    // Only the session's own root is removed — a vault the caller pointed outside
+    // it is not ours to clean up, and this path runs on the argument-validation
+    // failures where it is most likely to be someone's real directory.
     await rm(paths.root, { recursive: true, force: true }).catch(() => undefined);
     throw e;
   }
@@ -210,6 +214,16 @@ export async function restartSession(
 
 export interface CloseSessionOptions {
   deleteVault?: boolean;
+  /**
+   * Refuse to delete a vault that lives outside the session's own directory.
+   *
+   * Set by the reaper, which deletes with no agent in the loop. A vault inside the
+   * session root was unambiguously made by `seedSessionProfile` for this session
+   * and is disposable; one the caller pointed elsewhere is a directory a human
+   * chose, and reclaiming a stale profile is never a reason to delete it. An agent
+   * calling `obsidian_close_session` explicitly still gets the full behaviour.
+   */
+  onlyVaultInsideRoot?: boolean;
   keepInstance?: boolean;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
@@ -253,25 +267,38 @@ export async function closeSessionUnlocked(
       ? false
       : await quitObsidian(scopeOf(descriptor), opts.timeoutMs ?? 15_000);
 
+  const paths = sessionPaths(descriptor.key, env);
+  const vaultInsideRoot =
+    descriptor.vault !== undefined &&
+    resolve(descriptor.vault.path).startsWith(`${resolve(paths.root)}/`);
+
   let vaultRemoved = false;
   let vaultDeleted = false;
   if (descriptor.vault !== undefined && opts.deleteVault === true) {
-    // Route through the real removal path rather than an rm: it independently
-    // re-reads the marker and refuses an `adopted` grant, a forbidden root, or a
-    // directory containing another registered vault. The descriptor saying "this
-    // is mine" is not, on its own, permission to delete.
-    try {
-      const registry = await readGlobalConfig(`${descriptor.instance.userDataDir}/obsidian.json`);
-      const result = await removeManagedVault(
-        descriptor.vault.path,
-        registry?.vaults ?? [],
-        true,
-        `${descriptor.instance.userDataDir}/obsidian.json`,
+    if (opts.onlyVaultInsideRoot === true && !vaultInsideRoot) {
+      notes.push(
+        `Vault kept at ${descriptor.vault.path}: it lives outside the session directory, and ` +
+          "automatic cleanup only deletes a session's own scratch vault.",
       );
-      vaultRemoved = result.unregistered;
-      vaultDeleted = result.deletedDirectory;
-    } catch (e) {
-      notes.push(`Vault left on disk: ${e instanceof Error ? e.message : String(e)}`);
+    } else {
+      // Route through the real removal path rather than an rm: it independently
+      // re-reads the marker and refuses an `adopted` grant, a forbidden root, or a
+      // directory containing another registered vault. The descriptor saying "this
+      // is mine" is not, on its own, permission to delete.
+      try {
+        const configPath = `${descriptor.instance.userDataDir}/obsidian.json`;
+        const registry = await readGlobalConfig(configPath);
+        const result = await removeManagedVault(
+          descriptor.vault.path,
+          registry?.vaults ?? [],
+          true,
+          configPath,
+        );
+        vaultRemoved = result.unregistered;
+        vaultDeleted = result.deletedDirectory;
+      } catch (e) {
+        notes.push(`Vault left on disk: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
 
