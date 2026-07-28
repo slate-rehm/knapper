@@ -1,6 +1,6 @@
 ---
 name: obsidian-instance-setup
-description: Connect knapper to a live Obsidian desktop app: obsidian_doctor diagnosis, obsidian_launch with remote debugging, CLI enablement, vault registry, argv corruption, and the Electron single-instance lock. Use before plugin dev or UI automation when transports fail.
+description: Connect knapper to a live Obsidian desktop app: obsidian_doctor diagnosis, obsidian_launch with remote debugging, CLI enablement, vault registry, argv corruption, the Electron single-instance lock, and isolated sessions for concurrent agents. Use before plugin dev or UI automation when transports fail, or when another agent may be driving Obsidian.
 ---
 
 # Obsidian instance setup
@@ -21,6 +21,37 @@ obsidian_launch
 obsidian_status
 ```
 
+## Working alongside other agents: use a session
+
+If another agent might be driving Obsidian — a second worktree, a parallel task, even
+the same branch — do not share the user's instance. Create an isolated one:
+
+```text
+obsidian_create_session label=my-plugin pluginSourceDir=/abs/path/to/plugin
+```
+
+That provisions a private Obsidian: its own profile, CLI socket, debug port, and
+scratch vault, with the plugin already symlinked and community plugins enabled. It
+returns a **session key**. Put it in knapper's MCP `env` block as `KNAP_SESSION` and
+reconnect; every other tool then targets that instance and nothing else.
+
+```text
+obsidian_list_sessions      # who else is running, and which one you are bound to
+obsidian_restart_session    # cold-restart YOURS only; other agents are untouched
+obsidian_close_session deleteVault=true   # quit and clean up when done
+```
+
+Why this matters: without a session, `obsidian_launch restart=true` quits _the_ app,
+and two agents issuing real input interleave against one window. With one, the
+concurrency lock in each server is sufficient, because no other server can reach your
+instance. Abandoned sessions are collected automatically the next time any agent
+creates one.
+
+**Linux only.** Obsidian derives its CLI socket path from `XDG_RUNTIME_DIR`, and only
+the Linux branch of that formula reads the environment; macOS keys it on the home
+directory and Windows on the username. `obsidian_doctor` reports the `CLI isolation`
+level, so check it rather than assuming.
+
 ## Four precondition states (do not lump together)
 
 | Code                   | Meaning                         | Typical fix                                                   |
@@ -34,9 +65,14 @@ Errors include **remediation** text and often a **`fixedBy`** tool name — foll
 
 ### `CDP_PORT_CLOSED` and the single-instance lock
 
-Electron allows one instance. If Obsidian is already running **without** the debug flag, starting again with `--remote-debugging-port` **silently does nothing**.
+Electron allows one instance **per user-data directory**. If Obsidian is already running **without** the debug flag, starting again with `--remote-debugging-port` **silently does nothing** — the second launch loses the lock and becomes a CLI client, dropping the flag.
 
 **Fix:** fully quit Obsidian (all windows), then cold start with the port. `obsidian_launch` encodes the right command for your OS.
+
+**Or sidestep it:** `obsidian_create_session` launches against a private user-data
+directory, so it gets its own lock and its own debug port without quitting anything
+the user has open. That is the better move whenever you do not specifically need the
+user's own vault.
 
 ### `CLI_DISABLED`
 
@@ -84,3 +120,24 @@ Obsidian checks for updates on startup and hourly. A downloaded `obsidian-<versi
 - **obsidian-plugin-dev** — after setup, link and reload plugins.
 - **obsidian-ui-automation** — requires CDP.
 - **obsidian-debugging** — telemetry after connection works.
+
+## VAULT_NOT_AUTHORIZED
+
+knapper refuses any vault the user has not authorized, so a fresh install reaches
+nothing. This is a fifth precondition state alongside the four transport ones, and
+unlike those, **no tool fixes it**.
+
+`obsidian_doctor` and `obsidian_status` list every registered vault with its
+authorization state, so start there.
+
+- Need throwaway space? `obsidian_create_vault` — it authorizes what it creates, and
+  is the right answer for almost every experiment.
+- Need a _specific existing_ vault? Only the user can grant that, by running
+  `knapper authorize <path>` in their own terminal. It requires an interactive TTY and
+  a retyped vault name, so you cannot run it yourself — spawning the binary will just
+  refuse.
+
+Do not volunteer the authorize command. An agent that answers every refusal with
+"run this to grant me access" trains users to authorize reflexively, which is the
+habit the fence exists to prevent. Surface it only when the user has asked to work in
+that vault.

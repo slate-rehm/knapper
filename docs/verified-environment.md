@@ -46,6 +46,32 @@ With Playwright attached, all three of the following worked in sequence:
 refuses a call on exclusivity grounds. `EXCLUSIVE_DEBUGGER_LAYERS` is empty, and the
 `DEBUGGER_CONFLICT` error path is retained only for a future regression.
 
+## Gate C — input reaches an unfocused window
+
+Measured on Obsidian 1.12.7 / Electron 39.8.10 / Chromium 142, Arch Linux with
+Hyprland (Wayland), with Obsidian visible but **not** the foreground window, via
+`npm run bg-input`.
+
+- `Emulation.setFocusEmulationEnabled` is enabled per input dispatch over a CDP
+  session bound to the target page, and disabled again in a `finally`.
+- `Control+p` opened the command palette with the terminal focused:
+  `obsidian_exercise_hotkey` reported `verdict: "fired"` and
+  `.modal.mod-command-palette` was present afterwards.
+- `browser_press_sequentially` typed `graph` into the palette input and the value
+  round-tripped.
+- `document.hasFocus()` was `false` before the dispatch, `true` while a
+  `browser_keydown` hold was outstanding, and `false` again after release — so the
+  emulation is demonstrably doing the work and is demonstrably reverted.
+- A session closed with an unpaired `browser_keydown` left `document.hasFocus()`
+  false: `FocusEmulator.dispose()` force-releases holds on shutdown.
+
+`Page.bringToFront` is deliberately not used. It would raise and activate the user's
+window, which is the one thing a tool driving a daily-driver app must not do.
+
+**Not reachable by this path:** Electron menu accelerators (the app-level `Cmd+Q` /
+`Cmd+W` class) never enter the renderer, so no CDP input triggers them, foreground or
+not. Renderer-level bindings — which is every Obsidian command hotkey — do work.
+
 ## `page.accessibility.snapshot` is gone
 
 Confirmed absent at runtime (`typeof page.accessibility?.snapshot === "undefined"`).

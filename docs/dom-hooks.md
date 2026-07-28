@@ -52,14 +52,14 @@ Prefer `[data-type="markdown"]` plus `.mod-active` to target the editor leaf.
 
 Use for cheap assertions with `browser_verify_*` or `browser_evaluate`.
 
-| Class                                        | Meaning                    | Verified on Linux test session                   |
-| -------------------------------------------- | -------------------------- | ------------------------------------------------ |
-| `.theme-dark` / `.theme-light`               | Color scheme               | `theme-dark` yes                                 |
-| `.mod-linux` / `.mod-macos` / `.mod-windows` | Platform                   | `mod-linux` yes                                  |
-| `.is-focused`                                | App has focus              | Not present while unfocused in probe             |
-| `.is-mobile`                                 | Mobile layout              | No (desktop)                                     |
-| `.is-popout-window`                          | Detached window            | No on main window                                |
-| `.is-left-sidedock-open`                     | Left ribbon / dock visible | Not on body in probe (layout uses other classes) |
+| Class                                        | Meaning                    | Verified on Linux test session                                                                                              |
+| -------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `.theme-dark` / `.theme-light`               | Color scheme               | `theme-dark` yes                                                                                                            |
+| `.mod-linux` / `.mod-macos` / `.mod-windows` | Platform                   | `mod-linux` yes                                                                                                             |
+| `.is-focused`                                | App has focus              | Absent while unfocused, but present _during_ knapper input, which emulates page focus per dispatch (`src/browser/focus.ts`) |
+| `.is-mobile`                                 | Mobile layout              | No (desktop)                                                                                                                |
+| `.is-popout-window`                          | Detached window            | No on main window                                                                                                           |
+| `.is-left-sidedock-open`                     | Left ribbon / dock visible | Not on body in probe (layout uses other classes)                                                                            |
 
 Additional stable `body` classes seen in the wild: `obsidian-app`, `is-frameless`, `show-ribbon`, `show-view-header`, `styled-scrollbars`.
 

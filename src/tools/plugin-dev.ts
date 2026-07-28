@@ -74,6 +74,7 @@ export function registerPluginDevTools(ctx: ServerContext): void {
         .nonnegative()
         .optional()
         .describe("Milliseconds to wait after running the command (default 1000)"),
+      vault: z.string().optional().describe(`Target vault. ${CLOSED_VAULT_WARNING}`),
     },
     handler: async (args) =>
       runExerciseCommand(
@@ -82,6 +83,7 @@ export function registerPluginDevTools(ctx: ServerContext): void {
         telemetry,
         args.commandId as string,
         (args.waitMs as number | undefined) ?? 1000,
+        args,
       ),
   });
 
@@ -113,7 +115,9 @@ export function registerPluginDevTools(ctx: ServerContext): void {
     annotations: { readOnlyHint: true },
     inputSchema: {
       pluginId: z.string().min(1).describe("Plugin id"),
+      vault: z.string().optional().describe(`Target vault. ${CLOSED_VAULT_WARNING}`),
     },
-    handler: async (args) => runPluginHealth(router, telemetry, args.pluginId as string),
+    handler: async (args) =>
+      runPluginHealth(router, telemetry, args.pluginId as string, vaultName(args, config)),
   });
 }

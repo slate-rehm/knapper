@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import { lstat, readFile, symlink, unlink } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ServerContext } from "../server.js";
 import { TOOLSET_DESCRIPTIONS, type Toolset } from "../toolsets.js";
@@ -13,26 +13,25 @@ import {
   createManagedVault,
   findVault,
   readGlobalConfig,
-  readManagedMarker,
   removeManagedVault,
   writeCliFlag,
   MANAGED_MARKER,
 } from "../connection/vaults.js";
+import { cliSocketPathFor } from "../config.js";
 import { UobError } from "../util/errors.js";
+import { linkPlugin, unlinkPlugin } from "../session/plugin-link.js";
 import { contentOutcome, runCli } from "../obsidian/helpers.js";
-
-const TEST_VAULT_HINT =
-  "Use vault=uob-test-vault for automated testing; avoid writing to production vaults.";
 
 async function vaultAutomationState(
   ctx: ServerContext,
   vaultName: string,
+  configPath: string,
 ): Promise<{
   restrictMode: string;
   communityPlugins: boolean;
   devSymlinks: { id: string; path: string }[];
 }> {
-  const global = await readGlobalConfig();
+  const global = await readGlobalConfig(configPath);
   const entry = global ? findVault(global, vaultName) : undefined;
   const devSymlinks: { id: string; path: string }[] = [];
   let communityPlugins = false;
@@ -128,7 +127,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
 
       let vaultState: Awaited<ReturnType<typeof vaultAutomationState>> | undefined;
       if (targetVault !== undefined && targetVault !== "") {
-        vaultState = await vaultAutomationState(ctx, targetVault);
+        vaultState = await vaultAutomationState(ctx, targetVault, config.obsidianConfigPath);
       }
 
       const lines = [
@@ -141,25 +140,52 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         `Config: ${health.configPath}`,
       ];
 
+      // Which instance this server drives, and how well CLI commands are pinned to
+      // it. `shared` means a CLI call may land in whichever Obsidian booted last,
+      // which is worth saying out loud because nothing else reports it.
+      if (config.sessionId !== undefined) {
+        lines.push(
+          `Session: ${config.sessionId}`,
+          `Profile: ${config.userDataDir}`,
+          `CLI isolation: ${config.cliIsolation}` +
+            (config.cliIsolation === "per-session"
+              ? ` (socket ${cliSocketPathFor(config.runtimeDir)})`
+              : " — CLI commands are not pinned to this instance; the renderer route is"),
+        );
+      } else {
+        lines.push("Session: none (driving the installation's own Obsidian)");
+      }
+
       if (health.argvCorruption) {
         lines.push(
           `Argv corruption: ${health.argvCorruption.tokens.join(", ")} in ${health.argvCorruption.path}`,
         );
       }
 
-      // Flag which vaults are disposable, so an agent picking somewhere to write
-      // can tell a scratch vault from someone's real notes without guessing.
-      const managed = new Set<string>();
-      for (const v of health.vaults) {
-        if (await readManagedMarker(v.path)) managed.add(v.path);
-      }
+      // Authorization is the first thing an agent needs from the doctor now: a
+      // refusal from any vault-scoped tool is diagnosed here, and "created" vs
+      // "adopted" tells it whether the vault is scratch space or someone's notes.
+      const vaultStatus = await router.fence.status();
+      const authorizedCount = vaultStatus.filter((v) => v.authorized).length;
 
-      lines.push("", "Registered vaults:");
-      for (const v of health.vaults) {
-        const tags = [v.open ? "open" : "", managed.has(v.path) ? "knapper test vault" : ""]
-          .filter((t) => t !== "")
-          .join(", ");
-        lines.push(`  - ${v.name}${tags === "" ? "" : ` (${tags})`} → ${v.path}`);
+      lines.push("", `Registered vaults (${authorizedCount} authorized):`);
+      for (const v of vaultStatus) {
+        const grantTag =
+          v.grant === "created"
+            ? "authorized, knapper-created (removable)"
+            : v.grant === "adopted"
+              ? "authorized by the user (never deleted by knapper)"
+              : "NOT AUTHORIZED — vault-scoped tools will refuse";
+        const tags = [v.open ? "open" : "", grantTag].filter((t) => t !== "").join(", ");
+        lines.push(`  - ${v.name} (${tags}) → ${v.path}`);
+      }
+      if (authorizedCount === 0) {
+        lines.push(
+          "  No vault is authorized. Every vault-scoped tool will refuse until the user runs",
+          "  `npx knapper authorize <vault path>` themselves, or obsidian_create_vault makes a",
+          "  throwaway one. Do not suggest the authorize command unless the user asked to work",
+          "  in a specific existing vault.",
+        );
       }
 
       if (vaultState && targetVault) {
@@ -196,7 +222,13 @@ export function registerProvisioningTools(ctx: ServerContext): void {
           binary: config.obsidianBin,
           version,
           argvCorruption: health.argvCorruption ?? null,
-          vaults: health.vaults.map((v) => ({ ...v, knapperManaged: managed.has(v.path) })),
+          vaults: vaultStatus.map((v) => ({
+            ...v,
+            // Retained for compatibility with the pre-fence shape; `grant` is the
+            // field to read now, since it distinguishes created from adopted.
+            knapperManaged: v.grant === "created",
+          })),
+          authorizedVaultCount: authorizedCount,
           targetVault: targetVault ?? null,
           vaultState: vaultState ?? null,
           toolsets,
@@ -213,8 +245,9 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     description:
       "Cold-start Obsidian with `--remote-debugging-port` and `--remote-allow-origins=*`. " +
       "Because of Electron's single-instance lock, launching while Obsidian is already running " +
-      "silently drops the debug flag — use restart=true to quit first. Never overrides user-data-dir. " +
-      "Prefer this over manual nohup when CDP attach times out.",
+      "silently drops the debug flag — use restart=true to quit first. Targets this server's " +
+      "instance: under a session that is the session's own private profile, otherwise the user's " +
+      "installation. Prefer this over manual nohup when CDP attach times out.",
     inputSchema: {
       port: z
         .number()
@@ -237,8 +270,18 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         restart: args.restart === true,
         force: args.force === true,
         logger: ctx.logger,
+        // Under a session this launches (and quits) only that session's instance.
+        // Unbound, both stay undefined and this drives the user's own Obsidian
+        // exactly as it did before sessions existed.
+        ...(config.sessionId !== undefined ? { userDataDir: config.userDataDir } : {}),
+        ...(config.runtimeDir !== undefined ? { runtimeDir: config.runtimeDir } : {}),
       });
 
+      // With port 0 the port is only known now, and the router baked the old one
+      // into its PlaywrightSession at construction. Warning about the mismatch was
+      // survivable with a fixed 9222; under a session it would leave every CDP
+      // tool probing a port nothing listens on.
+      if (result.cdpUrl !== config.cdpUrl) await router.retarget(result.cdpUrl);
       await router.refreshAvailability(true);
 
       return {
@@ -248,9 +291,6 @@ export function registerProvisioningTools(ctx: ServerContext): void {
             : "Obsidian is running with CDP enabled.",
           `CDP URL: ${result.cdpUrl}`,
           `Port: ${result.port}`,
-          config.cdpUrl !== result.cdpUrl
-            ? `Note: server config still points at ${config.cdpUrl} — set OBSIDIAN_CDP_URL if needed.`
-            : "",
         ]
           .filter((l) => l !== "")
           .join("\n"),
@@ -273,7 +313,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       const enabled = args.enabled !== false;
-      const running = await isObsidianRunning();
+      const running = await isObsidianRunning(router.processScope);
 
       if (running) {
         if (!enabled) {
@@ -303,7 +343,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         return contentOutcome("CLI enabled via renderer IPC (persists like the settings UI).");
       }
 
-      await writeCliFlag(enabled);
+      await writeCliFlag(enabled, config.obsidianConfigPath);
       return contentOutcome(
         enabled
           ? "Wrote cli=true to obsidian.json. Start Obsidian to use the CLI."
@@ -319,7 +359,6 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     description:
       "Prepare a vault for plugin development: turn off restricted mode, enable community plugins " +
       "in app.json, and optionally enable a plugin by id. " +
-      TEST_VAULT_HINT +
       " " +
       "May open a closed vault in a new window.",
     inputSchema: {
@@ -330,22 +369,16 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       const vault = args.vault as string;
       const pluginId = args.pluginId as string | undefined;
 
-      const global = await readGlobalConfig();
-      const entry = global ? findVault(global, vault) : undefined;
-      if (!entry) {
-        const known = global?.vaults.map((v) => v.name) ?? [];
-        throw new UobError("VAULT_NOT_FOUND", `Unknown vault "${vault}".`, {
-          remediation:
-            known.length > 0
-              ? `Known: ${known.join(", ")}`
-              : "Register the vault in Obsidian first.",
-          details: { known },
-        });
-      }
+      // Fenced explicitly rather than by accident. This handler writes app.json
+      // straight to disk, and it used to take that path from an unauthorized
+      // registry lookup — safe only because the `plugins:restrict` call below
+      // happens to fence first and throw. Reordering those two lines would have
+      // silently turned this into a write into any registered vault.
+      const target = await router.fence.resolve(vault);
 
       await runCli(router, { command: "plugins:restrict", args: ["off"], vault });
 
-      const appPath = join(entry.path, ".obsidian", "app.json");
+      const appPath = join(target.path, ".obsidian", "app.json");
       let appCfg: Record<string, unknown> = {};
       try {
         appCfg = JSON.parse(await readFile(appPath, "utf8")) as Record<string, unknown>;
@@ -354,7 +387,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       }
       appCfg.communityPluginEnabled = true;
       const { writeFile, mkdir } = await import("node:fs/promises");
-      await mkdir(join(entry.path, ".obsidian"), { recursive: true });
+      await mkdir(join(target.path, ".obsidian"), { recursive: true });
       await writeFile(appPath, `${JSON.stringify(appCfg, null, 2)}\n`, "utf8");
 
       if (pluginId !== undefined && pluginId !== "") {
@@ -365,7 +398,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         });
       }
 
-      const state = await vaultAutomationState(ctx, vault);
+      const state = await vaultAutomationState(ctx, vault, config.obsidianConfigPath);
       return {
         text: `Vault "${vault}" is automation-ready (restrict off, community plugins on).`,
         json: { vault, pluginId: pluginId ?? null, state },
@@ -391,7 +424,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       const path = args.path as string;
-      const result = await createManagedVault(path, new Date());
+      const result = await createManagedVault(path, new Date(), config.obsidianConfigPath);
 
       let restarted = false;
       let automationReady = false;
@@ -505,7 +538,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       const wanted = args.vault as string;
       const deleteFiles = args.deleteFiles === true;
 
-      const global = await readGlobalConfig();
+      const global = await readGlobalConfig(config.obsidianConfigPath);
       const vaults = global?.vaults ?? [];
       // Accept a path so an unregistered leftover directory can still be cleaned up.
       const entry = global ? findVault(global, wanted) : undefined;
@@ -520,7 +553,12 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         });
       }
 
-      const result = await removeManagedVault(targetPath, vaults, deleteFiles);
+      const result = await removeManagedVault(
+        targetPath,
+        vaults,
+        deleteFiles,
+        config.obsidianConfigPath,
+      );
       return {
         text: [
           `Removed test vault at ${result.path}`,
@@ -553,69 +591,28 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       const vault = args.vault as string;
       const sourceDir = args.sourceDir as string;
       const unlinkMode = args.unlink === true;
-      let pluginId = args.pluginId as string | undefined;
+      const pluginId = args.pluginId as string | undefined;
 
-      const global = await readGlobalConfig();
-      const entry = global ? findVault(global, vault) : undefined;
-      if (!entry?.path) {
-        throw new UobError("VAULT_NOT_FOUND", `Unknown vault "${vault}".`, {});
-      }
-
-      if (!unlinkMode) {
-        let manifest: { id?: string };
-        try {
-          manifest = JSON.parse(await readFile(join(sourceDir, "manifest.json"), "utf8")) as {
-            id?: string;
-          };
-        } catch {
-          throw new UobError("INVALID_ARGUMENT", `No manifest.json in ${sourceDir}.`, {});
-        }
-        pluginId = pluginId ?? manifest.id;
-        if (pluginId === undefined || pluginId === "") {
-          throw new UobError("INVALID_ARGUMENT", "manifest.json has no id field.", {});
-        }
-      } else if (pluginId === undefined || pluginId === "") {
-        throw new UobError("INVALID_ARGUMENT", "pluginId is required when unlink=true.", {});
-      }
-
-      const linkPath = join(entry.path, ".obsidian", "plugins", pluginId!);
-      const { mkdir } = await import("node:fs/promises");
-      await mkdir(join(entry.path, ".obsidian", "plugins"), { recursive: true });
+      // Resolved through the fence, not the registry. Being *registered* is not
+      // consent: this writes into `<vault>/.obsidian/plugins`, and a bare registry
+      // lookup let it install a symlink into any vault Obsidian happened to know
+      // about, including the user's own. Refusals now match every other
+      // vault-scoped tool.
+      const target = await router.fence.resolve(vault);
 
       if (unlinkMode) {
-        try {
-          const st = await lstat(linkPath);
-          if (!st.isSymbolicLink()) {
-            throw new UobError("INVALID_ARGUMENT", `${linkPath} is not a symlink.`, {});
-          }
-          await unlink(linkPath);
-        } catch (e) {
-          if (e instanceof UobError) throw e;
-          throw new UobError("INVALID_ARGUMENT", `No symlink at ${linkPath}.`, {});
+        if (pluginId === undefined || pluginId === "") {
+          throw new UobError("INVALID_ARGUMENT", "pluginId is required when unlink=true.", {});
         }
-        return contentOutcome(`Removed symlink ${linkPath}`);
+        return contentOutcome(`Removed symlink ${await unlinkPlugin(target.path, pluginId)}`);
       }
 
-      try {
-        const st = await lstat(linkPath);
-        if (st.isSymbolicLink()) {
-          await unlink(linkPath);
-        } else {
-          throw new UobError(
-            "INVALID_ARGUMENT",
-            `${linkPath} exists and is not a symlink — refusing to clobber.`,
-            {},
-          );
-        }
-      } catch (e) {
-        if (e instanceof UobError) throw e;
-        // does not exist — ok
-      }
-
-      await symlink(sourceDir, linkPath);
+      // Shared with session provisioning so the "replace a symlink, never a real
+      // directory" rule has exactly one implementation.
+      const linked = await linkPlugin(target.path, sourceDir, pluginId);
       return {
-        text: `Linked ${sourceDir} → ${linkPath}`,
-        json: { vault, pluginId, sourceDir, linkPath },
+        text: `Linked ${linked.sourceDir} → ${linked.linkPath}`,
+        json: { vault, ...linked },
       };
     },
   });

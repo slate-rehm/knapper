@@ -2,6 +2,7 @@
  * Vault file and note operations (toolset: vault).
  */
 
+import { rethrowIfRefused } from "../util/errors.js";
 import { z } from "zod";
 import type { ServerContext } from "../server.js";
 import {
@@ -384,7 +385,10 @@ export function registerVaultTools(ctx: ServerContext): void {
           json: true,
         });
         return cliOutcome(stdout, parsed);
-      } catch {
+      } catch (e) {
+        // The fallback below reads the whole vault through the renderer. Falling
+        // into it after a refusal would retry the exact thing the fence blocked.
+        rethrowIfRefused(e);
         const q = args.query as string;
         const code = `((q) => {
           const hits = [];
@@ -395,7 +399,7 @@ export function registerVaultTools(ctx: ServerContext): void {
           }
           return hits;
         })(${JSON.stringify(q)})`;
-        const value = await evalJson<string[]>(router, code);
+        const value = (await evalJson<string[]>(router, code, v)) ?? [];
         return { text: value.join("\n") || "(no results)", json: { data: value, fallback: true } };
       }
     },

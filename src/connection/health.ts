@@ -6,7 +6,9 @@
  * tooling is frustrating to use.
  */
 
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { defaultObsidianUserDataDir, obsidianConfigPath } from "../config.js";
 import { checkUserFlags, readGlobalConfig, type ObsidianGlobalConfig } from "./vaults.js";
 import { probeCdp, fetchTargets, obsidianWindows, type CdpTarget } from "./cdp/discover.js";
 import type { ObsidianCli } from "./cli/exec.js";
@@ -71,27 +73,134 @@ export function isObsidianCmdline(cmdline: string): boolean {
   return /(^|[/\\])obsidian(\.exe)?$/i.test(argv[0] ?? "");
 }
 
-/** Detect a live Obsidian process without spawning the binary. */
-export async function isObsidianRunning(): Promise<boolean> {
-  // Reading /proc avoids a shell round-trip on Linux; other platforms fall back to
-  // the CDP/CLI probes, which are authoritative anyway.
-  if (process.platform !== "linux") return false;
+/**
+ * Which Obsidian instance a process query is about.
+ *
+ * `userDataDir` undefined means the *default* profile — never "any instance". That
+ * distinction is what keeps a session's restart from reaching the user's own
+ * Obsidian, and vice versa.
+ */
+export interface ProcessScope {
+  userDataDir?: string;
+}
+
+/** The `--user-data-dir` an argv carries, if any. */
+export function cmdlineUserDataDir(cmdline: string): string | undefined {
+  const argv = cmdline.split("\0").filter((t) => t !== "");
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i] ?? "";
+    if (token.startsWith("--user-data-dir=")) {
+      return resolve(token.slice("--user-data-dir=".length));
+    }
+    // Chromium also accepts the two-token form.
+    if (token === "--user-data-dir") {
+      const next = argv[i + 1];
+      return next !== undefined ? resolve(next) : undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Does this process belong to the scoped instance?
+ *
+ * A conjunction, and it must stay one. Obsidian's own child processes carry
+ * `--user-data-dir` while carrying nothing obsidian-ish — the network utility runs
+ * as `/proc/self/exe --type=utility --user-data-dir=…`. Matching on the directory
+ * alone would sweep those into a SIGTERM loop, which is the mirror image of the
+ * mistake commit 5af5361 fixed on the other side.
+ */
+export function matchesScope(cmdline: string, scope: ProcessScope): boolean {
+  if (!isObsidianCmdline(cmdline)) return false;
+  const wanted = scope.userDataDir;
+  const actual = cmdlineUserDataDir(cmdline);
+  if (wanted === undefined) {
+    // The default profile is expressed either by omitting the flag (how the app is
+    // normally launched) or by naming it explicitly.
+    return actual === undefined || actual === resolve(defaultObsidianUserDataDir());
+  }
+  return actual === resolve(wanted);
+}
+
+async function scanProc(scope: ProcessScope, stopAtFirst: boolean): Promise<number[]> {
+  if (process.platform !== "linux") return [];
+  const out: number[] = [];
   try {
     const entries = await readdir("/proc");
     for (const entry of entries) {
       if (!/^\d+$/.test(entry)) continue;
       try {
-        const { readFile } = await import("node:fs/promises");
         const cmdline = await readFile(`/proc/${entry}/cmdline`, "utf8");
-        if (isObsidianCmdline(cmdline)) return true;
+        if (matchesScope(cmdline, scope)) {
+          out.push(Number(entry));
+          if (stopAtFirst) return out;
+        }
       } catch {
         // process exited between readdir and read
       }
     }
   } catch {
+    return [];
+  }
+  return out;
+}
+
+/** Detect a live Obsidian process for a scope, without spawning the binary. */
+export async function isObsidianRunning(scope: ProcessScope = {}): Promise<boolean> {
+  // Reading /proc avoids a shell round-trip on Linux; other platforms fall back to
+  // the CDP/CLI probes, which are authoritative anyway.
+  return (await scanProc(scope, true)).length > 0;
+}
+
+/**
+ * PIDs of running Obsidian processes in a scope.
+ *
+ * Shares `matchesScope` with the health probe deliberately. These were once two
+ * copies of the same matching rule, and fixing only the probe left this one blind:
+ * `isObsidianRunning()` reported true, this returned nothing, and quitting failed
+ * with a timeout that blamed the app for not closing.
+ */
+export async function findObsidianPids(scope: ProcessScope = {}): Promise<number[]> {
+  return scanProc(scope, false);
+}
+
+/**
+ * Process start time in clock ticks (`/proc/<pid>/stat` field 22).
+ *
+ * Recorded with a pid so a later check can tell "still my instance" from "the
+ * kernel reused that number". Cheap insurance against a session that outlives a
+ * reboot signalling an unrelated process.
+ */
+export async function readPidStartTime(pid: number): Promise<number | undefined> {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    // comm can contain spaces and parentheses, so fields are counted after the
+    // final ')' rather than by splitting the whole line.
+    const after = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/);
+    // field 22 overall = index 19 of the post-comm fields (which start at field 3).
+    const raw = after[19];
+    const value = raw === undefined ? NaN : Number(raw);
+    return Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Is `pid` still the same scoped Obsidian process it was when recorded? */
+export async function isPidStillObsidian(
+  pid: number,
+  scope: ProcessScope = {},
+  startTime?: number,
+): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  try {
+    if (!matchesScope(await readFile(`/proc/${pid}/cmdline`, "utf8"), scope)) return false;
+  } catch {
     return false;
   }
-  return false;
+  if (startTime === undefined) return true;
+  return (await readPidStartTime(pid)) === startTime;
 }
 
 export interface ProbeOptions {
@@ -100,16 +209,24 @@ export interface ProbeOptions {
   logger: Logger;
   /** Skip the CLI round-trip, which can block while Obsidian starts up. */
   skipCliProbe?: boolean;
+  /** This instance's `obsidian.json`. Defaults to the user's own installation. */
+  configPath?: string;
+  /** Restrict process detection to one instance. */
+  scope?: ProcessScope;
 }
 
 export async function probeHealth(opts: ProbeOptions): Promise<HealthReport> {
   const { cdpUrl, cli, logger } = opts;
+  const configPath = opts.configPath ?? obsidianConfigPath();
 
   const [globalConfig, userFlags, version, procRunning] = await Promise.all([
-    readGlobalConfig(),
+    readGlobalConfig(configPath),
+    // Deliberately unscoped: the distro wrapper reads one fixed user-flags.conf
+    // regardless of --user-data-dir, so a corrupting token there breaks every
+    // session's CLI, not just the default profile's.
     checkUserFlags(),
     probeCdp(cdpUrl),
-    isObsidianRunning(),
+    isObsidianRunning(opts.scope ?? {}),
   ]);
 
   const cdpReachable = version !== undefined;
@@ -200,7 +317,7 @@ export async function probeHealth(opts: ProbeOptions): Promise<HealthReport> {
     windows,
     argvCorruption,
     vaults: globalConfig?.vaults ?? [],
-    configPath: (await import("../config.js")).obsidianConfigPath(),
+    configPath,
     problems,
   };
 }

@@ -53,11 +53,12 @@ export async function openNotePath(
 
 export async function captureScreenshot(
   router: CapabilityRouter,
+  vault?: string,
 ): Promise<{ data: string; mimeType: string } | undefined> {
   const availability = await router.refreshAvailability();
   if (!availability.playwright) return undefined;
   try {
-    const page = await router.playwright.page();
+    const page = await router.playwright.page(vault);
     const buffer = await page.screenshot({ type: "png" });
     return { data: buffer.toString("base64"), mimeType: "image/png" };
   } catch {

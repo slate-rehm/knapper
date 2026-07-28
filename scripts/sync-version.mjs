@@ -37,13 +37,6 @@ function getIn(obj, path) {
   return path.reduce((acc, key) => (acc === undefined || acc === null ? undefined : acc[key]), obj);
 }
 
-function setIn(obj, path, value) {
-  const last = path[path.length - 1];
-  const parent = path.slice(0, -1).reduce((acc, key) => acc?.[key], obj);
-  if (parent === undefined) throw new Error(`cannot resolve path ${path.join(".")}`);
-  parent[last] = value;
-}
-
 const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const version = pkg.version;
 if (typeof version !== "string" || !/^\d+\.\d+\.\d+/.test(version)) {
@@ -66,6 +59,7 @@ for (const { file, paths } of TARGETS) {
   }
 
   const json = JSON.parse(raw);
+  let next = raw;
   let changed = false;
 
   for (const path of paths) {
@@ -76,17 +70,42 @@ for (const { file, paths } of TARGETS) {
       console.error(`  drift: ${where} is ${JSON.stringify(current)}, expected ${version}`);
       drifted++;
     } else {
-      setIn(json, path, version);
+      next = replaceVersionString(next, current, version, where);
       console.error(`  set ${where} -> ${version}`);
       changed = true;
     }
   }
 
   if (changed) {
-    // Preserve the trailing newline convention the formatter enforces.
-    await writeFile(abs, `${JSON.stringify(json, null, 2)}\n`);
+    await writeFile(abs, next);
     rewrote++;
   }
+}
+
+/**
+ * Rewrite one version string in place, leaving every other byte alone.
+ *
+ * Deliberately not `JSON.stringify(parsed, null, 2)`. Re-serializing reformats
+ * fields this script has no opinion about — it collapsed or expanded arrays such
+ * as `keywords` — so `npm run versions:sync` produced manifests that `npm run
+ * check` then rejected. Since AGENTS.md tells contributors to run the sync rather
+ * than hand-edit, that made every release fail CI on formatting, in a file the
+ * author never touched.
+ *
+ * Anchored on the old value rather than a bare `"version"` key so a nested
+ * occurrence cannot be hit by accident, and asserts exactly one match so a silent
+ * partial rewrite is impossible.
+ */
+function replaceVersionString(text, current, next, where) {
+  const needle = `"${current}"`;
+  const occurrences = text.split(needle).length - 1;
+  if (occurrences !== 1) {
+    console.error(
+      `  cannot rewrite ${where}: found ${occurrences} occurrences of ${needle}, expected exactly 1`,
+    );
+    process.exit(1);
+  }
+  return text.replace(needle, `"${next}"`);
 }
 
 if (check) {

@@ -28,12 +28,19 @@ export function registerCoreTools(ctx: ServerContext): void {
     handler: async () => {
       const availability = await router.refreshAvailability(true);
       const health = await router.health({ skipCliProbe: true });
+      const vaultStatus = await router.fence.status();
+      const authorized = vaultStatus.filter((v) => v.authorized);
 
       const lines = [
         `Obsidian running: ${health.running ? "yes" : "no"}`,
         `CLI transport: ${availability.cli ? "enabled" : "disabled"}`,
         `CDP transport: ${availability.playwright ? `attached (${config.cdpUrl})` : `unavailable (${config.cdpUrl})`}`,
         `Windows attached: ${health.windows.length}`,
+        `Authorized vaults: ${
+          authorized.length === 0
+            ? "none — every vault-scoped tool will refuse"
+            : authorized.map((v) => `${v.name} (${v.grant})`).join(", ")
+        }`,
         `Toolsets enabled: ${[...config.enabledToolsets].join(", ")}`,
       ];
 
@@ -50,7 +57,7 @@ export function registerCoreTools(ctx: ServerContext): void {
           transports: availability,
           debuggerHeldBy: router.currentDebuggerHolder ?? null,
           windows: health.windows,
-          vaults: health.vaults.map((v) => ({ name: v.name, open: v.open, path: v.path })),
+          vaults: vaultStatus,
           toolsets: {
             enabled: [...config.enabledToolsets],
             available: Object.keys(TOOLSET_DESCRIPTIONS),
@@ -80,23 +87,36 @@ export function registerCoreTools(ctx: ServerContext): void {
       });
 
       const classified = classifyTargets(targets);
-      const text = classified
-        .map(
-          (t) =>
-            `[${t.kind}] ${t.target.title || "(untitled)"}\n  id=${t.target.id} url=${t.target.url}`,
-        )
+
+      // A window title is "<note> - <vault> - Obsidian <version>", so listing raw
+      // titles would hand back the open note of a vault the fence otherwise blocks.
+      // The vault name stays visible — that is what makes the refusal diagnosable —
+      // and the note name is dropped.
+      const rows = await Promise.all(
+        classified.map(async (t) => {
+          const ok =
+            t.vaultName !== undefined
+              ? (await router.fence.isAuthorized(t.vaultName)) !== undefined
+              : false;
+          return {
+            id: t.target.id,
+            kind: t.kind,
+            title: ok ? t.target.title : `(${t.vaultName ?? "unknown vault"} — not authorized)`,
+            url: t.target.url,
+            vaultName: t.vaultName ?? null,
+            noteName: ok ? (t.noteName ?? null) : null,
+            authorized: ok,
+          };
+        }),
+      );
+
+      const text = rows
+        .map((t) => `[${t.kind}] ${t.title || "(untitled)"}\n  id=${t.id} url=${t.url}`)
         .join("\n");
 
       return {
         text: text === "" ? "No CDP targets found." : text,
-        json: classified.map((t) => ({
-          id: t.target.id,
-          kind: t.kind,
-          title: t.target.title,
-          url: t.target.url,
-          vaultName: t.vaultName ?? null,
-          noteName: t.noteName ?? null,
-        })),
+        json: rows,
       };
     },
   });
@@ -115,6 +135,28 @@ export function registerCoreTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       const targetId = args.targetId as string | undefined;
+
+      // Verify before pinning, not after. Setting the pin first would leave the
+      // session pointed at an unauthorized window if the check then threw.
+      if (targetId !== undefined) {
+        const targets = classifyTargets(await fetchTargets(config.cdpUrl).catch(() => []));
+        const wanted = targets.find((t) => t.target.id === targetId);
+        const vault = wanted?.vaultName;
+        if (vault === undefined || (await router.fence.isAuthorized(vault)) === undefined) {
+          throw new UobError(
+            "VAULT_NOT_AUTHORIZED",
+            `Refusing to pin to target ${targetId}: it shows ${vault ?? "no identifiable vault"}, which is not authorized.`,
+            {
+              remediation:
+                "Pin to a window showing an authorized vault. obsidian_list_targets marks which " +
+                "ones those are.",
+              fixedBy: "obsidian_list_targets",
+              details: { targetId, vault: vault ?? null },
+            },
+          );
+        }
+      }
+
       router.playwright.attachTo(targetId);
 
       // The proxied @playwright/mcp server tracks its own current tab and does not
@@ -144,13 +186,18 @@ export function registerCoreTools(ctx: ServerContext): void {
       "most powerful tool here — prefer it over DOM scraping for reading vault or plugin state.",
     inputSchema: {
       code: z.string().describe("JavaScript to evaluate in the renderer"),
+      vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     // Arbitrary code against the live app: it can delete notes, disable plugins, or
     // reach the network. Annotated like browser_evaluate so clients prompt for it.
     annotations: { destructiveHint: true, openWorldHint: true },
     handler: async (args) => {
       const code = args.code as string;
-      const { value, layer } = await router.evaluate<unknown>(code);
+      const vault = args.vault as string | undefined;
+      const { value, layer } = await router.evaluate<unknown>(
+        code,
+        vault !== undefined ? { vault } : {},
+      );
       const rendered = renderResult(value);
       return {
         text: rendered.text,

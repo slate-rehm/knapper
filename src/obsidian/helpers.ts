@@ -90,8 +90,12 @@ export function contentOutcome(content: string, label = "OK"): ToolOutcome {
   };
 }
 
-export async function evalJson<T>(router: CapabilityRouter, code: string): Promise<T> {
-  const { value } = await router.evaluateJson<T>(code);
+export async function evalJson<T>(
+  router: CapabilityRouter,
+  code: string,
+  vault?: string,
+): Promise<T> {
+  const { value } = await router.evaluateJson<T>(code, vault !== undefined ? { vault } : {});
   return value;
 }
 
@@ -99,17 +103,22 @@ export function escEvalString(s: string): string {
   return JSON.stringify(s);
 }
 
-export async function readPluginData(router: CapabilityRouter, pluginId: string): Promise<unknown> {
+export async function readPluginData(
+  router: CapabilityRouter,
+  pluginId: string,
+  vault?: string,
+): Promise<unknown> {
   const code = `(() => { const p = app.plugins.getPlugin(${escEvalString(pluginId)}); return p ? p.data : null; })()`;
-  return evalJson(router, code);
+  return evalJson(router, code, vault);
 }
 
 export async function writePluginData(
   router: CapabilityRouter,
   pluginId: string,
   data: unknown,
+  vault?: string,
 ): Promise<void> {
   const serialized = JSON.stringify(data);
   const code = `(() => { const p = app.plugins.getPlugin(${escEvalString(pluginId)}); if (!p) throw new Error("Plugin not loaded"); p.saveData(${serialized}); return true; })()`;
-  await router.evaluate(code);
+  await router.evaluate(code, vault !== undefined ? { vault } : {});
 }

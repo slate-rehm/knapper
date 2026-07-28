@@ -35,6 +35,14 @@ export interface ConnectionSupervisorOptions {
   probeIntervalMs?: number;
   /** Injectable [0,1) source so tests can pin the jitter. */
   random?: () => number;
+  /**
+   * Called on each probe to record that this session is still in use.
+   *
+   * The supervisor is the only thing that ticks reliably whether or not an agent
+   * is issuing tool calls, which makes it the right place to prove liveness to the
+   * reaper. Debounced by the descriptor layer so this stays cheap.
+   */
+  onHeartbeat?: () => void;
 }
 
 export type SupervisorState = "attached" | "detached";
@@ -120,6 +128,7 @@ export class ConnectionSupervisor {
   async probeOnce(): Promise<boolean> {
     if (this.probing) return this.state === "attached";
     this.probing = true;
+    this.opts.onHeartbeat?.();
     try {
       const alive = await this.opts.session.healthCheck();
       if (alive) this.onAlive();

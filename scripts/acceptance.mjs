@@ -7,11 +7,13 @@
  *
  * Prerequisites: Obsidian launched with --remote-debugging-port=9222, the CLI
  * toggle enabled, and the uob-test-vault scratch vault present.
+ * The suite authorizes that vault for knapper itself (see authorize-test-vault.mjs).
  *
  *   node scripts/acceptance.mjs
  */
 
 import { spawn } from "node:child_process";
+import { authorizeTestVault } from "./authorize-test-vault.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -122,6 +124,7 @@ function assert(condition, message) {
 const client = new McpClient(["--toolsets", "all", "--vault", VAULT]);
 
 console.log("\n=== Unified Obsidian MCP — acceptance run ===\n");
+console.log(`scratch vault: ${await authorizeTestVault()}`);
 
 const init = await client.initialize();
 console.log(`server: ${init.result.serverInfo.name} v${init.result.serverInfo.version}\n`);

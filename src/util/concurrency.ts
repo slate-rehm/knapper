@@ -8,6 +8,16 @@
  * against shared UI state and fail nondeterministically in ways that read like
  * plugin bugs rather than like a race in the tooling.
  *
+ * This lock is per-process, and under sessions that is now sufficient rather than
+ * merely convenient. The premise above became "…one live Obsidian window, which no
+ * other knapper process can reach": each session owns a private profile, so two
+ * servers' exclusive grants dispatch into different renderers on different browsers
+ * driving different vaults. What still needs guarding is one agent's own overlapping
+ * calls, which is exactly what this does. The genuinely cross-process resources —
+ * the session registry, session ownership — are coarse, off the hot path, and
+ * guarded by `util/filelock.ts`; promoting this lock to the filesystem would pay an
+ * open/unlink on every tool call to protect a resource that no longer exists.
+ *
  * So mutating calls take an exclusive lock and read-only calls take a shared one,
  * bounded by a slot count. This is a readers-writer lock with two deliberate
  * properties:

@@ -6,42 +6,28 @@ import type { Config } from "../config.js";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { TelemetryStore } from "../telemetry/store.js";
 import type { ToolOutcome } from "../tools/registry.js";
-import { escEvalString } from "../obsidian/helpers.js";
+import { escEvalString, vaultName } from "../obsidian/helpers.js";
 import { rendererEval } from "./eval.js";
 import { appendTelemetrySummary } from "../telemetry/helpers.js";
 import { formatLogSection, logsSinceMark, settleMs } from "./helpers.js";
-
-interface WorkspaceSnapshot {
-  activeFile: string | null;
-  openLeaves: number;
-}
-
-async function workspaceSnapshot(router: CapabilityRouter): Promise<WorkspaceSnapshot> {
-  try {
-    return await rendererEval<WorkspaceSnapshot>(
-      router,
-      `(() => {
-        const leaf = app.workspace.activeLeaf;
-        const file = leaf?.view?.file?.path ?? null;
-        return { activeFile: file, openLeaves: app.workspace.getLeavesOfType("markdown").length };
-      })()`,
-    );
-  } catch {
-    return { activeFile: null, openLeaves: 0 };
-  }
-}
-
-const emptySnap = (): WorkspaceSnapshot => ({ activeFile: null, openLeaves: 0 });
+import {
+  emptySnapshot,
+  formatWorkspaceDelta,
+  workspaceDelta,
+  workspaceSnapshot,
+} from "./workspace-delta.js";
 
 export async function runExerciseCommand(
   router: CapabilityRouter,
-  _config: Config,
+  config: Config,
   telemetry: TelemetryStore,
   commandId: string,
   waitMs: number,
+  toolArgs: Record<string, unknown> = {},
 ): Promise<ToolOutcome> {
+  const vault = vaultName(toolArgs, config);
   const mark = telemetry.mark(`exercise:${commandId}:${Date.now()}`);
-  const before = (await workspaceSnapshot(router)) ?? emptySnap();
+  const before = (await workspaceSnapshot(router, vault)) ?? emptySnapshot();
 
   // `=== true` normalizes the result across both transports, since the CLI path
   // round-trips through JSON and would otherwise blur false into undefined.
@@ -49,7 +35,7 @@ export async function runExerciseCommand(
   let executed = false;
   let execError: string | undefined;
   try {
-    const dispatched = await rendererEval<boolean>(router, runCode);
+    const dispatched = await rendererEval<boolean>(router, runCode, vault);
     // executeCommandById returns false for an id Obsidian does not know, and for a
     // command whose availability check declines. Discarding that return value made
     // this tool report "Executed command fake:nope." — a green result for a command
@@ -67,22 +53,17 @@ export async function runExerciseCommand(
   }
 
   await settleMs(waitMs);
-  const after = (await workspaceSnapshot(router)) ?? emptySnap();
+  const after = (await workspaceSnapshot(router, vault)) ?? emptySnapshot();
   const slice = logsSinceMark(telemetry, mark.seq);
 
-  const delta = {
-    activeFile: { before: before.activeFile, after: after.activeFile },
-    openLeaves: { before: before.openLeaves, after: after.openLeaves },
-  };
+  const delta = workspaceDelta(before, after);
 
   const lines = [
     executed
       ? `Executed command ${commandId}.`
       : `Failed to execute ${commandId}: ${execError ?? "unknown error"}`,
     "",
-    "Workspace delta:",
-    `  activeFile: ${String(before.activeFile)} → ${String(after.activeFile)}`,
-    `  markdown leaves: ${before.openLeaves} → ${after.openLeaves}`,
+    ...formatWorkspaceDelta(delta),
     "",
     "Logs since mark:",
     formatLogSection(slice),

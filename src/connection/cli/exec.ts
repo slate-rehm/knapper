@@ -15,7 +15,6 @@
  */
 
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { wrapExpression } from "../../util/serialize.js";
 import {
@@ -27,8 +26,22 @@ import {
 
 export interface CliOptions {
   obsidianBin: string;
-  vault?: string;
   timeoutMs: number;
+  /**
+   * `XDG_RUNTIME_DIR` for spawned CLI clients, which is what routes a command to
+   * one specific instance. Undefined means the ambient one, i.e. whichever Obsidian
+   * currently owns the shared socket.
+   */
+  runtimeDir?: string;
+  /**
+   * Passed as `--user-data-dir` on every invocation so this process loses the
+   * target instance's singleton lock and becomes a *forwarding client*. Without it
+   * a CLI call can win the default profile's lock instead and cold-boot an entirely
+   * new Obsidian rather than talking to the session's. Obsidian's own argv
+   * prefilter drops `--`-prefixed tokens before `handleCli` sees them, so the flag
+   * never reaches the command.
+   */
+  userDataDir?: string;
 }
 
 export interface CliResult {
@@ -49,25 +62,55 @@ export interface CliResult {
  *
  * Stripping it is always correct here: we are launching a desktop application, and
  * never want it as a plain Node process.
+ *
+ * `runtimeDir` selects which Obsidian instance this process talks to, because the
+ * app derives its CLI socket path from `XDG_RUNTIME_DIR`. Overriding that variable
+ * has a second, non-obvious effect that must be compensated for here — see
+ * `waylandDisplayFor`.
  */
-export function childEnv(): NodeJS.ProcessEnv {
+export function childEnv(runtimeDir?: string): NodeJS.ProcessEnv {
   const { ELECTRON_RUN_AS_NODE: _stripped, ...rest } = process.env;
-  return rest;
+  if (runtimeDir === undefined) return rest;
+
+  const env: NodeJS.ProcessEnv = { ...rest, XDG_RUNTIME_DIR: runtimeDir };
+  const wayland = waylandDisplayFor(rest);
+  if (wayland !== undefined) env.WAYLAND_DISPLAY = wayland;
+  return env;
 }
 
-/** Path to the IPC socket the CLI client connects to. Useful for liveness checks. */
-export function cliSocketPath(): string {
-  switch (process.platform) {
-    case "darwin":
-      return join(homedir(), ".obsidian-cli.sock");
-    case "win32":
-      return `\\\\.\\pipe\\obsidian-cli-${process.env.USERNAME ?? "user"}`;
-    default: {
-      const runtime = process.env.XDG_RUNTIME_DIR;
-      return runtime ? join(runtime, ".obsidian-cli.sock") : join(homedir(), ".obsidian-cli.sock");
-    }
-  }
+/**
+ * Absolute Wayland socket path to pin before `XDG_RUNTIME_DIR` is overridden, or
+ * undefined when nothing needs pinning.
+ *
+ * `XDG_RUNTIME_DIR` is not Obsidian's variable. It is also where a Wayland client
+ * resolves a relative `WAYLAND_DISPLAY` such as `wayland-1`. Point it at an empty
+ * per-session directory and Electron never reaches the compositor: no window, no
+ * renderer, no `DevToolsActivePort`, no CLI socket — just a main process spinning
+ * at 25% CPU indefinitely, with nothing in any log to say why. A byte-for-byte
+ * copy of a known-good profile fails the same way, which is what pins the cause on
+ * the variable rather than the profile.
+ *
+ * libwayland accepts an absolute `WAYLAND_DISPLAY` and uses it verbatim without
+ * consulting `XDG_RUNTIME_DIR`, so resolving it against the real runtime dir first
+ * keeps the compositor connection intact. `DBUS_SESSION_BUS_ADDRESS` already
+ * carries an absolute `unix:path=`, so it needs no equivalent.
+ */
+export function waylandDisplayFor(env: NodeJS.ProcessEnv): string | undefined {
+  const display = env.WAYLAND_DISPLAY;
+  if (display === undefined || display === "" || display.startsWith("/")) return undefined;
+  const realRuntime = env.XDG_RUNTIME_DIR;
+  if (realRuntime === undefined || realRuntime === "") return undefined;
+  return join(realRuntime, display);
 }
+
+/**
+ * Commands that genuinely have no vault to scope to.
+ *
+ * Everything else must carry `vault=`. These three answer questions about the
+ * installation rather than about notes, and the health probe needs `version` to
+ * work before any vault has been resolved.
+ */
+export const VAULT_AGNOSTIC_COMMANDS = new Set(["version", "help", "__completions"]);
 
 /**
  * Build the argv for an Obsidian CLI call.
@@ -75,9 +118,31 @@ export function cliSocketPath(): string {
  * `vault=` must be the very first token, before the command name. Obsidian's own
  * pre-filter drops every `--`-prefixed token except a small whitelist, so callers
  * must express options as `key=value` or bare flags rather than `--flag`.
+ *
+ * Omitting `vault=` is not "use the default" — Obsidian falls back to whichever
+ * vault the user last focused, which makes the target a property of where they
+ * happened to click last. That silent coin flip is why this throws instead of
+ * building an unscoped call: the fence resolves a vault up front, and a command
+ * arriving here without one means a caller bypassed it.
  */
 export function buildArgs(command: string[], vault?: string): string[] {
-  return vault !== undefined && vault !== "" ? [`vault=${vault}`, ...command] : [...command];
+  if (vault !== undefined && vault !== "") return [`vault=${vault}`, ...command];
+
+  const name = command[0] ?? "";
+  if (!VAULT_AGNOSTIC_COMMANDS.has(name)) {
+    throw new UobError(
+      "VAULT_NOT_AUTHORIZED",
+      `Refusing to run the Obsidian CLI command "${name}" without a vault.`,
+      {
+        remediation:
+          "With no `vault=` token Obsidian targets whichever vault was last focused, so this call " +
+          "could land anywhere. Pass an explicit `vault` argument, or set OBSIDIAN_VAULT for the " +
+          "session. This is a bug in knapper if you did not call the CLI directly.",
+        details: { command: name },
+      },
+    );
+  }
+  return [...command];
 }
 
 /** Quote a value for the `key=value` grammar, escaping newlines and tabs. */
@@ -264,7 +329,10 @@ export class ObsidianCli {
     command: string[],
     overrides: { vault?: string; timeoutMs?: number } = {},
   ): Promise<string> {
-    const vault = overrides.vault ?? this.opts.vault;
+    // No session-default fallback on purpose. A default here would silently
+    // re-scope any call whose vault the fence failed to resolve, which is exactly
+    // the class of bug the fence exists to make impossible.
+    const vault = overrides.vault;
     const args = buildArgs(command, vault);
     const timeout = overrides.timeoutMs ?? this.opts.timeoutMs;
 
@@ -290,11 +358,15 @@ export class ObsidianCli {
   }
 
   private exec(args: string[], timeoutMs: number, label: string): Promise<CliResult> {
+    const argv =
+      this.opts.userDataDir !== undefined
+        ? [`--user-data-dir=${this.opts.userDataDir}`, ...args]
+        : args;
     return new Promise((resolve, reject) => {
       execFile(
         this.opts.obsidianBin,
-        args,
-        { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: childEnv() },
+        argv,
+        { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: childEnv(this.opts.runtimeDir) },
         (error, stdout, stderr) => {
           if (!error) {
             resolve({ stdout, stderr });
@@ -340,7 +412,12 @@ export class ObsidianCli {
   }
 
   /**
-   * Run `eval` and return the raw stdout.
+   * Run `eval` and return the raw stdout, scoped to `vault`.
+   *
+   * The vault is a required argument rather than the session default because this
+   * method used to read `this.opts.vault` and ignore per-call overrides entirely —
+   * so every routed `evaluate` silently ran against the session default no matter
+   * which vault the caller asked for.
    *
    * Throws `EVAL_FAILED` when the code threw in the renderer. The CLI reports an
    * in-page throw as ordinary stdout with exit code 0, so it must be detected by
@@ -348,8 +425,7 @@ export class ObsidianCli {
    * as `Error: <message>`. Without this check a thrown exception is indistinguishable
    * from a successful evaluation that happened to return an error-shaped string.
    */
-  async evaluate(code: string): Promise<string> {
-    const vault = this.opts.vault;
+  async evaluate(code: string, vault: string): Promise<string> {
     const stdout = await this.runForEval(code, vault, this.opts.timeoutMs);
 
     const failure = classifyEvalOutput(stdout, code);

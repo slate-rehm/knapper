@@ -23,7 +23,6 @@ import type { TelemetryStore } from "../telemetry/store.js";
 import { appendTelemetrySummary } from "../telemetry/helpers.js";
 import { toUobError, UobError } from "../util/errors.js";
 import { CallLock, type LockMode } from "../util/concurrency.js";
-import { loadConfig } from "../config.js";
 import { renderResult } from "../util/serialize.js";
 import { jsonSchemaToZodShape } from "../browser/json-schema.js";
 
@@ -145,14 +144,18 @@ export class ToolRegistry {
   constructor(
     private readonly enabledToolsets: Set<Toolset>,
     private readonly logger: Logger,
-    private readonly telemetry?: TelemetryStore,
     /**
-     * Read-only calls allowed to overlap. Falls back to the environment-derived
-     * default so the knob works even when the caller does not thread it through.
+     * Read-only calls allowed to overlap.
+     *
+     * Required rather than defaulted: this used to fall back to `loadConfig()`,
+     * which both broke the repo's own "config lives in config.ts" rule and, once
+     * sessions existed, would size the lock from the *unbound* environment while
+     * the rest of the server ran against a session.
      */
-    maxConcurrency?: number,
+    maxConcurrency: number,
+    private readonly telemetry?: TelemetryStore,
   ) {
-    this.lock = new CallLock({ maxShared: maxConcurrency ?? loadConfig().maxConcurrency });
+    this.lock = new CallLock({ maxShared: maxConcurrency });
   }
 
   /** Register a tool, or skip it when its toolset is disabled. */

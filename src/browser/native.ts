@@ -3,6 +3,12 @@
  *
  * Upstream filters these out of MCP `tools/list` but they are still useful against
  * Obsidian when exposed with Obsidian-specific descriptions.
+ *
+ * Every input path here runs inside `FocusEmulator`, so keystrokes and clicks land
+ * in an Obsidian window that is not in the foreground. `browser_keydown` /
+ * `browser_keyup` are the exception to the scoping: they are a pair spanning two
+ * tool calls, so the hold is acquired by the first and released by the second
+ * rather than wrapped around a single dispatch.
  */
 
 import type { Page } from "playwright-core";
@@ -59,8 +65,10 @@ export async function checkTarget(
   if (typeof target !== "string" || target === "") {
     throw new UobError("INVALID_ARGUMENT", "target is required (snapshot ref or CSS selector).");
   }
-  const locator = targetLocator(await page(router), target);
-  await locator.check();
+  const p = await page(router);
+  await router.focus.run(p, async () => {
+    await targetLocator(p, target).check();
+  });
   return `Checked ${target}.`;
 }
 
@@ -73,8 +81,10 @@ export async function pressSequentially(
     throw new UobError("INVALID_ARGUMENT", "text is required.");
   }
   const p = await page(router);
-  await p.keyboard.type(text);
-  if (args.submit === true) await p.keyboard.press("Enter");
+  await router.focus.run(p, async () => {
+    await p.keyboard.type(text);
+    if (args.submit === true) await p.keyboard.press("Enter");
+  });
   return `Typed ${text.length} character(s) key-by-key${args.submit === true ? " and pressed Enter" : ""}.`;
 }
 
@@ -86,7 +96,18 @@ export async function keyDown(
   if (typeof key !== "string" || key === "") {
     throw new UobError("INVALID_ARGUMENT", "key is required.");
   }
-  await (await page(router)).keyboard.down(key);
+  const p = await page(router);
+  // Acquire without releasing: the hold belongs to the held key, and browser_keyup
+  // owns the other end. A CDP disconnect or shutdown force-releases it, so a caller
+  // that never pairs the two cannot leave the window emulating focus forever.
+  const release = await router.focus.acquire(p);
+  try {
+    await p.keyboard.down(key);
+  } catch (e) {
+    await release();
+    throw e;
+  }
+  router.focus.trackHeldKey(p, key, release);
   return `Key down: ${key}. Pair with browser_keyup.`;
 }
 
@@ -98,6 +119,11 @@ export async function keyUp(
   if (typeof key !== "string" || key === "") {
     throw new UobError("INVALID_ARGUMENT", "key is required.");
   }
-  await (await page(router)).keyboard.up(key);
+  const p = await page(router);
+  try {
+    await p.keyboard.up(key);
+  } finally {
+    await router.focus.releaseHeldKey(p, key);
+  }
   return `Key up: ${key}.`;
 }
