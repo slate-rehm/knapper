@@ -81,7 +81,7 @@ npm run e2e         # 79 checks: vault round-trips, UI, telemetry, dev cycle, er
 ```bash
 npm run fence      # 16 live checks: refusals against a real unauthorized vault
 npm run bg-input   # 6 live checks: input with Obsidian unfocused, emulation reverted
-npm run sessions   # 23 live checks: two isolated instances, scoped restart, cleanup
+npm run sessions   # 26 live checks: two isolated instances, scoped restart, cleanup
 ```
 
 `npm run sessions` needs no pre-launched Obsidian and no scratch vault — it provisions
@@ -142,6 +142,24 @@ explain the refusal, and `obsidian_remove_vault` is guarded by
 If you add a fallback that catches and retries, call
 `rethrowIfRefused` first — `obsidian_search` used to swallow a refusal and retry the
 read unscoped.
+
+**Writing a `created` marker is granting deletion, so treat it as the privileged
+act it is.** `removeManagedVault` deletes exactly what carries one, correctly and
+without further questions — which means every writer of that marker is a place a
+user's real vault can be handed to the reaper. `createManagedVault` has always
+refused a non-empty directory for this reason; `seedSessionProfile` did not, so
+`obsidian_create_session vaultPath=<a vault with notes in it>` stamped it `created`
+and automatic cleanup later `rm -rf`'d it. A new marker writer needs the same
+refusal, and `adoptVault` is the path for a vault that already holds notes — it
+preserves an `adopted` grant precisely so consent never becomes delete permission.
+
+**The reaper deletes with no agent in the loop, so it gets a narrower rule than the
+tools do.** It only ever deletes a vault living _inside_ the session's own root
+(`onlyVaultInsideRoot`); one the caller pointed elsewhere is a directory a human
+chose, and reclaiming an abandoned Electron profile is not a reason to touch it.
+`obsidian_close_session` keeps the full behaviour, because there an agent asked for
+that vault by name. Note that `obsidian_create_session` reaps opportunistically —
+any weakening of these rules ships as a delete that nobody requested.
 
 **Errors are a feature.** Use typed `UobError` from `src/util/errors.ts` with a
 `remediation` and, where possible, a `fixedBy` naming the tool that fixes it. The

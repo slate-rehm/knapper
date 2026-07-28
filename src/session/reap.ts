@@ -17,6 +17,10 @@
  *  - A vault is deleted only through `removeManagedVault`, which independently
  *    re-reads the marker and refuses an `adopted` grant. The descriptor claiming
  *    ownership is not, by itself, permission to delete.
+ *  - Only a vault *inside* the session's own directory is ever deleted here. One
+ *    the caller pointed elsewhere is a directory a human chose, and reclaiming an
+ *    abandoned profile is not a reason to delete it. `obsidian_close_session`
+ *    keeps the full behaviour, because there an agent asked for it by name.
  */
 
 import { registryLockPath } from "../config.js";
@@ -48,7 +52,7 @@ export interface ReapOptions {
   force?: boolean;
   /** Never reap this session, even if it looks stale. */
   keep?: string;
-  /** Delete scratch vault directories too. */
+  /** Delete scratch vault directories too — only ones inside a session's own root. */
   deleteVaults?: boolean;
   logger?: Logger;
   now?: Date;
@@ -107,7 +111,7 @@ export async function reapStaleSessions(opts: ReapOptions = {}): Promise<ReapRep
       for (const candidate of candidates) {
         try {
           await closeSessionUnlocked(candidate.key, {
-            ...(opts.deleteVaults === true ? { deleteVault: true } : {}),
+            ...(opts.deleteVaults === true ? { deleteVault: true, onlyVaultInsideRoot: true } : {}),
             env,
           });
           reaped.push(candidate.key);

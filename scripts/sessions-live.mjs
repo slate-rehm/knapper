@@ -17,7 +17,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, stat, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -149,6 +149,30 @@ const control = new McpClient(env);
 
 try {
   await control.init();
+
+  // Before spending two Obsidian launches: prove the tool refuses to take over a
+  // directory that already holds notes. Seeding used to stamp its `created` marker
+  // on whatever it was handed, and that marker IS the delete authority — so a user
+  // vault passed here became reapable, and automatic cleanup later deleted it.
+  console.log("a vault with notes in it is not a scratch vault");
+  const realVault = join(home, "MyRealNotes");
+  await mkdir(join(realVault, ".obsidian"), { recursive: true });
+  await writeFile(join(realVault, "Important.md"), "# my life's work\n", "utf8");
+  const hijack = await control.call("obsidian_create_session", {
+    label: "hijack",
+    vaultPath: realVault,
+  });
+  check("refuses a non-empty directory as a session vault", hijack.isError === true, {
+    text: hijack.text.slice(0, 300),
+  });
+  check(
+    "wrote no marker into it, so nothing can ever reap it",
+    !(await exists(join(realVault, ".knapper-managed"))),
+  );
+  check(
+    "left the notes alone",
+    (await readFile(join(realVault, "Important.md"), "utf8")).includes("life's work"),
+  );
 
   console.log("provisioning two sessions");
   const createA = await control.call("obsidian_create_session", { label: "alpha" });
