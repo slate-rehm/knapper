@@ -17,6 +17,26 @@ set these in each client's MCP server `env` block, or in your shell profile.
 | `OBSIDIAN_TARGET_MATCH` | `--target-match` | (unset)                 | Case-insensitive substring; only attach to matching window title/URL |
 | `KNAP_CLI_TIMEOUT_MS`   | —                | `15000`                 | Timeout per Obsidian CLI invocation                                  |
 | `KNAP_RECONNECT_MS`     | —                | `2000`                  | Base backoff between CDP reconnect attempts                          |
+| `KNAP_SESSION`          | `--session`      | (unset)                 | Bind this server to an isolated session (see below)                  |
+| `KNAP_HOME`             | —                | `~/.knapper_mcp`        | Root for session profiles, scratch vaults, and screenshots           |
+
+`KNAP_SESSION` binds the server to one isolated Obsidian instance: its own profile,
+CLI socket, debug port, and scratch vault. Create one with `obsidian_create_session`,
+then put the returned key in this server's `env` block and reconnect. Everything else
+— `cdpUrl`, `vault`, `outputDir` — is then read from the session descriptor, though an
+explicit flag or env var still wins so a session's instance can be debugged by hand.
+Without it the server drives the installation's own Obsidian exactly as before.
+
+Sessions are what let several agents drive Obsidian at once. Set `KNAP_SESSION` when
+another agent might be working in the same repo or on the same machine; leave it unset
+for solo work against your own app. `knapper sessions` lists them and
+`knapper sessions:reap` collects abandoned ones (reporting first; `--yes` to delete).
+
+Session isolation is Linux-only. Obsidian derives its CLI socket from
+`XDG_RUNTIME_DIR`, which only the Linux branch of its path formula reads; on macOS it
+is keyed on the home directory and on Windows on the username, neither of which takes
+input from the environment. `obsidian_doctor` reports the resulting `CLI isolation`
+level so a degraded setup is visible rather than silent.
 
 `OBSIDIAN_TARGET_MATCH` matters when several Obsidian windows are open and you want
 automation pinned to one — for example a scratch vault while your real vault stays

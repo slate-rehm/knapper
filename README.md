@@ -275,6 +275,8 @@ Enable extras: `KNAP_TOOLSETS=core,ui,telemetry,plugin-dev,vault` or `--toolsets
 
 **Core & provisioning:** `obsidian_status`, `obsidian_doctor`, `obsidian_launch`, `obsidian_setup_cli`, `obsidian_setup_vault`, `obsidian_create_vault`, `obsidian_remove_vault`, `obsidian_link_plugin`, `obsidian_list_targets`, `obsidian_attach`, `obsidian_eval`, `obsidian_cli`, `obsidian_commands`, `obsidian_command`
 
+**Sessions (isolated instances):** `obsidian_create_session`, `obsidian_list_sessions`, `obsidian_restart_session`, `obsidian_close_session`
+
 **Plugin dev:** `obsidian_plugin_list`, `obsidian_plugin_manifest`, `obsidian_plugin_settings`, `obsidian_plugin_reload`, `obsidian_dev_cycle`, `obsidian_exercise_command`, `obsidian_reset_state`, `obsidian_plugin_health`
 
 **Telemetry:** `obsidian_logs`, `obsidian_log_mark`, `obsidian_logs_clear`, `obsidian_telemetry_status`

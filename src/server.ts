@@ -11,6 +11,7 @@ import { createLogger, type Logger } from "./util/logger.js";
 import { TOOLSET_DESCRIPTIONS } from "./toolsets.js";
 import { registerCoreTools } from "./tools/core.js";
 import { registerProvisioningTools } from "./tools/provisioning.js";
+import { registerSessionTools } from "./tools/session.js";
 import { registerObsidianTools } from "./tools/obsidian.js";
 import { registerVaultTools } from "./tools/vault.js";
 import { registerAuthoringTools } from "./tools/authoring.js";
@@ -93,8 +94,8 @@ export async function createServerContext(config: Config): Promise<ServerContext
   const registry = new ToolRegistry(
     config.enabledToolsets,
     logger,
-    telemetry,
     config.maxConcurrency,
+    telemetry,
   );
 
   const ctx: ServerContext = {
@@ -109,6 +110,7 @@ export async function createServerContext(config: Config): Promise<ServerContext
 
   registerCoreTools(ctx);
   registerProvisioningTools(ctx);
+  registerSessionTools(ctx);
   registerObsidianTools(ctx);
   registerVaultTools(ctx);
   registerAuthoringTools(ctx);

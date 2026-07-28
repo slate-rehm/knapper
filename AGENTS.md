@@ -31,6 +31,7 @@ src/
   browser/proxy.ts       proxies @playwright/mcp, filters destructive tools
   telemetry/             console/error/network ring buffer, plugin attribution
   devcycle/              composites (dev_cycle, exercise, reset_state)
+  session/               isolated instances: key, descriptor, bootstrap, registry, reap
 scripts/                 acceptance, e2e, ci-smoke, version sync
 
 skills/                  plugin skills (obsidian-debugging, -instance-setup,
@@ -78,9 +79,14 @@ npm run e2e         # 79 checks: vault round-trips, UI, telemetry, dev cycle, er
 ```
 
 ```bash
-npm run fence      # 14 live checks: refusals against a real unauthorized vault
+npm run fence      # 16 live checks: refusals against a real unauthorized vault
 npm run bg-input   # 6 live checks: input with Obsidian unfocused, emulation reverted
+npm run sessions   # 23 live checks: two isolated instances, scoped restart, cleanup
 ```
+
+`npm run sessions` needs no pre-launched Obsidian and no scratch vault — it provisions
+two sessions, asserts they cannot see each other, and tears both down. Run it for
+anything touching `src/session/`, `launch.ts`, or the process-scoping predicates.
 
 `npm run check && npm run typecheck && npm test && npm run acceptance` is the
 minimum before proposing a change. Run `npm run e2e` for anything touching the
@@ -100,12 +106,40 @@ things the code cannot show: why `noDefaults: true` is mandatory on
 which is how background input works), why pages are re-enumerated per call (handles
 go stale), why `rename` takes `name=` while `move` takes `to=`. Match that register.
 
+**Sessions isolate; two flags do it, and they are inseparable.** `--user-data-dir`
+gives an instance its own Electron singleton lock, which is what lets a second
+Obsidian exist. `XDG_RUNTIME_DIR` decides where it binds its CLI socket. Ship the
+first without the second and the newest instance silently steals the shared socket
+(`unlink` then `listen`), so every agent's CLI commands land in the wrong app with no
+error anywhere — `launchObsidian` refuses that configuration rather than produce it.
+Overriding `XDG_RUNTIME_DIR` also breaks Wayland, which resolves a relative
+`WAYLAND_DISPLAY` against it; `childEnv` re-pins it to an absolute path, and without
+that Obsidian spins forever with no window and nothing in any log. Process detection,
+quitting, and `DevToolsActivePort` are all scoped by profile — `matchesScope` is
+`isObsidianCmdline(...) && dirMatches(...)`, an AND, because Obsidian's own helper
+processes carry `--user-data-dir` without carrying the marker.
+
 **The vault fence is not optional plumbing.** `src/connection/fence.ts` resolves the
 target vault for every call, and both transports fail closed: `buildArgs` throws
 rather than emit a CLI command with no `vault=` token, and `PlaywrightSession.page()`
 refuses rather than fall back to another window. A new code path that reaches
 Obsidian must go through `router.cliCommand` / `router.evaluate` / `session.page()`,
-which fence for you. If you add a fallback that catches and retries, call
+which fence for you.
+
+**A tool that writes into a vault directory bypasses all of that**, because it never
+touches a transport. Resolve the path with `router.fence.resolve(name)` — never with
+`findVault(readGlobalConfig())`, which only proves a vault is _registered_, and being
+registered is not consent. `obsidian_link_plugin` and `obsidian_setup_vault` both had
+this: they wrote into `<vault>/.obsidian` of any vault Obsidian happened to know
+about, including the user's own. `obsidian_setup_vault` was worse for being fenced
+only _by accident_ — a `plugins:restrict` call happened to run first and throw, so
+reordering two lines would have reopened it. `fence-live.mjs` now asserts both
+refuse. The two remaining `findVault` callers are deliberate: `vaultAutomationState`
+is read-only diagnostics that must be able to inspect an unauthorized vault to
+explain the refusal, and `obsidian_remove_vault` is guarded by
+`assertVaultRemovable`'s marker check, which is strictly stronger.
+
+If you add a fallback that catches and retries, call
 `rethrowIfRefused` first — `obsidian_search` used to swallow a refusal and retry the
 read unscoped.
 
@@ -153,7 +187,13 @@ second copy. Bump both together.
 - Delegate independent workstreams to parallel subagents with **strict file
   ownership**, since they share one working tree. Overlapping edits corrupt each
   other. Follow implementation with an audit subagent that runs `npm run check`.
-- Only one Obsidian instance and one CDP endpoint exist. Two agents running live
-  suites at once produce garbage for both — serialize live verification.
+- Prefer an isolated session for live work: `obsidian_create_session` gives you a
+  private Obsidian, profile, CLI socket, debug port, and scratch vault, so two agents
+  no longer contend. Put the returned key in `KNAP_SESSION` and reconnect.
+- Without a session there is still only one Obsidian and one CDP endpoint, so two
+  agents driving the _default_ profile produce garbage for both — serialize that, or
+  give each agent a session.
+- `npm run bg-input` stays serialized regardless: it depends on Obsidian not being the
+  foreground window, which is one global property of the desktop, and it fails open.
 - Use mermaid flowcharts to explain architecture in plans.
 - Build the big shapes first, then refine. Be specific and precise.

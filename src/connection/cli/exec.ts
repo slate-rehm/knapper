@@ -15,7 +15,6 @@
  */
 
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { wrapExpression } from "../../util/serialize.js";
 import {
@@ -28,6 +27,21 @@ import {
 export interface CliOptions {
   obsidianBin: string;
   timeoutMs: number;
+  /**
+   * `XDG_RUNTIME_DIR` for spawned CLI clients, which is what routes a command to
+   * one specific instance. Undefined means the ambient one, i.e. whichever Obsidian
+   * currently owns the shared socket.
+   */
+  runtimeDir?: string;
+  /**
+   * Passed as `--user-data-dir` on every invocation so this process loses the
+   * target instance's singleton lock and becomes a *forwarding client*. Without it
+   * a CLI call can win the default profile's lock instead and cold-boot an entirely
+   * new Obsidian rather than talking to the session's. Obsidian's own argv
+   * prefilter drops `--`-prefixed tokens before `handleCli` sees them, so the flag
+   * never reaches the command.
+   */
+  userDataDir?: string;
 }
 
 export interface CliResult {
@@ -48,24 +62,45 @@ export interface CliResult {
  *
  * Stripping it is always correct here: we are launching a desktop application, and
  * never want it as a plain Node process.
+ *
+ * `runtimeDir` selects which Obsidian instance this process talks to, because the
+ * app derives its CLI socket path from `XDG_RUNTIME_DIR`. Overriding that variable
+ * has a second, non-obvious effect that must be compensated for here — see
+ * `waylandDisplayFor`.
  */
-export function childEnv(): NodeJS.ProcessEnv {
+export function childEnv(runtimeDir?: string): NodeJS.ProcessEnv {
   const { ELECTRON_RUN_AS_NODE: _stripped, ...rest } = process.env;
-  return rest;
+  if (runtimeDir === undefined) return rest;
+
+  const env: NodeJS.ProcessEnv = { ...rest, XDG_RUNTIME_DIR: runtimeDir };
+  const wayland = waylandDisplayFor(rest);
+  if (wayland !== undefined) env.WAYLAND_DISPLAY = wayland;
+  return env;
 }
 
-/** Path to the IPC socket the CLI client connects to. Useful for liveness checks. */
-export function cliSocketPath(): string {
-  switch (process.platform) {
-    case "darwin":
-      return join(homedir(), ".obsidian-cli.sock");
-    case "win32":
-      return `\\\\.\\pipe\\obsidian-cli-${process.env.USERNAME ?? "user"}`;
-    default: {
-      const runtime = process.env.XDG_RUNTIME_DIR;
-      return runtime ? join(runtime, ".obsidian-cli.sock") : join(homedir(), ".obsidian-cli.sock");
-    }
-  }
+/**
+ * Absolute Wayland socket path to pin before `XDG_RUNTIME_DIR` is overridden, or
+ * undefined when nothing needs pinning.
+ *
+ * `XDG_RUNTIME_DIR` is not Obsidian's variable. It is also where a Wayland client
+ * resolves a relative `WAYLAND_DISPLAY` such as `wayland-1`. Point it at an empty
+ * per-session directory and Electron never reaches the compositor: no window, no
+ * renderer, no `DevToolsActivePort`, no CLI socket — just a main process spinning
+ * at 25% CPU indefinitely, with nothing in any log to say why. A byte-for-byte
+ * copy of a known-good profile fails the same way, which is what pins the cause on
+ * the variable rather than the profile.
+ *
+ * libwayland accepts an absolute `WAYLAND_DISPLAY` and uses it verbatim without
+ * consulting `XDG_RUNTIME_DIR`, so resolving it against the real runtime dir first
+ * keeps the compositor connection intact. `DBUS_SESSION_BUS_ADDRESS` already
+ * carries an absolute `unix:path=`, so it needs no equivalent.
+ */
+export function waylandDisplayFor(env: NodeJS.ProcessEnv): string | undefined {
+  const display = env.WAYLAND_DISPLAY;
+  if (display === undefined || display === "" || display.startsWith("/")) return undefined;
+  const realRuntime = env.XDG_RUNTIME_DIR;
+  if (realRuntime === undefined || realRuntime === "") return undefined;
+  return join(realRuntime, display);
 }
 
 /**
@@ -323,11 +358,15 @@ export class ObsidianCli {
   }
 
   private exec(args: string[], timeoutMs: number, label: string): Promise<CliResult> {
+    const argv =
+      this.opts.userDataDir !== undefined
+        ? [`--user-data-dir=${this.opts.userDataDir}`, ...args]
+        : args;
     return new Promise((resolve, reject) => {
       execFile(
         this.opts.obsidianBin,
-        args,
-        { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: childEnv() },
+        argv,
+        { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: childEnv(this.opts.runtimeDir) },
         (error, stdout, stderr) => {
           if (!error) {
             resolve({ stdout, stderr });

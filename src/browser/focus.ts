@@ -18,6 +18,13 @@
  * do. Emulation alone is enough for renderer-level input, which is every Obsidian
  * hotkey; the app-level Electron menu accelerators it cannot reach are unreachable
  * by any CDP input, foreground or not.
+ *
+ * That refusal is also what makes concurrent sessions possible at the input layer.
+ * Focus emulation is renderer-scoped, so N agents can each hold it on their own
+ * window simultaneously and the refcounts below never collide — each process owns a
+ * disjoint set of Pages on a disjoint browser. Raising an OS window is a genuinely
+ * global act with no per-session equivalent: adding `bringToFront` would make every
+ * session fight over the desktop's single foreground slot.
  */
 
 import type { CDPSession, Page } from "playwright-core";
