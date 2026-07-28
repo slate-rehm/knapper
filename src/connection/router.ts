@@ -23,10 +23,10 @@ import {
   obsidianNotRunning,
   UobError,
 } from "../util/errors.js";
-import { ObsidianCli, VAULT_AGNOSTIC_COMMANDS } from "./cli/exec.js";
+import { classifyCliOutput, ObsidianCli, VAULT_AGNOSTIC_COMMANDS } from "./cli/exec.js";
 import { PlaywrightSession } from "./cdp/session.js";
 import { ConnectionSupervisor } from "./supervisor.js";
-import { isObsidianRunning, probeHealth, type HealthReport } from "./health.js";
+import { isObsidianRunning, probeHealth, type HealthReport, type ProcessScope } from "./health.js";
 import { probeCdp } from "./cdp/discover.js";
 import { readGlobalConfig } from "./vaults.js";
 import { VaultFence, type AuthorizedVault } from "./fence.js";
@@ -69,6 +69,8 @@ export class CapabilityRouter {
   private availabilityCheckedAt = 0;
   /** Global `cli` flag from obsidian.json, independent of process liveness. */
   private cliFlagEnabled = false;
+  /** Whether an Obsidian for this scope is alive, however unreachable. */
+  private processRunning = false;
   /** Which layer currently owns the Electron debugger, if any. */
   private debuggerHolder?: Layer;
   private disposed = false;
@@ -79,11 +81,17 @@ export class CapabilityRouter {
   ) {
     this.fence = new VaultFence({
       ...(config.vault !== undefined ? { defaultVault: config.vault } : {}),
+      configPath: config.obsidianConfigPath,
       logger: logger.child("fence"),
     });
     this.cli = new ObsidianCli({
       obsidianBin: config.obsidianBin,
       timeoutMs: config.cliTimeoutMs,
+      // Both only set under a session; together they make every CLI invocation a
+      // forwarding client of *this* instance rather than of whichever Obsidian
+      // currently owns the shared socket.
+      ...(config.runtimeDir !== undefined ? { runtimeDir: config.runtimeDir } : {}),
+      ...(config.sessionId !== undefined ? { userDataDir: config.userDataDir } : {}),
     });
     this.playwright = new PlaywrightSession({
       cdpUrl: config.cdpUrl,
@@ -97,6 +105,19 @@ export class CapabilityRouter {
       session: this.playwright,
       logger: logger.child("supervisor"),
       reconnectMs: config.reconnectMs,
+      // Proves to the reaper that this session is still attended. A live Obsidian
+      // process already prevents reaping; this covers the window where the app has
+      // died but the agent is about to restart it.
+      ...(config.sessionId !== undefined
+        ? {
+            onHeartbeat: () => {
+              const key = config.sessionId as string;
+              void import("../session/descriptor.js").then((m) =>
+                m.touchHeartbeat(key, new Date()),
+              );
+            },
+          }
+        : {}),
     });
   }
 
@@ -110,8 +131,8 @@ export class CapabilityRouter {
 
     const [version, globalConfig, procRunning] = await Promise.all([
       probeCdp(this.config.cdpUrl),
-      readGlobalConfig(),
-      isObsidianRunning(),
+      readGlobalConfig(this.config.obsidianConfigPath),
+      isObsidianRunning(this.processScope),
     ]);
 
     const cdpUp = version !== undefined;
@@ -124,6 +145,7 @@ export class CapabilityRouter {
     const cliUsable = cliOn && (running || process.platform !== "linux");
 
     this.cliFlagEnabled = cliOn;
+    this.processRunning = running;
     this.availability = {
       playwright: cdpUp,
       cli: cliUsable,
@@ -250,11 +272,26 @@ export class CapabilityRouter {
    * `version` has to work before anything is authorized.
    */
   async cliCommand(command: string[], overrides: { vault?: string } = {}): Promise<string> {
-    await this.resolve("cliCommand");
+    const layer = await this.resolve("cliCommand");
     if (VAULT_AGNOSTIC_COMMANDS.has(command[0] ?? "")) {
+      // These answer questions about the installation rather than about notes, and
+      // `version` must work before anything is authorized — so they never reach
+      // the renderer route, which needs a fenced window to evaluate in.
       return this.cli.run(command);
     }
     const vault = await this.fence.resolve(overrides.vault);
+
+    if (layer === "playwright") {
+      this.claimDebugger("playwright");
+      // The vault token is omitted deliberately: Obsidian's main process strips it
+      // before calling handleCli, and the window we evaluate in is what scopes the
+      // command. Output shape is identical, so the same classifier applies.
+      const stdout = await this.playwright.handleCli(command, vault.name);
+      const failure = classifyCliOutput(stdout, vault.name);
+      if (failure) throw failure;
+      return stdout;
+    }
+
     return this.cli.run(command, { vault: vault.name });
   }
 
@@ -263,13 +300,38 @@ export class CapabilityRouter {
     return this.fence.resolve(requested);
   }
 
+  /** Which Obsidian process(es) this server owns. */
+  get processScope(): ProcessScope {
+    return this.config.sessionId !== undefined ? { userDataDir: this.config.userDataDir } : {};
+  }
+
   async health(opts: { skipCliProbe?: boolean } = {}): Promise<HealthReport> {
     return probeHealth({
       cdpUrl: this.config.cdpUrl,
       cli: this.cli,
       logger: this.logger.child("health"),
+      configPath: this.config.obsidianConfigPath,
+      scope: this.processScope,
       ...(opts.skipCliProbe !== undefined ? { skipCliProbe: opts.skipCliProbe } : {}),
     });
+  }
+
+  /**
+   * Re-point at a different CDP endpoint after a launch.
+   *
+   * With `--remote-debugging-port=0` the port is only known once the app is up, but
+   * the PlaywrightSession is built with `config.cdpUrl` at construction. Without
+   * this, a session that auto-allocated its port would keep probing the port the
+   * config guessed at startup.
+   */
+  async retarget(cdpUrl: string): Promise<void> {
+    if (cdpUrl === this.config.cdpUrl) return;
+    this.logger.info("retargeting CDP endpoint", { from: this.config.cdpUrl, to: cdpUrl });
+    await this.playwright.close().catch(() => undefined);
+    this.config.cdpUrl = cdpUrl;
+    this.config.cdpPort = Number(new URL(cdpUrl).port);
+    this.playwright.retarget(cdpUrl);
+    await this.refreshAvailability(true);
   }
 
   /** Idempotent: shutdown paths can and do call this more than once. */
@@ -299,6 +361,16 @@ export class CapabilityRouter {
       // Distinguish "flag off" from "flag on but process down" — collapsing these
       // was the exact failure mode the four precondition states exist to avoid.
       return this.cliFlagEnabled ? obsidianNotRunning(this.config.cdpPort) : cliDisabled();
+    }
+
+    // A CLI-preferring capability whose app is up but whose flag is off: naming the
+    // disabled flag keeps the precondition distinguishable. Gaining the renderer
+    // route made `onlyCli` above stop matching `cliCommand`, which silently
+    // downgraded this case to a generic "cannot connect" — the regression the four
+    // states exist to prevent. Gated on the process being alive, so a
+    // wholly-unreachable Obsidian still reports itself as not running.
+    if (preference[0] === "cli" && this.processRunning && !this.cliFlagEnabled) {
+      return cliDisabled();
     }
 
     // Mixed preference with nothing available means Obsidian is unreachable entirely.

@@ -29,6 +29,19 @@ export type ErrorCode =
    * provenance, this one is about consent to touch the vault at all.
    */
   | "VAULT_NOT_AUTHORIZED"
+  /**
+   * A session key was given but no descriptor backs it. Distinct from
+   * OBSIDIAN_NOT_RUNNING: the instance may be perfectly alive, but this server was
+   * pointed at a session that was closed, reaped, or never created. Resolving it
+   * silently to the user's own installation is exactly what must not happen.
+   */
+  | "SESSION_NOT_FOUND"
+  /**
+   * The instance a session describes is gone, but the session record remains.
+   * Separate from SESSION_NOT_FOUND so the remediation can be "restart it" rather
+   * than "create one".
+   */
+  | "SESSION_NOT_RUNNING"
   | "INTERNAL";
 
 export interface UobErrorOptions {

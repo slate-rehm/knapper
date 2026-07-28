@@ -1,0 +1,125 @@
+/**
+ * Seeding a virgin Obsidian profile for a session.
+ *
+ * Everything here runs *before* the first spawn, which is what makes it safe.
+ * `writeCliFlag`'s docstring warns that editing `obsidian.json` while Obsidian is
+ * running is discarded — a live instance holds the file in memory and rewrites it
+ * on exit. A session satisfies that precondition by construction rather than by
+ * hoping: nothing is running yet, because this is what decides what will run.
+ *
+ * Two ordering constraints, both read out of `obsidian.asar` and confirmed live:
+ *
+ *  - The vault directory must exist first. On boot the main process prunes the
+ *    registry with `(!r.path || !fs.existsSync(r.path)) && delete P[e]`, so seeding
+ *    an entry for a directory that is not there yet deletes it and the app opens
+ *    the vault picker instead.
+ *  - `open: true` is what makes the app boot straight into the vault. Without it
+ *    the window is a vault switcher, and `PlaywrightSession.page()` finds no
+ *    authorized Obsidian window to drive.
+ */
+
+import { mkdir, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { basename, join, resolve } from "node:path";
+import { sessionPaths, type SessionPaths } from "../config.js";
+import { forbiddenRoot, readManagedMarker, writeManagedMarker } from "../connection/vaults.js";
+import { UobError } from "../util/errors.js";
+
+export interface SeedOptions {
+  key: string;
+  /** Vault directory. Defaults to the session's own `vault/`. */
+  vaultPath?: string;
+  /**
+   * Use an already-authorized vault instead of creating one. Its marker is left
+   * alone, and `closeSession` will never delete it.
+   */
+  adopt?: boolean;
+  now: Date;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface SeededSession {
+  paths: SessionPaths;
+  vault: { id: string; name: string; path: string; grant: "created" | "adopted" };
+}
+
+/**
+ * The minimum `obsidian.json` an instance needs.
+ *
+ * Only two keys, matching what a real profile carries: `vaults` and `cli`. Seeding
+ * `cli: true` means the CLI transport is live on the very first boot — no
+ * `obsidian_setup_cli` round trip and no cold restart to make it stick.
+ */
+export function seedGlobalConfig(vaultId: string, vaultPath: string, now: Date): string {
+  return JSON.stringify({
+    vaults: { [vaultId]: { path: vaultPath, ts: now.getTime(), open: true } },
+    cli: true,
+  });
+}
+
+export async function seedSessionProfile(opts: SeedOptions): Promise<SeededSession> {
+  const env = opts.env ?? process.env;
+  const paths = sessionPaths(opts.key, env);
+  const vaultPath = resolve(opts.vaultPath ?? paths.vaultDir);
+
+  const forbidden = forbiddenRoot(vaultPath);
+  if (forbidden !== undefined) {
+    throw new UobError("INVALID_ARGUMENT", `Refusing to use ${forbidden} as a session vault.`, {
+      remediation: "Pass a dedicated directory, or omit vaultPath to use the session's own.",
+      details: { path: vaultPath },
+    });
+  }
+
+  await mkdir(paths.userDataDir, { recursive: true });
+  await mkdir(paths.outputDir, { recursive: true });
+  // 0700: the CLI socket lands here, and it is a control channel into a live app.
+  await mkdir(paths.runtimeDir, { recursive: true, mode: 0o700 });
+  await mkdir(join(vaultPath, ".obsidian"), { recursive: true });
+
+  const existing = await readManagedMarker(vaultPath);
+  let grant: "created" | "adopted";
+  if (opts.adopt === true) {
+    if (existing === undefined) {
+      throw new UobError(
+        "VAULT_NOT_AUTHORIZED",
+        `Refusing to adopt "${basename(vaultPath)}" — it carries no knapper marker.`,
+        {
+          remediation:
+            "Run `knapper authorize <vault>` yourself first. Adoption is a consent step, and a tool " +
+            "cannot grant it on the user's behalf.",
+          details: { path: vaultPath },
+        },
+      );
+    }
+    // Preserve the user's own marker verbatim; rewriting it as `created` would
+    // quietly convert a consent grant into a delete permission.
+    grant = existing.grant === "adopted" ? "adopted" : "created";
+  } else {
+    grant = "created";
+    if (existing === undefined) await writeManagedMarker(vaultPath, opts.now, "created");
+  }
+
+  // Same write obsidian_create_vault performs, but before first boot rather than
+  // after a cold restart — Obsidian registers a vault's commands only once it has
+  // opened it, so `plugins:restrict` is genuinely absent this early.
+  await writeFile(
+    join(vaultPath, ".obsidian", "app.json"),
+    JSON.stringify({ communityPluginEnabled: true }),
+    "utf8",
+  );
+
+  // 16 hex chars to match the ids Obsidian and createManagedVault generate.
+  const vaultId = randomBytes(8).toString("hex");
+  await writeFile(
+    join(paths.userDataDir, "obsidian.json"),
+    seedGlobalConfig(vaultId, vaultPath, opts.now),
+    "utf8",
+  );
+
+  return {
+    paths,
+    // The vault's *name* is its directory basename — that is how readGlobalConfig
+    // derives it, and it is the identity the fence matches on.
+    vault: { id: vaultId, name: basename(vaultPath), path: vaultPath, grant },
+  };
+}

@@ -230,6 +230,33 @@ await check("obsidian_attach refuses to pin to an unauthorized window", async ()
   assertFenced(await client.call("obsidian_attach", { targetId: bad.id }), "obsidian_attach");
 });
 
+console.log("\nProvisioning is fenced");
+// These two write into `<vault>/.obsidian` on disk rather than through the CLI, so
+// they used to resolve their target from the vault *registry* — and being
+// registered is not consent. Both would happily install a dev symlink or flip
+// community-plugin settings inside a vault the user never authorized.
+await check("obsidian_link_plugin refuses to symlink into an unauthorized vault", async () => {
+  const r = await client.call("obsidian_link_plugin", {
+    vault: UNAUTHORIZED,
+    sourceDir: root,
+    pluginId: "uob-fence-probe",
+  });
+  assert(r.isError, "expected a refusal");
+  assert(
+    /VAULT_NOT_AUTHORIZED|not authorized/i.test(r.text),
+    `wrong reason: ${r.text.slice(0, 200)}`,
+  );
+});
+
+await check("obsidian_setup_vault refuses to configure an unauthorized vault", async () => {
+  const r = await client.call("obsidian_setup_vault", { vault: UNAUTHORIZED });
+  assert(r.isError, "expected a refusal");
+  assert(
+    /VAULT_NOT_AUTHORIZED|not authorized/i.test(r.text),
+    `wrong reason: ${r.text.slice(0, 200)}`,
+  );
+});
+
 console.log("\nDeletion provenance");
 await check("obsidian_remove_vault refuses a vault it did not create", async () => {
   const r = await client.call("obsidian_remove_vault", { vault: UNAUTHORIZED });

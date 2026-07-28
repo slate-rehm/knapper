@@ -59,6 +59,16 @@ function nothingAvailable() {
   isObsidianRunning.mockResolvedValue(false);
 }
 
+/**
+ * Obsidian is up, but the CLI toggle is off and no debug port is open — so neither
+ * the socket nor the renderer route can serve a CLI command.
+ */
+function cliDisabledAndPortClosed() {
+  probeCdp.mockResolvedValue(undefined);
+  readGlobalConfig.mockResolvedValue({ cli: false, vaults: [], raw: {} });
+  isObsidianRunning.mockResolvedValue(true);
+}
+
 /** CLI flag on but Obsidian not running — must not cold-start without CDP. */
 function cliEnabledButNotRunning() {
   probeCdp.mockResolvedValue(undefined);
@@ -161,8 +171,18 @@ describe("resolve failures name the right precondition", () => {
     });
   });
 
-  it("blames the disabled CLI for a CLI-only capability", async () => {
+  it("falls back to the renderer for a CLI command when the CLI is disabled", async () => {
+    // Obsidian's own main process serves a CLI request by evaluating
+    // `window.handleCli(argv)` in the renderer, so Playwright is a genuine second
+    // route rather than a degraded one — and the only route on macOS and Windows.
     playwrightOnly();
+    await expect(makeRouter().resolve("cliCommand")).resolves.toBe("playwright");
+  });
+
+  it("still blames the disabled CLI when neither route is available", async () => {
+    // The precondition states must stay distinguishable: adding the fallback must
+    // not collapse "CLI is off" into a generic "cannot connect".
+    cliDisabledAndPortClosed();
     await expect(makeRouter().resolve("cliCommand")).rejects.toMatchObject({
       code: "CLI_DISABLED",
       fixedBy: "obsidian_setup_cli",

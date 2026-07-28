@@ -40,7 +40,12 @@ export type Layer = (typeof LAYERS)[number];
  */
 export const CAPABILITY_PREFERENCE: Record<Capability, readonly Layer[]> = {
   evaluate: ["cli", "playwright"],
-  cliCommand: ["cli"],
+  // Playwright is a genuine second route, not a degraded one: Obsidian's own main
+  // process serves a CLI request by evaluating `window.handleCli(argv)` in the
+  // renderer, so `PlaywrightSession.handleCli` performs the same dispatch and
+  // produces the same output. It is the only route on macOS and Windows, where the
+  // CLI socket path takes no environment input and so cannot be per-session.
+  cliCommand: ["cli", "playwright"],
   screenshot: ["playwright", "cliCdp"],
   realInput: ["playwright"],
   ariaSnapshot: ["playwright"],

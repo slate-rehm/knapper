@@ -7,7 +7,7 @@
  */
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { isLogLevel, type LogLevel } from "./util/logger.js";
 import { parseToolsets, type Toolset } from "./toolsets.js";
 
@@ -61,7 +61,37 @@ export interface Config {
   outputDir: string;
   /** Timeout for a single Obsidian CLI invocation, in ms. */
   cliTimeoutMs: number;
+  /** Session key when this server is bound to one, else undefined. */
+  sessionId?: string;
+  /**
+   * The Obsidian userData directory this server drives. Defaults to the user's own
+   * installation; a session points it at a private profile, which is what lets a
+   * second Obsidian exist at all (Electron's single-instance lock keys on it).
+   */
+  userDataDir: string;
+  /** `<userDataDir>/obsidian.json` — the vault registry and `cli` flag for this instance. */
+  obsidianConfigPath: string;
+  /**
+   * `XDG_RUNTIME_DIR` for this instance's processes, or undefined outside a session.
+   *
+   * Obsidian derives its CLI socket path from this variable, so it is what makes a
+   * CLI command reach *this* instance rather than whichever one booted last. See
+   * `childEnv` for the Wayland hazard that comes with overriding it.
+   */
+  runtimeDir?: string;
+  /**
+   * How well the CLI transport is isolated from other sessions.
+   *
+   * `per-session` — this instance owns its own socket (Linux, runtimeDir set).
+   * `shared` — the socket is whatever the platform hands out, so a CLI call may
+   * reach another instance; `handleCli` over CDP is the safe route.
+   * `none` — no per-session routing is possible at all (Windows keys the pipe on
+   * the username, with no env input).
+   */
+  cliIsolation: CliIsolation;
 }
+
+export type CliIsolation = "per-session" | "shared" | "none";
 
 export interface ConfigOverrides {
   cdpUrl?: string;
@@ -79,15 +109,24 @@ export interface ConfigOverrides {
   reconnectMs?: number;
   outputDir?: string;
   cliTimeoutMs?: number;
+  sessionId?: string;
+  userDataDir?: string;
+  runtimeDir?: string;
 }
 
 export const DEFAULT_CDP_URL = "http://127.0.0.1:9222";
 
 /**
- * Obsidian's own userData directory, which holds the vault registry and the global
- * `cli` toggle. Honors the same platform conventions Electron uses.
+ * The user's own Obsidian userData directory, which holds their vault registry and
+ * the global `cli` toggle. Honors the same platform conventions Electron uses.
+ *
+ * A session overrides this with a private profile, so most code should read
+ * `config.userDataDir` rather than calling this. It stays exported because two
+ * things genuinely mean *the user's own installation*: `knapper authorize`, which
+ * is a human pointing at a vault they can see in their own app, and the reaper's
+ * refusal to ever delete this directory.
  */
-export function obsidianUserDataDir(): string {
+export function defaultObsidianUserDataDir(): string {
   switch (process.platform) {
     case "darwin":
       return join(homedir(), "Library", "Application Support", "obsidian");
@@ -99,16 +138,113 @@ export function obsidianUserDataDir(): string {
 }
 
 /** Path to `obsidian.json`, which contains the vault registry and the `cli` flag. */
-export function obsidianConfigPath(): string {
-  return join(obsidianUserDataDir(), "obsidian.json");
+export function obsidianConfigPath(userDataDir = defaultObsidianUserDataDir()): string {
+  return join(userDataDir, "obsidian.json");
 }
 
 /**
  * Path to the Linux launch-flags file read by distro wrapper scripts. Single-dash
  * tokens here corrupt every CLI invocation, so the doctor checks it.
+ *
+ * Deliberately NOT session-scoped, and it takes no userData argument. The Arch
+ * wrapper reads `${XDG_CONFIG_HOME:-$HOME/.config}/obsidian/user-flags.conf` —
+ * a fixed path, resolved before Electron ever sees `--user-data-dir`. Every
+ * session therefore inherits the same flags, so the corruption check stays a
+ * global concern. Pointing this at a session profile would silently disable one
+ * of the four precondition states.
  */
 export function userFlagsPath(): string {
-  return join(obsidianUserDataDir(), "user-flags.conf");
+  return join(defaultObsidianUserDataDir(), "user-flags.conf");
+}
+
+/**
+ * Root for everything knapper stores on disk: session profiles, scratch vaults,
+ * screenshots, and the descriptors the reaper walks.
+ *
+ * One helper so no other module hand-builds these paths — the reaper deletes
+ * inside this tree, and a second opinion about where it lives is how a delete
+ * escapes it.
+ */
+export function knapperHome(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.KNAP_HOME;
+  if (override !== undefined && override !== "") return resolve(override);
+  return join(homedir(), ".knapper_mcp");
+}
+
+export function sessionsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(knapperHome(env), "sessions");
+}
+
+export function sessionRoot(key: string, env: NodeJS.ProcessEnv = process.env): string {
+  return join(sessionsDir(env), key);
+}
+
+/** Lock guarding session create/close/reap across knapper processes. */
+export function registryLockPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(knapperHome(env), "registry.lock");
+}
+
+/** Per-session directory layout. The only place these names are spelled. */
+export interface SessionPaths {
+  root: string;
+  descriptor: string;
+  lock: string;
+  userDataDir: string;
+  outputDir: string;
+  runtimeDir: string;
+  vaultDir: string;
+}
+
+export function sessionPaths(key: string, env: NodeJS.ProcessEnv = process.env): SessionPaths {
+  const root = sessionRoot(key, env);
+  return {
+    root,
+    descriptor: join(root, "session.json"),
+    lock: join(root, "session.lock"),
+    userDataDir: join(root, "userdata"),
+    outputDir: join(root, "output"),
+    runtimeDir: join(root, "run"),
+    // Named for the session, not "vault", because Obsidian derives a vault's NAME
+    // from its directory basename. A fixed name would make every session's vault
+    // identically named: legal, since each session has its own registry, but it
+    // renders `obsidian_list_sessions`, every window title, and `targetMatch`
+    // unable to tell two sessions apart.
+    vaultDir: join(root, key),
+  };
+}
+
+/**
+ * Where Obsidian will bind this session's CLI socket, given a runtime dir.
+ *
+ * Mirrors the app's own formula, read from `obsidian.asar`:
+ *   win32 → `\\.\pipe\obsidian-cli-<username>`
+ *   else  → `join((!darwin && XDG_RUNTIME_DIR) || homedir(), ".obsidian-cli.sock")`
+ * Only the Linux branch takes input from the environment, which is why per-session
+ * CLI routing is a Linux-only capability.
+ */
+export function cliSocketPathFor(runtimeDir?: string): string {
+  switch (process.platform) {
+    case "darwin":
+      return join(homedir(), ".obsidian-cli.sock");
+    case "win32":
+      return `\\\\.\\pipe\\obsidian-cli-${process.env.USERNAME ?? "user"}`;
+    default:
+      return join(runtimeDir ?? process.env.XDG_RUNTIME_DIR ?? homedir(), ".obsidian-cli.sock");
+  }
+}
+
+/**
+ * Unix domain socket paths are capped at 108 bytes by `sockaddr_un.sun_path`, and
+ * the session key is the only part callers control. Checked when a session is
+ * minted so the failure is a typed message about the key rather than an opaque
+ * ENAMETOOLONG from `bind()` at launch, long after the name was chosen.
+ */
+export const MAX_SOCKET_PATH_BYTES = 100;
+
+export function cliIsolationFor(runtimeDir: string | undefined): CliIsolation {
+  if (process.platform === "win32") return "none";
+  if (process.platform === "linux" && runtimeDir !== undefined) return "per-session";
+  return "shared";
 }
 
 export function defaultObsidianBin(): string {
@@ -165,6 +301,12 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
   const rawTransport = overrides.transport ?? env.MCP_TRANSPORT ?? "stdio";
   const transport: TransportKind = isTransportKind(rawTransport) ? rawTransport : "stdio";
 
+  // Unbound is the default and must stay byte-identical to the pre-session
+  // behaviour: the user's own profile, no runtime dir, screenshots under cwd.
+  const sessionId = overrides.sessionId ?? emptyToUndefined(env.KNAP_SESSION);
+  const userDataDir = overrides.userDataDir ?? defaultObsidianUserDataDir();
+  const runtimeDir = overrides.runtimeDir;
+
   return {
     cdpUrl,
     cdpPort: parsePort(cdpUrl),
@@ -191,5 +333,67 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
       env.SCREENSHOT_DIR ??
       join(process.cwd(), ".knapper"),
     cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.KNAP_CLI_TIMEOUT_MS, 15_000),
+    ...(sessionId !== undefined ? { sessionId } : {}),
+    userDataDir,
+    obsidianConfigPath: obsidianConfigPath(userDataDir),
+    ...(runtimeDir !== undefined ? { runtimeDir } : {}),
+    cliIsolation: cliIsolationFor(runtimeDir),
   };
+}
+
+function emptyToUndefined(raw: string | undefined): string | undefined {
+  return raw === undefined || raw === "" ? undefined : raw;
+}
+
+/**
+ * Resolve config for a session key, falling back to `loadConfig` when unbound.
+ *
+ * Precedence is explicit flag > env var > descriptor > default, so `--cdp-url`
+ * still wins for debugging a session's instance by hand.
+ *
+ * A `KNAP_SESSION` naming a descriptor that is not there is a hard error, never a
+ * silent fallback to the user's real Obsidian. That is the fence's philosophy one
+ * layer up: a request to target something specific must fail loudly rather than
+ * quietly land somewhere else.
+ */
+export async function loadSessionConfig(
+  overrides: ConfigOverrides = {},
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Config> {
+  const key = overrides.sessionId ?? emptyToUndefined(env.KNAP_SESSION);
+  if (key === undefined) return loadConfig(overrides, env);
+
+  const { readDescriptor } = await import("./session/descriptor.js");
+  const { assertSessionKey } = await import("./session/key.js");
+  const { UobError } = await import("./util/errors.js");
+
+  assertSessionKey(key);
+  const descriptor = await readDescriptor(key, env);
+  if (descriptor === undefined) {
+    throw new UobError("SESSION_NOT_FOUND", `No knapper session named "${key}".`, {
+      remediation:
+        "KNAP_SESSION points at a session that no longer exists — it was closed, reaped, or never " +
+        "created. Create one with obsidian_create_session, or unset KNAP_SESSION to use the " +
+        "installation's own Obsidian.",
+      fixedBy: "obsidian_create_session",
+      details: { session: key },
+    });
+  }
+
+  return loadConfig(
+    {
+      ...overrides,
+      sessionId: key,
+      userDataDir: overrides.userDataDir ?? descriptor.instance.userDataDir,
+      ...(descriptor.instance.runtimeDir !== undefined
+        ? { runtimeDir: overrides.runtimeDir ?? descriptor.instance.runtimeDir }
+        : {}),
+      cdpUrl: overrides.cdpUrl ?? env.OBSIDIAN_CDP_URL ?? descriptor.instance.cdpUrl,
+      outputDir: overrides.outputDir ?? env.KNAP_SCREENSHOT_DIR ?? descriptor.instance.outputDir,
+      ...(descriptor.vault !== undefined
+        ? { vault: overrides.vault ?? env.OBSIDIAN_VAULT ?? descriptor.vault.name }
+        : {}),
+    },
+    env,
+  );
 }

@@ -68,6 +68,22 @@ export class PlaywrightSession {
     return this.browser?.isConnected() === true;
   }
 
+  get cdpUrl(): string {
+    return this.opts.cdpUrl;
+  }
+
+  /**
+   * Point at a different endpoint. The caller must `close()` first.
+   *
+   * Needed because a session launched with `--remote-debugging-port=0` only learns
+   * its port after the app is up, by which time this object already exists. The pin
+   * is dropped: a target id from the old browser means nothing to the new one.
+   */
+  retarget(cdpUrl: string): void {
+    this.opts.cdpUrl = cdpUrl;
+    this.pinnedTargetId = undefined;
+  }
+
   /** Attach to the running Obsidian instance, reusing an existing connection. */
   async connect(): Promise<BrowserContext> {
     if (this.context && this.browser?.isConnected()) return this.context;
@@ -359,6 +375,64 @@ export class PlaywrightSession {
         cause: e,
       });
     }
+  }
+
+  /**
+   * Run an Obsidian CLI command over CDP instead of the IPC socket.
+   *
+   * This is not a reimplementation. Obsidian's own main process serves a CLI
+   * request by evaluating exactly this in the target vault's renderer:
+   *
+   *   new Promise((resolve, reject) => {
+   *     if (window.handleCli) Promise.resolve(window.handleCli(argv)).then(resolve, reject)
+   *     else { window.cliQueue = window.cliQueue || []; window.cliQueue.push({argv, resolve, reject}) }
+   *   })
+   *
+   * so this produces byte-identical output and `classifyCliOutput` needs no
+   * changes. `argv` arrives WITHOUT the `vault=` token, because the main process
+   * strips it before dispatching — the vault is chosen by which window you
+   * evaluate in, which here is the one the fence already picked.
+   *
+   * The `cliQueue` branch matters: before layout-ready `window.handleCli` does not
+   * exist yet, and Obsidian's answer is to queue rather than fail. Mirroring that
+   * is why a command issued during startup blocks instead of erroring.
+   *
+   * Why keep it when the native socket works: it is the only route on macOS and
+   * Windows, where the socket path takes no environment input and cannot be made
+   * per-session. It also bypasses the main process's `if (!C.cli)` gate, so the
+   * doctor must keep sourcing `cliEnabled` from obsidian.json rather than
+   * inferring it from this succeeding.
+   */
+  async handleCli(argv: string[], vault?: string): Promise<string> {
+    const page = await this.page(vault);
+    if (!(await this.hasApp(page))) throw appUnavailable();
+
+    // Passed as a source string rather than a closure, matching `evaluate` above:
+    // this project's tsconfig has no DOM lib, so `window` is not a typed global
+    // here, and the payload is Obsidian's own snippet transcribed rather than code
+    // meant to typecheck against the renderer.
+    const source = `new Promise((resolve, reject) => {
+      const argv = ${JSON.stringify(argv)};
+      if (typeof window.handleCli === "function") {
+        Promise.resolve(window.handleCli(argv)).then(resolve, reject);
+      } else {
+        window.cliQueue = window.cliQueue || [];
+        window.cliQueue.push({ argv, resolve, reject });
+      }
+    })`;
+
+    let result: unknown;
+    try {
+      result = await page.evaluate(source);
+    } catch (e) {
+      // A rejection here is the command failing, not the transport: Obsidian's own
+      // IPC path surfaces the same rejection as an error string on stdout, so
+      // normalize to that shape and let classifyCliOutput decide.
+      const message = e instanceof Error ? e.message : String(e);
+      return message.startsWith("Error:") ? message : `Error: ${message}`;
+    }
+
+    return typeof result === "string" ? result : result === undefined ? "" : String(result);
   }
 
   /** A raw CDP session bound to the active page. */

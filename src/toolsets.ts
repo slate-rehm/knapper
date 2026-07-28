@@ -9,6 +9,7 @@
 
 export const TOOLSETS = [
   "core",
+  "session",
   "ui",
   "telemetry",
   "plugin-dev",
@@ -23,10 +24,19 @@ export type Toolset = (typeof TOOLSETS)[number];
  * The plugin-development surface. Vault CRUD is opt-in because other Obsidian MCP
  * servers already cover it well, and `devtools`/`authoring` are niche.
  */
-export const DEFAULT_TOOLSETS: readonly Toolset[] = ["core", "ui", "telemetry", "plugin-dev"];
+export const DEFAULT_TOOLSETS: readonly Toolset[] = [
+  "core",
+  "session",
+  "ui",
+  "telemetry",
+  "plugin-dev",
+];
 
 export const TOOLSET_DESCRIPTIONS: Record<Toolset, string> = {
   core: "Status, doctor, launch, eval, CLI, and command-palette execution.",
+  session:
+    "Isolated Obsidian instances: create, list, restart, and close a private app, profile, and " +
+    "scratch vault so concurrent agents never contend.",
   ui: "Browser automation over CDP (proxied from @playwright/mcp) plus Obsidian-scoped snapshots.",
   telemetry: "Console, error, and network capture with cursor-based tailing.",
   "plugin-dev": "Plugin reload, manifest and settings inspection, and dev-cycle composites.",
