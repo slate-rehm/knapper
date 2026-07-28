@@ -119,7 +119,16 @@ export function registerSessionTools(ctx: ServerContext): void {
       // Opportunistic cleanup: this is where nearly all reaping happens in
       // practice, and it needs no daemon. Failure here must never block creating a
       // session, so it is deliberately swallowed.
-      const reaped = await reapStaleSessions({ logger: logger.child("reap"), deleteVaults: true })
+      //
+      // `keep` matters even though this server is about to create a *different*
+      // session: a server already bound to one would otherwise be the thing that
+      // collects it, and the reaper cannot tell "its Obsidian crashed a while ago"
+      // from "abandoned" — only the caller knows it is still in use.
+      const reaped = await reapStaleSessions({
+        logger: logger.child("reap"),
+        deleteVaults: true,
+        ...(currentKey() !== undefined ? { keep: currentKey() as string } : {}),
+      })
         .then((r) => r.reaped)
         .catch(() => [] as string[]);
 

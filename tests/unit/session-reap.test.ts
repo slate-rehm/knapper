@@ -40,10 +40,16 @@ const exists = async (p: string): Promise<boolean> =>
  */
 async function makeSession(
   key: string,
-  opts: { heartbeatAgeMs?: number; pid?: number; grant?: "created" | "adopted" } = {},
+  opts: {
+    heartbeatAgeMs?: number;
+    pid?: number;
+    grant?: "created" | "adopted";
+    /** Put the vault somewhere other than inside the session root. */
+    vaultPath?: string;
+  } = {},
 ): Promise<{ vaultPath: string; userDataDir: string }> {
   const paths = sessionPaths(key, env);
-  const vaultPath = paths.vaultDir;
+  const vaultPath = opts.vaultPath ?? paths.vaultDir;
   await mkdir(paths.userDataDir, { recursive: true });
   await mkdir(vaultPath, { recursive: true });
   await writeManagedMarker(vaultPath, NOW, opts.grant ?? "created");
@@ -165,6 +171,25 @@ describe("reapStaleSessions", () => {
     const report = await reapStaleSessions({ now: NOW, env, deleteVaults: true });
     expect(await exists(vaultPath)).toBe(true);
     expect(report.reaped).toEqual(["adopt-a3f19c22"]);
+  });
+
+  it("never deletes a vault outside the session directory", async () => {
+    // Automatic cleanup reclaims a session's own scratch space. A vault the caller
+    // pointed elsewhere is a directory a human chose, and an abandoned profile is
+    // not a reason to delete it — only an explicit obsidian_close_session is.
+    const outside = join(home, "elsewhere", "MyNotes");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "Important.md"), "# my life's work\n", "utf8");
+    await makeSession("outside-a3f19c22", {
+      heartbeatAgeMs: STALE_AFTER_MS + 60_000,
+      vaultPath: outside,
+    });
+
+    const report = await reapStaleSessions({ now: NOW, env, deleteVaults: true });
+    expect(report.reaped).toEqual(["outside-a3f19c22"]);
+    expect(await exists(join(outside, "Important.md"))).toBe(true);
+    // The session's own profile is still reclaimed; only the vault is spared.
+    expect(await exists(sessionPaths("outside-a3f19c22", env).root)).toBe(false);
   });
 
   it("keeps the vault when deleteVaults is not set", async () => {

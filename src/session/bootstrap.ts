@@ -18,7 +18,7 @@
  *    authorized Obsidian window to drive.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { sessionPaths, type SessionPaths } from "../config.js";
@@ -70,13 +70,19 @@ export async function seedSessionProfile(opts: SeedOptions): Promise<SeededSessi
     });
   }
 
-  await mkdir(paths.userDataDir, { recursive: true });
-  await mkdir(paths.outputDir, { recursive: true });
-  // 0700: the CLI socket lands here, and it is a control channel into a live app.
-  await mkdir(paths.runtimeDir, { recursive: true, mode: 0o700 });
-  await mkdir(join(vaultPath, ".obsidian"), { recursive: true });
-
+  // Decide about the vault BEFORE creating anything, so a refusal leaves no
+  // half-made session root behind and — far more importantly — writes no marker.
+  //
+  // The marker is the entire delete authority: `removeManagedVault` deletes
+  // exactly what carries one. Seeding used to stamp `created` on whatever
+  // directory it was handed, so pointing a session at a vault of real notes made
+  // those notes disposable, and automatic cleanup later deleted them while doing
+  // precisely what it had been told. `createManagedVault` has refused non-empty
+  // directories since it was written; this path is the second way in and must
+  // refuse them too.
   const existing = await readManagedMarker(vaultPath);
+  const preexisting = await readdir(vaultPath).catch(() => undefined);
+
   let grant: "created" | "adopted";
   if (opts.adopt === true) {
     if (existing === undefined) {
@@ -95,9 +101,30 @@ export async function seedSessionProfile(opts: SeedOptions): Promise<SeededSessi
     // quietly convert a consent grant into a delete permission.
     grant = existing.grant === "adopted" ? "adopted" : "created";
   } else {
+    const occupants = (preexisting ?? []).filter((e) => !e.startsWith("."));
+    if (existing === undefined && occupants.length > 0) {
+      throw new UobError(
+        "INVALID_ARGUMENT",
+        `Refusing to use non-empty directory ${vaultPath} as a session vault.`,
+        {
+          remediation:
+            "Pass an empty or non-existent directory, or omit vaultPath to get the session's own. " +
+            "To work in a vault that already holds notes, run `knapper authorize <vault>` and pass " +
+            "it as adoptVault — that grants access without making it deletable.",
+          details: { path: vaultPath, entries: occupants.slice(0, 10) },
+        },
+      );
+    }
     grant = "created";
-    if (existing === undefined) await writeManagedMarker(vaultPath, opts.now, "created");
   }
+
+  await mkdir(paths.userDataDir, { recursive: true });
+  await mkdir(paths.outputDir, { recursive: true });
+  // 0700: the CLI socket lands here, and it is a control channel into a live app.
+  await mkdir(paths.runtimeDir, { recursive: true, mode: 0o700 });
+  await mkdir(join(vaultPath, ".obsidian"), { recursive: true });
+
+  if (existing === undefined) await writeManagedMarker(vaultPath, opts.now, "created");
 
   // Same write obsidian_create_vault performs, but before first boot rather than
   // after a cold restart — Obsidian registers a vault's commands only once it has
