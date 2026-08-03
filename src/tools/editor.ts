@@ -50,7 +50,7 @@ function noActiveEditor(): UobError {
       "Open a markdown file in an editing mode first (obsidian_open from the vault toolset, or " +
       "obsidian_command with a file-opening command), then retry. obsidian_editor_state reports " +
       "mode 'reading' or 'none' without erroring if you need to diagnose.",
-    fixedBy: "obsidian_open",
+    fixedBy: "obsidian_command",
   });
 }
 
@@ -238,6 +238,12 @@ export function registerEditorTools(ctx: ServerContext): void {
         editorWidgetsSource(selector, WIDGET_CAP),
         vaultName(args, config),
       );
+      if (result.badSelector !== undefined) {
+        throw new UobError("INVALID_ARGUMENT", `Invalid CSS selector "${selector}".`, {
+          remediation: "Pass a valid selector scoped to the active editor root.",
+          details: { selector, error: result.badSelector },
+        });
+      }
       if (!result.editor && result.widgets === undefined) {
         throw new UobError("TARGET_NOT_FOUND", "No active editor pane to query.", {
           remediation: "Open a markdown file in an editing mode first, then retry.",

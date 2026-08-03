@@ -612,7 +612,10 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     inputSchema: {
       vault: z.string().describe("Registered vault name"),
       sourceDir: z.string().describe("Absolute path to a loadable plugin directory"),
-      pluginId: z.string().optional().describe("Plugin id (default: read from manifest.json)"),
+      pluginId: z
+        .string()
+        .optional()
+        .describe("Expected plugin id. When set, it must match manifest.json."),
       unlink: z.boolean().optional().describe("Remove the symlink instead of creating one"),
     },
     // Replaces an existing symlink at the target path, and unlink=true removes one.

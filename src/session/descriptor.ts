@@ -95,6 +95,13 @@ export async function readDescriptor(
     // A descriptor whose key disagrees with its own directory is debris or an
     // impersonation attempt; either way it is not this session.
     if (parsed.key !== key) return undefined;
+    if (
+      !Number.isInteger(parsed.schema) ||
+      parsed.schema < 1 ||
+      parsed.schema > SESSION_SCHEMA_VERSION
+    ) {
+      return undefined;
+    }
     // Version 1 descriptors only existed after CDP became reachable. Treat them
     // as ready during the one-release compatibility window.
     if (parsed.readiness === undefined && parsed.schema < SESSION_SCHEMA_VERSION) {

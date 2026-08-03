@@ -58,6 +58,7 @@ untouched.
 
 `KNAP_TOOLSETS` sets the startup surface. Use `obsidian_toolsets` to change the surface at
 runtime. Knapper sends `notifications/tools/list_changed` after each effective change.
+The default toolsets are `core`, `session`, `ui`, `telemetry`, `plugin-dev`, and `editor`.
 Anything that mutates takes an exclusive lock regardless, so real input and UI
 mutations never interleave.
 

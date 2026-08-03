@@ -58,9 +58,16 @@ export async function captureElementScreenshot(
 
   // Metrics come from the same selector semantics as the capture below:
   // querySelector and locator.first() both take the first match in document order.
-  const metrics = (await page.evaluate(
-    elementMetricsSource(parsed.target),
-  )) as ElementMetrics | null;
+  let metrics: ElementMetrics | null;
+  try {
+    metrics = (await page.evaluate(elementMetricsSource(parsed.target))) as ElementMetrics | null;
+  } catch (error) {
+    throw new UobError("INVALID_ARGUMENT", `Invalid CSS selector "${parsed.target}".`, {
+      remediation: "Pass a valid CSS selector, not a snapshot ref or plain text label.",
+      cause: error,
+      details: { target: parsed.target },
+    });
+  }
   if (metrics === null) {
     throw new UobError("TARGET_NOT_FOUND", `No element matches "${parsed.target}".`, {
       remediation:

@@ -172,7 +172,16 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
     });
     if (plugin?.preEnabled === true) {
-      await trustDisposableVault(launched.cdpUrl, seeded.vault.id);
+      try {
+        await trustDisposableVault(launched.cdpUrl, seeded.vault.id);
+      } catch (error) {
+        plugin = { ...plugin, preEnabled: false };
+        provisional = { ...provisional, plugin };
+        opts.logger?.warn("could not grant plugin trust in disposable session", {
+          session: key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 
     const descriptor: SessionDescriptor = {

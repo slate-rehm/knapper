@@ -112,7 +112,7 @@ export function registerSessionTools(ctx: ServerContext): void {
       pluginId: z
         .string()
         .optional()
-        .describe("Plugin id, when it should not be read from manifest.json."),
+        .describe("Expected plugin id. When set, it must match manifest.json."),
       cdpPort: z
         .number()
         .optional()
@@ -255,12 +255,18 @@ export function registerSessionTools(ctx: ServerContext): void {
         .string()
         .optional()
         .describe("Session key to wait for. Defaults to the session this server is bound to."),
-      timeoutMs: z.number().optional().describe("How long to wait (default 30000)."),
+      timeoutMs: z
+        .number()
+        .int()
+        .nonnegative()
+        .optional()
+        .describe("How long to wait (default 30000)."),
     },
     handler: async (args) => {
-      const descriptor = await waitSession(targetKey(args.session), {
-        ...(typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {}),
-      });
+      const descriptor = await waitSession(
+        targetKey(args.session),
+        typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {},
+      );
       return {
         text: `Session ${descriptor.key} is ready on ${descriptor.instance.cdpUrl}.`,
         json: { ...summarize(descriptor), diagnostics: await sessionDiagnostics(descriptor) },

@@ -98,7 +98,7 @@ export function editorStateSource(windowLines: number): string {
     const doc = editor.getValue();
     const cursor = editor.getCursor();
     const lineCount = editor.lineCount();
-    const half = Math.max(1, Math.floor(${JSON.stringify(windowLines)} / 2));
+    const half = Math.floor(${JSON.stringify(windowLines)} / 2);
     const fromLine = Math.max(0, cursor.line - half);
     const toLine = Math.min(lineCount - 1, cursor.line + half);
     const lines = [];
@@ -218,6 +218,7 @@ export interface EditorWidget {
 
 export interface EditorWidgetsResult {
   editor: boolean;
+  badSelector?: string;
   total?: number;
   returned?: number;
   widgets?: EditorWidget[];
@@ -247,7 +248,12 @@ export function editorWidgetsSource(selector: string, cap: number): string {
       }
       return parts.join(" > ");
     };
-    const all = Array.from(root.querySelectorAll(${JSON.stringify(selector)}));
+    let all;
+    try {
+      all = Array.from(root.querySelectorAll(${JSON.stringify(selector)}));
+    } catch (error) {
+      return { editor: !!editor, badSelector: error instanceof Error ? error.message : String(error) };
+    }
     const widgets = all.slice(0, ${JSON.stringify(cap)}).map((el, index) => {
       const r = el.getBoundingClientRect();
       let docPos = null;

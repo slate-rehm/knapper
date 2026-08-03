@@ -246,6 +246,9 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
       "obsidian_screenshot (OS window).",
     annotations: { readOnlyHint: true },
     inputSchema: elementScreenshotSchema,
-    handler: async (args) => captureElementScreenshot(router, args),
+    handler: async (args) => {
+      await router.resolve("ariaSnapshot");
+      return captureElementScreenshot(router, args);
+    },
   });
 }

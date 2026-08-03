@@ -103,8 +103,9 @@ The editor toolset reads and edits the active editor through `app.workspace.acti
 3. `obsidian_editor_replace` — edits text. It requires `expectedDocHash` from a fresh `obsidian_editor_state` call. A `STALE_REF` refusal means the document changed under you. The user or another agent edits the same live editor, so take a new state and retry.
 4. `obsidian_editor_widgets` — lists rendered widgets and decorations inside the editor DOM. Pass a `selector` such as `[data-my-plugin]` to find your plugin's decorations. Each match reports a short `cssPath`, its rect, a document position when the CM6 view is reachable, and a text preview.
 
-Two related capture tools:
+Three complementary capture tools:
 
+- `browser_take_screenshot` — captures the Playwright viewport or a snapshot-ref element.
 - `obsidian_snapshot scope=editor` — scopes the ARIA snapshot to the active editor. It falls back to the reading view when no editor exists.
 - `obsidian_element_screenshot target=<selector>` — captures one element as a PNG and pairs it with a metrics block (rect, `devicePixelRatio`, viewport, computed display). Trust the metrics over the pixels when display scaling is in play. It takes a CSS selector only — snapshot refs do not resolve here.
 

@@ -50,12 +50,13 @@ export function pluginTrustStorageKey(vaultId: string): string {
 
 /** Grant plugin trust inside a disposable profile, then reload its renderer. */
 export async function trustDisposableVault(cdpUrl: string, vaultId: string): Promise<void> {
-  const browser = await chromium.connectOverCDP(cdpUrl, {
-    noDefaults: true,
-    isLocal: true,
-    timeout: 10_000,
-  });
+  let browser;
   try {
+    browser = await chromium.connectOverCDP(cdpUrl, {
+      noDefaults: true,
+      isLocal: true,
+      timeout: 10_000,
+    });
     const context = browser.contexts()[0];
     if (context === undefined) throw new Error("CDP exposed no browser context");
     const deadline = Date.now() + 10_000;
@@ -77,7 +78,7 @@ export async function trustDisposableVault(cdpUrl: string, vaultId: string): Pro
       details: { vaultId },
     });
   } finally {
-    await browser.close().catch(() => undefined);
+    await browser?.close().catch(() => undefined);
   }
 }
 

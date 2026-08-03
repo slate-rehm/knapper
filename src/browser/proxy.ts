@@ -209,8 +209,8 @@ export class BrowserProxy {
    * the attach call, which still succeeds for the native layer.
    */
   async selectPinnedPage(): Promise<boolean> {
-    if (!(await this.init()) || !this.client) return false;
     try {
+      if (!(await this.init()) || !this.client) return false;
       const page = await this.router.playwright.page();
       return await this.pointProxyAt(page);
     } catch (e) {

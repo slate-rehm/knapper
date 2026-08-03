@@ -91,9 +91,13 @@ describe("waitSession", () => {
       browserId: "/devtools/browser/old",
       mtimeMs: Date.parse(spawnedAt) - 1,
     });
-    await expect(waitSession(key, { timeoutMs: 1, env })).rejects.toMatchObject({
+    // A readiness probe would succeed. The stale-file guard must prevent it.
+    // The timeout diagnostic performs one separate reachability probe afterward.
+    probeCdp.mockResolvedValue({ Browser: "Chrome/142" });
+    await expect(waitSession(key, { timeoutMs: 500, env })).rejects.toMatchObject({
       code: "TIMEOUT",
     });
+    expect(probeCdp).toHaveBeenCalledTimes(1);
     expect((await readDescriptor(key, env))?.readiness.phase).toBe("starting");
   });
 

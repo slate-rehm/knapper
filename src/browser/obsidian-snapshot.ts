@@ -21,9 +21,18 @@ export const SCOPE_SELECTORS: Record<string, string> = {
     ".workspace-leaf.mod-active .cm-editor, .workspace-leaf.mod-active .markdown-reading-view",
 };
 
+export const SNAPSHOT_SCOPES = [
+  "active-leaf",
+  "workspace",
+  "modal",
+  "settings",
+  "editor",
+  "selector",
+] as const;
+
 export const obsidianSnapshotSchema = {
   scope: z
-    .enum(["active-leaf", "workspace", "modal", "settings", "editor", "selector"])
+    .enum(SNAPSHOT_SCOPES)
     .default("active-leaf")
     .describe(
       "Region to snapshot. Prefer active-leaf for the current note or pane; workspace for layout; " +
