@@ -1,7 +1,7 @@
 {
   "name": "knapper",
-  "version": "0.5.1",
-  "description": "Drive a live Obsidian desktop app over MCP: develop and test Obsidian plugins, automate the vault and UI, and read console output. Use for anything involving Obsidian, its vaults, notes, or plugins.",
+  "version": "0.6.0-beta.6",
+  "description": "MCP server for Obsidian plugin development: integrated browser, debugging, and session-based vaults for agents.",
   "keywords": [
     "automation",
     "cdp",
