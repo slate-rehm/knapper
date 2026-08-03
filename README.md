@@ -495,3 +495,8 @@ review tool approvals in your client, and keep the HTTP transport on loopback. S
 ## License
 
 MIT
+
+## Origin
+
+Knapper is a fork of [live-mcp-for-obsidian](https://github.com/gapmiss/live-mcp-for-obsidian)
+by gapmiss.
