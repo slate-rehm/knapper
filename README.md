@@ -296,25 +296,26 @@ Sessions are **Linux-only** in practice; see [Platform support](#platform-suppor
 
 Set options via **environment variables** (and a subset via CLI flags). See [docs/configuration.md](docs/configuration.md) for examples.
 
-| Setting             | Env var                  | CLI flag         | Default                                |
-| ------------------- | ------------------------ | ---------------- | -------------------------------------- |
-| CDP URL             | `OBSIDIAN_CDP_URL`       | `--cdp-url`      | `http://127.0.0.1:9222`                |
-| Obsidian binary     | `OBSIDIAN_BIN`           | `--obsidian-bin` | OS default                             |
-| Default vault       | `OBSIDIAN_VAULT`         | `--vault`, `-v`  | (active / unset)                       |
-| Toolsets            | `KNAP_TOOLSETS`          | `--toolsets`     | `core,session,ui,telemetry,plugin-dev` |
-| Bind to a session   | `KNAP_SESSION`           | `--session`      | (unset)                                |
-| knapper's disk root | `KNAP_HOME`              | —                | `~/.knapper_mcp`                       |
-| Log level           | `KNAP_LOG_LEVEL`         | `--log-level`    | `info`                                 |
-| Telemetry buffer    | `KNAP_TELEMETRY_BUFFER`  | —                | `2000`                                 |
-| Network capture     | `KNAP_TELEMETRY_NETWORK` | —                | `false`                                |
-| CDP reconnect delay | `KNAP_RECONNECT_MS`      | —                | `2000`                                 |
-| Screenshot dir      | `KNAP_SCREENSHOT_DIR`    | `--output-dir`   | `./.knapper`                           |
-| CLI timeout         | `KNAP_CLI_TIMEOUT_MS`    | —                | `15000`                                |
-| Window match        | `OBSIDIAN_TARGET_MATCH`  | `--target-match` | (unset)                                |
-| Transport           | `MCP_TRANSPORT`          | `--transport`    | `stdio`                                |
-| HTTP port           | `MCP_PORT`               | `--port`         | `9223`                                 |
-| HTTP host           | `MCP_HOST`               | `--host`         | `127.0.0.1`                            |
-| Max concurrency     | `KNAP_MAX_CONCURRENCY`   | —                | `4`                                    |
+| Setting             | Env var                  | CLI flag         | Default                                       |
+| ------------------- | ------------------------ | ---------------- | --------------------------------------------- |
+| CDP URL             | `OBSIDIAN_CDP_URL`       | `--cdp-url`      | `http://127.0.0.1:9222`                       |
+| Obsidian binary     | `OBSIDIAN_BIN`           | `--obsidian-bin` | OS default                                    |
+| Default vault       | `OBSIDIAN_VAULT`         | `--vault`, `-v`  | (active / unset)                              |
+| Toolsets            | `KNAP_TOOLSETS`          | `--toolsets`     | `core,session,ui,telemetry,plugin-dev,editor` |
+| Bind to a session   | `KNAP_SESSION`           | `--session`      | (unset)                                       |
+| knapper's disk root | `KNAP_HOME`              | —                | `~/.knapper_mcp`                              |
+| Log level           | `KNAP_LOG_LEVEL`         | `--log-level`    | `info`                                        |
+| Telemetry buffer    | `KNAP_TELEMETRY_BUFFER`  | —                | `2000`                                        |
+| Network capture     | `KNAP_TELEMETRY_NETWORK` | —                | `false`                                       |
+| CDP reconnect delay | `KNAP_RECONNECT_MS`      | —                | `2000`                                        |
+| Screenshot dir      | `KNAP_SCREENSHOT_DIR`    | `--output-dir`   | `./.knapper`                                  |
+| CLI timeout         | `KNAP_CLI_TIMEOUT_MS`    | —                | `15000`                                       |
+| Command transport   | `KNAP_COMMAND_TRANSPORT` | —                | `auto` (`cli` or `playwright`)                |
+| Window match        | `OBSIDIAN_TARGET_MATCH`  | `--target-match` | (unset)                                       |
+| Transport           | `MCP_TRANSPORT`          | `--transport`    | `stdio`                                       |
+| HTTP port           | `MCP_PORT`               | `--port`         | `9223`                                        |
+| HTTP host           | `MCP_HOST`               | `--host`         | `127.0.0.1`                                   |
+| Max concurrency     | `KNAP_MAX_CONCURRENCY`   | —                | `4`                                           |
 
 `LOG_LEVEL`, `RECONNECT_MS`, and `SCREENSHOT_DIR` are also accepted as aliases; the `KNAP_`-prefixed name wins when both are set.
 
@@ -341,6 +342,7 @@ Gating keeps tool count manageable for model tool selection.
 | `ui`         | yes     | `browser_*` (from `@playwright/mcp`) for real UI interaction, plus `obsidian_snapshot`                               |
 | `telemetry`  | yes     | Console/error/network capture, cursor tailing                                                                        |
 | `plugin-dev` | yes     | Reload, manifest/settings, `obsidian_dev_cycle`, exercise/reset                                                      |
+| `editor`     | yes     | Active-editor state, cursor/selection control, hash-guarded text edits, widget queries                               |
 | `vault`      | no      | Note/file CRUD, search, tabs, graph queries — **opt-in** because other Obsidian MCP servers already cover vault CRUD |
 | `devtools`   | no      | DOM/CSS/CDP passthrough, OS-window screenshots, mobile emulation                                                     |
 | `authoring`  | no      | Themes, snippets, properties, tags, tasks, daily notes, templates                                                    |
@@ -348,15 +350,22 @@ Gating keeps tool count manageable for model tool selection.
 Enable extras: `KNAP_TOOLSETS=core,session,ui,telemetry,plugin-dev,vault` or
 `--toolsets all`.
 
+Use `obsidian_toolsets` to list, enable, or disable toolsets during a session. Knapper
+updates `tools/list` and sends `notifications/tools/list_changed`. The control tool stays
+enabled so you can restore a disabled toolset. Use `obsidian_capabilities` to see which
+live transport can serve each operation.
+
 ### Representative tools (default toolsets)
 
 **Core & provisioning:** `obsidian_status`, `obsidian_doctor`, `obsidian_launch`, `obsidian_setup_cli`, `obsidian_setup_vault`, `obsidian_create_vault`, `obsidian_remove_vault`, `obsidian_link_plugin`, `obsidian_list_targets`, `obsidian_attach`, `obsidian_eval`, `obsidian_cli`, `obsidian_commands`, `obsidian_command`
 
-**Sessions (isolated instances):** `obsidian_create_session`, `obsidian_list_sessions`, `obsidian_restart_session`, `obsidian_close_session`
+**Sessions (isolated instances):** `obsidian_create_session`, `obsidian_wait_session`, `obsidian_list_sessions`, `obsidian_restart_session`, `obsidian_close_session`
 
 **Plugin dev:** `obsidian_plugin_list`, `obsidian_plugin_manifest`, `obsidian_plugin_settings`, `obsidian_plugin_reload`, `obsidian_dev_cycle`, `obsidian_exercise_command`, `obsidian_reset_state`, `obsidian_plugin_health`
 
 **Telemetry:** `obsidian_logs`, `obsidian_log_mark`, `obsidian_logs_clear`, `obsidian_telemetry_status`
+
+**Editor:** `obsidian_editor_state` (mode, cursor, doc hash), `obsidian_editor_set`, `obsidian_editor_replace` (hash-guarded against concurrent edits), `obsidian_editor_widgets` (query rendered decorations); plus `obsidian_snapshot scope=editor` and `obsidian_element_screenshot` (clipped PNG with a geometry metrics block) in the UI toolset
 
 **UI:** `obsidian_snapshot` (scoped to a leaf, modal, or settings tab), plus `browser_snapshot`, `browser_click`, `browser_type`, `browser_press_key`, `browser_take_screenshot`, … — **27** tools proxied from `@playwright/mcp` (plus a few Obsidian-native helpers like `browser_reload`), with the destructive ones (`browser_close`, `browser_navigate`, `browser_resize`, file upload, raw code execution) deliberately withheld because they would close, navigate away from, or resize the user's real Obsidian window. `browser_take_screenshot` captures web contents; `obsidian_screenshot` (devtools toolset) captures the OS window via Electron `capturePage()`.
 
@@ -380,7 +389,7 @@ Browser tools are **snapshot-first**: call `browser_snapshot` (or the cheaper sc
 Also:
 
 - **Every CLI call fails with `Cannot find module 'electron'`** — something set `ELECTRON_RUN_AS_NODE=1` in the environment knapper inherited, which makes the Obsidian binary start as a bare Node process. Electron-based MCP clients (Claude Code, Cursor, VS Code, Claude Desktop) set it for their child processes. knapper strips it before spawning, so if you still see this, a wrapper script or shell profile is re-adding it downstream.
-- **Missing `browser_*` tools** — most of the UI toolset is proxied from `@playwright/mcp` and can only be enumerated while Obsidian is reachable. If the server starts first, your client caches a short tool list. Start Obsidian (or run `obsidian_launch`), then reconnect the MCP server.
+- **Unavailable `browser_*` calls** — browser tools stay visible when Obsidian is offline. The call returns `CDP_PORT_CLOSED` with `obsidian_launch` remediation. Cold-start Obsidian with the debug port, then retry the same tool.
 - **`VAULT_NOT_FOUND`** — vault name not in the `obsidian.json` registry.
 - **`SESSION_NOT_FOUND`** — `KNAP_SESSION` names a session that was closed, reaped, or never created. This is a hard error rather than a silent fallback to your real Obsidian: create a new session, or unset the variable. Note that the server reads it at startup, so unsetting it needs a reconnect.
 - **Stale UI refs** — `STALE_REF`; take a new `browser_snapshot`.

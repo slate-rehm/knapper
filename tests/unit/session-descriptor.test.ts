@@ -40,6 +40,7 @@ function descriptor(key: string): SessionDescriptor {
     key,
     createdAt: "2026-07-28T12:00:00.000Z",
     heartbeatAt: "2026-07-28T12:00:00.000Z",
+    readiness: { phase: "ready", readyAt: "2026-07-28T12:00:00.000Z" },
     origin: { cwd: "/home/bear/wt/feature", branch: "dev", label: "feature" },
     instance: {
       userDataDir: join(home, "sessions", key, "userdata"),
@@ -91,6 +92,13 @@ describe("assertSessionKey", () => {
 
   it("still reports a well-formed but absent key as simply missing", async () => {
     expect(await readDescriptor("gone-a3f19c22", env)).toBeUndefined();
+  });
+
+  it("rejects a descriptor from a newer unsupported schema", async () => {
+    const key = "future-a3f19c22";
+    const value = { ...descriptor(key), schema: SESSION_SCHEMA_VERSION + 1 };
+    await writeDescriptor(value, env);
+    expect(await readDescriptor(key, env)).toBeUndefined();
   });
 });
 

@@ -11,7 +11,7 @@
  * other agent's work.
  */
 
-import { rm } from "node:fs/promises";
+import { access, rm, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import {
   cliIsolationFor,
@@ -21,13 +21,19 @@ import {
   sessionPaths,
   type CliIsolation,
 } from "../config.js";
-import { launchObsidian, quitObsidian } from "../connection/launch.js";
-import { isPidStillObsidian, type ProcessScope } from "../connection/health.js";
+import { launchObsidian, quitObsidian, readDevToolsPortFile } from "../connection/launch.js";
+import { probeCdp } from "../connection/cdp/discover.js";
+import {
+  findObsidianPids,
+  isPidStillObsidian,
+  readPidStartTime,
+  type ProcessScope,
+} from "../connection/health.js";
 import { readGlobalConfig, removeManagedVault } from "../connection/vaults.js";
 import { UobError } from "../util/errors.js";
 import { withFileLock } from "../util/filelock.js";
 import type { Logger } from "../util/logger.js";
-import { seedSessionProfile } from "./bootstrap.js";
+import { seedSessionProfile, trustDisposableVault } from "./bootstrap.js";
 import { linkPlugin, unlinkPluginIfPresent } from "./plugin-link.js";
 import { mintSessionKey } from "./key.js";
 import {
@@ -54,6 +60,8 @@ export interface CreateSessionOptions {
   now?: Date;
   env?: NodeJS.ProcessEnv;
 }
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Process scope for a session, so callers cannot accidentally build a wider one. */
 export function scopeOf(descriptor: SessionDescriptor): ProcessScope {
@@ -90,7 +98,7 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
 
   let seeded;
   let plugin: SessionDescriptor["plugin"];
-  let launched;
+  let provisional: SessionDescriptor | undefined;
   try {
     seeded = await seedSessionProfile({
       key,
@@ -108,10 +116,51 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
         opts.pluginSourceDir,
         opts.pluginId ?? undefined,
       );
-      plugin = { id: linked.pluginId, sourceDir: linked.sourceDir, linkPath: linked.linkPath };
+      plugin = {
+        id: linked.pluginId,
+        sourceDir: linked.sourceDir,
+        linkPath: linked.linkPath,
+        artifacts: linked.artifacts,
+        preEnabled: opts.adoptVault === undefined,
+      };
+      if (opts.adoptVault === undefined) {
+        await writeFile(
+          `${seeded.vault.path}/.obsidian/community-plugins.json`,
+          `${JSON.stringify([linked.pluginId], null, 2)}\n`,
+          "utf8",
+        );
+      }
     }
 
-    launched = await launchObsidian({
+    const spawnedAt = new Date();
+    provisional = {
+      schema: SESSION_SCHEMA_VERSION,
+      key,
+      createdAt: now.toISOString(),
+      heartbeatAt: now.toISOString(),
+      readiness: {
+        phase: "starting",
+        spawnedAt: spawnedAt.toISOString(),
+        requestedPort: opts.cdpPort ?? 0,
+      },
+      origin: {
+        cwd: opts.cwd ?? process.cwd(),
+        ...(opts.branch !== undefined ? { branch: opts.branch } : {}),
+        label,
+      },
+      instance: {
+        userDataDir: paths.userDataDir,
+        runtimeDir: paths.runtimeDir,
+        outputDir: paths.outputDir,
+        obsidianBin: opts.obsidianBin,
+      },
+      vault: seeded.vault,
+      ...(plugin !== undefined ? { plugin } : {}),
+      owner: { pid: process.pid, startedAt: now.toISOString() },
+    };
+    await writeDescriptor(provisional, env);
+
+    const launched = await launchObsidian({
       obsidianBin: opts.obsidianBin,
       userDataDir: paths.userDataDir,
       runtimeDir: paths.runtimeDir,
@@ -122,45 +171,195 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
     });
+    if (plugin?.preEnabled === true) {
+      try {
+        await trustDisposableVault(launched.cdpUrl, seeded.vault.id);
+      } catch (error) {
+        plugin = { ...plugin, preEnabled: false };
+        provisional = { ...provisional, plugin };
+        opts.logger?.warn("could not grant plugin trust in disposable session", {
+          session: key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    const descriptor: SessionDescriptor = {
+      ...provisional,
+      readiness: { phase: "ready", readyAt: new Date().toISOString() },
+      instance: {
+        ...provisional.instance,
+        cdpPort: launched.port,
+        cdpUrl: launched.cdpUrl,
+        ...(launched.browserId !== undefined ? { browserId: launched.browserId } : {}),
+        ...(launched.pid !== undefined ? { pid: launched.pid } : {}),
+        ...(launched.pidStartTime !== undefined ? { pidStartTime: launched.pidStartTime } : {}),
+      },
+    };
+    await writeDescriptor(descriptor, env);
+    return descriptor;
   } catch (e) {
+    if (provisional !== undefined && e instanceof UobError && e.code === "TIMEOUT") {
+      const pids = await findObsidianPids(scopeOf(provisional));
+      const pid = pids[0];
+      if (pid !== undefined) {
+        const pidStartTime = await readPidStartTime(pid);
+        const starting: SessionDescriptor = {
+          ...provisional,
+          heartbeatAt: new Date().toISOString(),
+          instance: {
+            ...provisional.instance,
+            pid,
+            ...(pidStartTime !== undefined ? { pidStartTime } : {}),
+          },
+        };
+        await writeDescriptor(starting, env);
+        return starting;
+      }
+      const failed: SessionDescriptor = {
+        ...provisional,
+        readiness: { phase: "failed", failedAt: new Date().toISOString(), reason: e.message },
+      };
+      await writeDescriptor(failed, env);
+      throw new UobError("SESSION_NOT_RUNNING", `Session ${key} failed to start.`, {
+        remediation: "Inspect it with obsidian_list_sessions, then restart or close the session.",
+        fixedBy: "obsidian_list_sessions",
+        details: { session: key, diagnostics: await sessionDiagnostics(failed) },
+        cause: e,
+      });
+    }
     // Leave nothing half-provisioned: a session that failed anywhere before its
     // descriptor exists would otherwise sit on disk forever, since the reaper's
     // "no live process" rule alone cannot tell it apart from one merely stopped.
     // Only the session's own root is removed — a vault the caller pointed outside
     // it is not ours to clean up, and this path runs on the argument-validation
     // failures where it is most likely to be someone's real directory.
-    await rm(paths.root, { recursive: true, force: true }).catch(() => undefined);
+    if (provisional === undefined) {
+      await rm(paths.root, { recursive: true, force: true }).catch(() => undefined);
+    } else {
+      await writeDescriptor(
+        {
+          ...provisional,
+          readiness: {
+            phase: "failed",
+            failedAt: new Date().toISOString(),
+            reason: e instanceof Error ? e.message : String(e),
+          },
+        },
+        env,
+      );
+    }
     throw e;
   }
+}
 
-  const descriptor: SessionDescriptor = {
-    schema: SESSION_SCHEMA_VERSION,
-    key,
-    createdAt: now.toISOString(),
-    heartbeatAt: now.toISOString(),
-    origin: {
-      cwd: opts.cwd ?? process.cwd(),
-      ...(opts.branch !== undefined ? { branch: opts.branch } : {}),
-      label,
-    },
-    instance: {
-      userDataDir: paths.userDataDir,
-      runtimeDir: paths.runtimeDir,
-      outputDir: paths.outputDir,
-      cdpPort: launched.port,
-      cdpUrl: launched.cdpUrl,
-      ...(launched.browserId !== undefined ? { browserId: launched.browserId } : {}),
-      obsidianBin: opts.obsidianBin,
-      ...(launched.pid !== undefined ? { pid: launched.pid } : {}),
-      ...(launched.pidStartTime !== undefined ? { pidStartTime: launched.pidStartTime } : {}),
-    },
-    vault: seeded.vault,
-    ...(plugin !== undefined ? { plugin } : {}),
-    owner: { pid: process.pid, startedAt: now.toISOString() },
+export async function waitSession(
+  key: string,
+  opts: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
+): Promise<SessionDescriptor> {
+  const env = opts.env ?? process.env;
+  let descriptor = await requireDescriptor(key, env);
+  if (descriptor.readiness.phase === "ready") return descriptor;
+  if (descriptor.readiness.phase === "failed") {
+    throw new UobError("SESSION_NOT_RUNNING", `Session ${key} failed to start.`, {
+      remediation: "Restart the session or close it and create a new one.",
+      details: { session: key, reason: descriptor.readiness.reason },
+    });
+  }
+
+  const deadline = Date.now() + (opts.timeoutMs ?? 30_000);
+  let starting = descriptor.readiness;
+  const spawnedAt = Date.parse(starting.spawnedAt);
+  while (Date.now() < deadline) {
+    const pids = await findObsidianPids(scopeOf(descriptor));
+    if (pids.length === 0) {
+      descriptor = {
+        ...descriptor,
+        readiness: {
+          phase: "failed",
+          failedAt: new Date().toISOString(),
+          reason: "The scoped Obsidian process exited before CDP became ready.",
+        },
+      };
+      await writeDescriptor(descriptor, env);
+      throw new UobError("SESSION_NOT_RUNNING", `Session ${key} is not running.`, {
+        remediation: "Restart the session or close it and create a new one.",
+      });
+    }
+
+    const portFile = await readDevToolsPortFile(descriptor.instance.userDataDir);
+    const fresh = portFile !== undefined && portFile.mtimeMs >= spawnedAt;
+    const port = fresh
+      ? portFile.port
+      : starting.requestedPort !== 0
+        ? starting.requestedPort
+        : undefined;
+    if (port !== undefined && (await probeCdp(`http://127.0.0.1:${port}`)) !== undefined) {
+      const pid = pids[0];
+      descriptor = {
+        ...descriptor,
+        heartbeatAt: new Date().toISOString(),
+        readiness: { phase: "ready", readyAt: new Date().toISOString() },
+        instance: {
+          ...descriptor.instance,
+          cdpPort: port,
+          cdpUrl: `http://127.0.0.1:${port}`,
+          ...(portFile?.browserId ? { browserId: portFile.browserId } : {}),
+          ...(pid !== undefined ? { pid, pidStartTime: await readPidStartTime(pid) } : {}),
+        },
+      };
+      await writeDescriptor(descriptor, env);
+      return descriptor;
+    }
+    starting = { ...starting, lastProbeAt: new Date().toISOString() };
+    descriptor = {
+      ...descriptor,
+      readiness: starting,
+    };
+    await writeDescriptor(descriptor, env);
+    await sleep(400);
+  }
+
+  throw new UobError("TIMEOUT", `Session ${key} is still starting.`, {
+    remediation: "Call obsidian_wait_session again, or restart the session if startup is stuck.",
+    fixedBy: "obsidian_wait_session",
+    details: await sessionDiagnostics(descriptor),
+  });
+}
+
+export async function sessionDiagnostics(
+  descriptor: SessionDescriptor,
+): Promise<Record<string, unknown>> {
+  const portFile = await readDevToolsPortFile(descriptor.instance.userDataDir);
+  const socket = cliSocketPathFor(descriptor.instance.runtimeDir);
+  const pids = await findObsidianPids(scopeOf(descriptor));
+  const cdpUrl =
+    descriptor.instance.cdpUrl ??
+    (portFile !== undefined ? `http://127.0.0.1:${portFile.port}` : undefined);
+  return {
+    phase: descriptor.readiness.phase,
+    processIds: pids,
+    processStartTime: pids[0] !== undefined ? await readPidStartTime(pids[0]) : undefined,
+    requestedPort:
+      descriptor.readiness.phase === "starting" ? descriptor.readiness.requestedPort : undefined,
+    devToolsPortFilePresent: portFile !== undefined,
+    devToolsPortFileMtime: portFile?.mtimeMs,
+    devToolsPort: portFile?.port,
+    browserId: portFile?.browserId,
+    cdpReachable: cdpUrl !== undefined && (await probeCdp(cdpUrl)) !== undefined,
+    cliSocket: socket,
+    cliSocketPresent: await access(socket).then(
+      () => true,
+      () => false,
+    ),
+    userDataDir: descriptor.instance.userDataDir,
+    runtimeDir: descriptor.instance.runtimeDir,
+    vaultPath: descriptor.vault?.path,
+    elapsedMs:
+      descriptor.readiness.phase === "starting"
+        ? Date.now() - Date.parse(descriptor.readiness.spawnedAt)
+        : undefined,
   };
-
-  await writeDescriptor(descriptor, env);
-  return descriptor;
 }
 
 export interface RestartSessionResult {
@@ -185,20 +384,64 @@ export async function restartSession(
 
   const quit = await quitObsidian(scope, opts.timeoutMs ?? 15_000);
 
-  const launched = await launchObsidian({
-    obsidianBin: descriptor.instance.obsidianBin,
-    userDataDir: descriptor.instance.userDataDir,
-    ...(descriptor.instance.runtimeDir !== undefined
-      ? { runtimeDir: descriptor.instance.runtimeDir }
-      : {}),
-    port: 0,
-    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
-  });
+  const starting: SessionDescriptor = {
+    ...descriptor,
+    heartbeatAt: new Date().toISOString(),
+    readiness: { phase: "starting", spawnedAt: new Date().toISOString(), requestedPort: 0 },
+    instance: {
+      ...descriptor.instance,
+      cdpPort: undefined,
+      cdpUrl: undefined,
+      browserId: undefined,
+      pid: undefined,
+      pidStartTime: undefined,
+    },
+  };
+  await writeDescriptor(starting, env);
+
+  let launched;
+  try {
+    launched = await launchObsidian({
+      obsidianBin: descriptor.instance.obsidianBin,
+      userDataDir: descriptor.instance.userDataDir,
+      ...(descriptor.instance.runtimeDir !== undefined
+        ? { runtimeDir: descriptor.instance.runtimeDir }
+        : {}),
+      port: 0,
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
+    });
+  } catch (error) {
+    if (error instanceof UobError && error.code === "TIMEOUT") {
+      const pids = await findObsidianPids(scope);
+      const pid = pids[0];
+      if (pid !== undefined) {
+        const pending = {
+          ...starting,
+          instance: { ...starting.instance, pid, pidStartTime: await readPidStartTime(pid) },
+        };
+        await writeDescriptor(pending, env);
+        return { descriptor: pending, quit };
+      }
+      await writeDescriptor(
+        {
+          ...starting,
+          readiness: {
+            phase: "failed",
+            failedAt: new Date().toISOString(),
+            reason: error.message,
+          },
+        },
+        env,
+      );
+    }
+    throw error;
+  }
 
   const next: SessionDescriptor = {
     ...descriptor,
     heartbeatAt: new Date().toISOString(),
+    readiness: { phase: "ready", readyAt: new Date().toISOString() },
     instance: {
       ...descriptor.instance,
       cdpPort: launched.port,

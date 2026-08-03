@@ -13,6 +13,7 @@ export const TOOLSETS = [
   "ui",
   "telemetry",
   "plugin-dev",
+  "editor",
   "vault",
   "devtools",
   "authoring",
@@ -22,7 +23,9 @@ export type Toolset = (typeof TOOLSETS)[number];
 
 /**
  * The plugin-development surface. Vault CRUD is opt-in because other Obsidian MCP
- * servers already cover it well, and `devtools`/`authoring` are niche.
+ * servers already cover it well, and `devtools`/`authoring` are niche. `editor` is
+ * default-on: plugin work is mostly editor work, and without it agents fall back
+ * to raw obsidian_eval for every cursor read.
  */
 export const DEFAULT_TOOLSETS: readonly Toolset[] = [
   "core",
@@ -30,6 +33,7 @@ export const DEFAULT_TOOLSETS: readonly Toolset[] = [
   "ui",
   "telemetry",
   "plugin-dev",
+  "editor",
 ];
 
 export const TOOLSET_DESCRIPTIONS: Record<Toolset, string> = {
@@ -40,6 +44,9 @@ export const TOOLSET_DESCRIPTIONS: Record<Toolset, string> = {
   ui: "Browser automation over CDP (proxied from @playwright/mcp) plus Obsidian-scoped snapshots.",
   telemetry: "Console, error, and network capture with cursor-based tailing.",
   "plugin-dev": "Plugin reload, manifest and settings inspection, and dev-cycle composites.",
+  editor:
+    "Active-editor state (mode, cursor, doc hash), cursor and selection control, hash-guarded " +
+    "text edits, and widget/decoration queries.",
   vault: "File and note CRUD, search, tabs, and graph queries (backlinks, orphans, aliases).",
   devtools: "Raw CDP passthrough, DOM/CSS inspection, OS-window screenshots, and mobile emulation.",
   authoring: "Themes, snippets, frontmatter properties, tags, tasks, daily notes, and templates.",

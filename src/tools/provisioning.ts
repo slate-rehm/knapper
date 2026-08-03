@@ -4,10 +4,11 @@
 
 import { z } from "zod";
 import { lstat, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ServerContext } from "../server.js";
 import { TOOLSET_DESCRIPTIONS, type Toolset } from "../toolsets.js";
-import { launchObsidian } from "../connection/launch.js";
+import { launchObsidian, type LaunchResult } from "../connection/launch.js";
+import { findDownloadedAsarVersion, versionDrift } from "../obsidian/version-drift.js";
 import { isObsidianRunning } from "../connection/health.js";
 import {
   createManagedVault,
@@ -79,6 +80,36 @@ async function vaultAutomationState(
   return { restrictMode, communityPlugins, devSymlinks };
 }
 
+/**
+ * Launch (or relaunch) this server's Obsidian with CDP and re-point the router.
+ *
+ * Shared by obsidian_launch and obsidian_restart so the retarget-after-launch
+ * invariant lives in one place: with `--remote-debugging-port=0` the real port is
+ * only known after startup, and a router still probing the configured port would
+ * leave every CDP tool failing against a healthy app.
+ */
+export async function launchWithCdp(
+  ctx: ServerContext,
+  opts: { port?: number; restart?: boolean; force?: boolean } = {},
+): Promise<LaunchResult> {
+  const { config, router } = ctx;
+  const result = await launchObsidian({
+    obsidianBin: config.obsidianBin,
+    port: opts.port ?? config.cdpPort,
+    restart: opts.restart === true,
+    force: opts.force === true,
+    logger: ctx.logger,
+    // Under a session this launches (and quits) only that session's instance.
+    // Unbound, both stay undefined and this drives the user's own Obsidian
+    // exactly as it did before sessions existed.
+    ...(config.sessionId !== undefined ? { userDataDir: config.userDataDir } : {}),
+    ...(config.runtimeDir !== undefined ? { runtimeDir: config.runtimeDir } : {}),
+  });
+  if (result.cdpUrl !== config.cdpUrl) await router.retarget(result.cdpUrl);
+  await router.refreshAvailability(true);
+  return result;
+}
+
 export function registerProvisioningTools(ctx: ServerContext): void {
   const { registry, router, config } = ctx;
 
@@ -119,9 +150,9 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       }
 
       const toolsets: Record<string, { enabled: boolean; tools: string[] }> = {};
-      const byToolset = registry.byToolset();
+      const byToolset = registry.groupAllByToolset();
       for (const name of Object.keys(TOOLSET_DESCRIPTIONS) as Toolset[]) {
-        const enabled = config.enabledToolsets.has(name);
+        const enabled = registry.isToolsetEnabled(name);
         toolsets[name] = { enabled, tools: byToolset[name] ?? [] };
       }
 
@@ -130,6 +161,13 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         vaultState = await vaultAutomationState(ctx, targetVault, config.obsidianConfigPath);
       }
 
+      // The in-app updater drops `obsidian-<v>.asar` next to obsidian.json and
+      // only loads it on the next launch, so the downloaded and running versions
+      // can drift for days. A report line, not a precondition: the app works
+      // either way, but an agent wondering why a fix "is not live" should see it.
+      const downloadedAsar = await findDownloadedAsarVersion(dirname(config.obsidianConfigPath));
+      const drift = versionDrift(version, downloadedAsar);
+
       const lines = [
         `Obsidian running: ${health.running ? "yes" : "no"}`,
         `CLI enabled (config): ${health.cliEnabled ? "yes" : "no"}`,
@@ -137,6 +175,12 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         `CDP reachable: ${health.cdpReachable ? "yes" : "no"} (${health.cdpUrl})`,
         `Binary: ${config.obsidianBin}`,
         `Version: ${version}`,
+        ...(drift !== undefined
+          ? [
+              `Update pending: ${drift.installed} downloaded, ${drift.running} running — ` +
+                "cold-restart Obsidian (obsidian_restart) to load it.",
+            ]
+          : []),
         `Config: ${health.configPath}`,
       ];
 
@@ -221,6 +265,8 @@ export function registerProvisioningTools(ctx: ServerContext): void {
           availability,
           binary: config.obsidianBin,
           version,
+          versionDrift: drift ?? null,
+          downloadedAsarVersion: downloadedAsar ?? null,
           argvCorruption: health.argvCorruption ?? null,
           vaults: vaultStatus.map((v) => ({
             ...v,
@@ -263,26 +309,11 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       const portArg = args.port as number | undefined;
-      const port = portArg ?? config.cdpPort;
-      const result = await launchObsidian({
-        obsidianBin: config.obsidianBin,
-        port,
+      const result = await launchWithCdp(ctx, {
+        ...(portArg !== undefined ? { port: portArg } : {}),
         restart: args.restart === true,
         force: args.force === true,
-        logger: ctx.logger,
-        // Under a session this launches (and quits) only that session's instance.
-        // Unbound, both stay undefined and this drives the user's own Obsidian
-        // exactly as it did before sessions existed.
-        ...(config.sessionId !== undefined ? { userDataDir: config.userDataDir } : {}),
-        ...(config.runtimeDir !== undefined ? { runtimeDir: config.runtimeDir } : {}),
       });
-
-      // With port 0 the port is only known now, and the router baked the old one
-      // into its PlaywrightSession at construction. Warning about the mismatch was
-      // survivable with a fixed 9222; under a session it would leave every CDP
-      // tool probing a port nothing listens on.
-      if (result.cdpUrl !== config.cdpUrl) await router.retarget(result.cdpUrl);
-      await router.refreshAvailability(true);
 
       return {
         text: [
@@ -575,13 +606,16 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     name: "obsidian_link_plugin",
     toolset: "core",
     description:
-      "Symlink a plugin build directory into `<vault>/.obsidian/plugins/<id>` for a dev loop. " +
-      "Source must contain manifest.json (id read from it when omitted). Refuses to replace a real " +
+      "Symlink a loadable plugin directory into `<vault>/.obsidian/plugins/<id>` for a dev loop. " +
+      "Source must contain manifest.json and main.js. Refuses to replace a real " +
       "directory — only an existing symlink may be replaced. Use unlink=true to remove the symlink.",
     inputSchema: {
       vault: z.string().describe("Registered vault name"),
-      sourceDir: z.string().describe("Absolute path to the plugin project root"),
-      pluginId: z.string().optional().describe("Plugin id (default: read from manifest.json)"),
+      sourceDir: z.string().describe("Absolute path to a loadable plugin directory"),
+      pluginId: z
+        .string()
+        .optional()
+        .describe("Expected plugin id. When set, it must match manifest.json."),
       unlink: z.boolean().optional().describe("Remove the symlink instead of creating one"),
     },
     // Replaces an existing symlink at the target path, and unlink=true removes one.

@@ -367,7 +367,13 @@ export class PlaywrightSession {
     if (!(await this.hasApp(page))) throw appUnavailable();
 
     try {
-      return (await page.evaluate(`(() => { ${wrapExpression(expression)} })()`)) as T;
+      // Async wrapper so bare top-level `await` works: Playwright unwraps a
+      // returned Promise, so synchronous code behaves exactly as before and async
+      // code gets awaited instead of dying on a syntax error. The CLI transport
+      // cannot get the same treatment — its multi-line path runs the code as a
+      // synchronous Function body (see encodeEvalSource), and whether Obsidian's
+      // own eval command awaits a returned Promise is not verifiable from here.
+      return (await page.evaluate(`(async () => { ${wrapExpression(expression)} })()`)) as T;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       throw new UobError("EVAL_FAILED", `Evaluation threw in the Obsidian renderer: ${message}`, {

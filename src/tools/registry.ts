@@ -14,7 +14,7 @@
  * is absent — an unannotated tool is assumed to touch the UI.
  */
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodRawShape } from "zod";
 import type { Capability } from "../capabilities.js";
 import type { Toolset } from "../toolsets.js";
@@ -58,6 +58,8 @@ export interface ToolDefinition<S extends ZodRawShape = ZodRawShape> {
   /** JSON Schema for proxied tools (converted to Zod at registration). */
   jsonInputSchema?: Record<string, unknown>;
   annotations?: ToolAnnotations;
+  /** Keep this control-plane tool enabled even when its toolset is disabled. */
+  alwaysEnabled?: boolean;
   /**
    * When true, the tool already appends a telemetry summary (e.g. composites that
    * bracket with a mark). Skip the registry-level mutator suffix.
@@ -139,10 +141,11 @@ function withTelemetrySuffix(
 
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition>();
+  private readonly handles = new Map<string, RegisteredTool>();
   private readonly lock: CallLock;
 
   constructor(
-    private readonly enabledToolsets: Set<Toolset>,
+    enabledToolsets: Set<Toolset>,
     private readonly logger: Logger,
     /**
      * Read-only calls allowed to overlap.
@@ -155,18 +158,14 @@ export class ToolRegistry {
     maxConcurrency: number,
     private readonly telemetry?: TelemetryStore,
   ) {
+    this.enabledToolsets = new Set(enabledToolsets);
     this.lock = new CallLock({ maxShared: maxConcurrency });
   }
 
-  /** Register a tool, or skip it when its toolset is disabled. */
+  private readonly enabledToolsets: Set<Toolset>;
+
+  /** Retain every definition so its toolset can be enabled at runtime. */
   add<S extends ZodRawShape>(def: ToolDefinition<S>): void {
-    if (!this.enabledToolsets.has(def.toolset)) {
-      this.logger.debug(`skipping tool (toolset disabled)`, {
-        tool: def.name,
-        toolset: def.toolset,
-      });
-      return;
-    }
     if (this.definitions.has(def.name)) {
       throw new Error(`Duplicate tool registration: ${def.name}`);
     }
@@ -178,7 +177,10 @@ export class ToolRegistry {
   }
 
   names(): string[] {
-    return [...this.definitions.keys()].sort();
+    return [...this.definitions.values()]
+      .filter((def) => this.isDefinitionEnabled(def))
+      .map((def) => def.name)
+      .sort();
   }
 
   get(name: string): ToolDefinition | undefined {
@@ -189,10 +191,58 @@ export class ToolRegistry {
   byToolset(): Record<string, string[]> {
     const out: Record<string, string[]> = {};
     for (const def of this.definitions.values()) {
+      if (!this.isDefinitionEnabled(def)) continue;
       (out[def.toolset] ??= []).push(def.name);
     }
     for (const list of Object.values(out)) list.sort();
     return out;
+  }
+
+  /** Current runtime toolset state. */
+  toolsetState(): { enabled: Toolset[]; disabled: Toolset[] } {
+    const enabled: Toolset[] = [];
+    const disabled: Toolset[] = [];
+    for (const toolset of Object.keys(this.groupAllByToolset()) as Toolset[]) {
+      (this.enabledToolsets.has(toolset) ? enabled : disabled).push(toolset);
+    }
+    enabled.sort();
+    disabled.sort();
+    return { enabled, disabled };
+  }
+
+  isToolsetEnabled(toolset: Toolset): boolean {
+    return this.enabledToolsets.has(toolset);
+  }
+
+  /** Enable or disable one toolset through the SDK registration handles. */
+  setToolsetEnabled(toolset: Toolset, enabled: boolean): string[] {
+    if (enabled) this.enabledToolsets.add(toolset);
+    else this.enabledToolsets.delete(toolset);
+
+    const changed: string[] = [];
+    for (const def of this.definitions.values()) {
+      if (def.toolset !== toolset || def.alwaysEnabled === true) continue;
+      const handle = this.handles.get(def.name);
+      if (!handle || handle.enabled === enabled) continue;
+      if (enabled) handle.enable();
+      else handle.disable();
+      changed.push(def.name);
+    }
+    return changed.sort();
+  }
+
+  /** All retained definitions grouped by toolset, including disabled tools. */
+  groupAllByToolset(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    for (const def of this.definitions.values()) {
+      (out[def.toolset] ??= []).push(def.name);
+    }
+    for (const list of Object.values(out)) list.sort();
+    return out;
+  }
+
+  private isDefinitionEnabled(def: ToolDefinition): boolean {
+    return def.alwaysEnabled === true || this.enabledToolsets.has(def.toolset);
   }
 
   /**
@@ -206,7 +256,7 @@ export class ToolRegistry {
       else if (def.inputSchema) config.inputSchema = def.inputSchema;
       if (def.annotations) config.annotations = def.annotations;
 
-      server.registerTool(
+      const handle = server.registerTool(
         def.name,
         config as never,
         (async (args: Record<string, unknown>) => {
@@ -245,6 +295,8 @@ export class ToolRegistry {
           }
         }) as never,
       );
+      this.handles.set(def.name, handle);
+      if (!this.isDefinitionEnabled(def)) handle.disable();
     }
     this.logger.info(`registered ${this.definitions.size} tools`, this.byToolset());
   }

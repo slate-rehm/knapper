@@ -13,6 +13,7 @@ import { registerCoreTools } from "./tools/core.js";
 import { registerProvisioningTools } from "./tools/provisioning.js";
 import { registerSessionTools } from "./tools/session.js";
 import { registerObsidianTools } from "./tools/obsidian.js";
+import { registerEditorTools } from "./tools/editor.js";
 import { registerVaultTools } from "./tools/vault.js";
 import { registerAuthoringTools } from "./tools/authoring.js";
 import { registerDevtoolsTools } from "./tools/devtools.js";
@@ -71,6 +72,8 @@ GETTING STARTED: run **obsidian_doctor** first. It reports the four precondition
 
 SAFETY: this drives the user's real Obsidian, and tools annotated destructiveHint can delete notes or run arbitrary JavaScript. For anything experimental, make a throwaway vault with **obsidian_create_vault** rather than working in the user's own. obsidian_remove_vault only ever deletes vaults knapper itself created.
 
+TASK INDEX: diagnose setup with obsidian_doctor; inspect transports with obsidian_capabilities; change the visible surface with obsidian_toolsets; reload a plugin with obsidian_dev_cycle; inspect an editor with obsidian_editor_state; inspect UI with obsidian_snapshot; capture one element with obsidian_element_screenshot; read new errors with obsidian_logs.
+
 CONVENTIONS: use obsidian_* tools for app, vault, and plugin state; browser_* tools for real input. Browser tools are snapshot-first — call browser_snapshot (or the cheaper obsidian_snapshot), then pass a returned ref as "target"; a CSS selector also works. Prefer obsidian_command over clicking through menus. Read console output with obsidian_logs, passing the previous call's cursor as "since" to see only what is new.`;
 
 export async function createServerContext(config: Config): Promise<ServerContext> {
@@ -112,6 +115,7 @@ export async function createServerContext(config: Config): Promise<ServerContext
   registerProvisioningTools(ctx);
   registerSessionTools(ctx);
   registerObsidianTools(ctx);
+  registerEditorTools(ctx);
   registerVaultTools(ctx);
   registerAuthoringTools(ctx);
   registerDevtoolsTools(ctx);

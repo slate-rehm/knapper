@@ -36,6 +36,16 @@ describe("parseToolsets", () => {
 });
 
 describe("loadConfig", () => {
+  it("parses the command transport preference", () => {
+    expect(loadConfig({}, {}).commandTransport).toBe("auto");
+    expect(loadConfig({}, { KNAP_COMMAND_TRANSPORT: "cli" }).commandTransport).toBe("cli");
+    expect(loadConfig({}, { KNAP_COMMAND_TRANSPORT: "playwright" }).commandTransport).toBe(
+      "playwright",
+    );
+    expect(() => loadConfig({}, { KNAP_COMMAND_TRANSPORT: "invalid" })).toThrow(
+      /KNAP_COMMAND_TRANSPORT/,
+    );
+  });
   it("uses defaults with an empty environment", () => {
     const config = loadConfig({}, {});
     expect(config.cdpUrl).toBe(DEFAULT_CDP_URL);

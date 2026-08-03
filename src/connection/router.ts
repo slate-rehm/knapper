@@ -74,6 +74,8 @@ export class CapabilityRouter {
   /** Which layer currently owns the Electron debugger, if any. */
   private debuggerHolder?: Layer;
   private disposed = false;
+  private cliDegradedUntil = 0;
+  private lastCliTimeoutAt?: number;
 
   constructor(
     private readonly config: Config,
@@ -162,7 +164,14 @@ export class CapabilityRouter {
   /** Resolve which layer will serve a capability, or throw explaining why none can. */
   async resolve(capability: Capability): Promise<Layer> {
     const availability = await this.refreshAvailability();
-    const preference = CAPABILITY_PREFERENCE[capability];
+    let preference = CAPABILITY_PREFERENCE[capability];
+    if (capability === "evaluate" || capability === "cliCommand") {
+      if (this.config.commandTransport === "cli") preference = ["cli"];
+      if (this.config.commandTransport === "playwright") preference = ["playwright"];
+      if (this.config.commandTransport === "auto" && Date.now() < this.cliDegradedUntil) {
+        preference = ["playwright", "cli"];
+      }
+    }
 
     for (const layer of preference) {
       if (!availability[layer]) continue;
@@ -176,6 +185,43 @@ export class CapabilityRouter {
     }
 
     throw this.explainUnavailable(capability, preference, availability);
+  }
+
+  get commandTransportStatus(): Record<string, unknown> {
+    const degraded = Date.now() < this.cliDegradedUntil;
+    return {
+      mode: this.config.commandTransport,
+      selected:
+        this.config.commandTransport === "playwright" ||
+        (this.config.commandTransport === "auto" && degraded)
+          ? "playwright"
+          : "cli",
+      ...(degraded ? { cliDegradedUntil: new Date(this.cliDegradedUntil).toISOString() } : {}),
+      ...(this.lastCliTimeoutAt !== undefined
+        ? { lastCliTimeoutAt: new Date(this.lastCliTimeoutAt).toISOString() }
+        : {}),
+    };
+  }
+
+  private async nativeCliCall<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      const result = await call();
+      if (this.config.commandTransport === "auto") this.cliDegradedUntil = 0;
+      return result;
+    } catch (error) {
+      if (
+        this.config.commandTransport === "auto" &&
+        error instanceof UobError &&
+        error.code === "TIMEOUT"
+      ) {
+        this.lastCliTimeoutAt = Date.now();
+        this.cliDegradedUntil = this.lastCliTimeoutAt + 30_000;
+        this.logger.warn("native CLI timed out; later commands will prefer Playwright", {
+          degradedUntil: new Date(this.cliDegradedUntil).toISOString(),
+        });
+      }
+      throw error;
+    }
   }
 
   /**
@@ -217,7 +263,7 @@ export class CapabilityRouter {
       this.claimDebugger("playwright");
       return { value: await this.playwright.evaluate<T>(code, vault.name), layer };
     }
-    const stdout = await this.cli.evaluate(code, vault.name);
+    const stdout = await this.nativeCliCall(() => this.cli.evaluate(code, vault.name));
     const { parseCliJson } = await import("../util/serialize.js");
     const parsed = parseCliJson<T>(stdout);
     return { value: (parsed ?? (stdout.trim() as unknown)) as T, layer };
@@ -241,9 +287,8 @@ export class CapabilityRouter {
     // Use wrapExpression so IIFEs and bare expressions keep their return values —
     // a naive `{ ${code} }` body discards an IIFE result and yields `(no output)`.
     const { parseCliJson, wrapExpression } = await import("../util/serialize.js");
-    const stdout = await this.cli.evaluate(
-      `JSON.stringify((() => { ${wrapExpression(code)} })())`,
-      vault.name,
+    const stdout = await this.nativeCliCall(() =>
+      this.cli.evaluate(`JSON.stringify((() => { ${wrapExpression(code)} })())`, vault.name),
     );
     const parsed = parseCliJson<T>(stdout);
     if (parsed === undefined) {
@@ -277,7 +322,7 @@ export class CapabilityRouter {
       // These answer questions about the installation rather than about notes, and
       // `version` must work before anything is authorized — so they never reach
       // the renderer route, which needs a fenced window to evaluate in.
-      return this.cli.run(command);
+      return this.nativeCliCall(() => this.cli.run(command));
     }
     const vault = await this.fence.resolve(overrides.vault);
 
@@ -292,7 +337,7 @@ export class CapabilityRouter {
       return stdout;
     }
 
-    return this.cli.run(command, { vault: vault.name });
+    return this.nativeCliCall(() => this.cli.run(command, { vault: vault.name }));
   }
 
   /** The vault a call will target, or a typed refusal. */
