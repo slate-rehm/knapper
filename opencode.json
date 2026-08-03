@@ -3,17 +3,7 @@
   "formatter": {
     "oxfmt": {
       "command": ["npm", "exec", "--", "oxfmt", "--write", "$FILE"],
-      "extensions": [
-        ".cjs",
-        ".css",
-        ".js",
-        ".jsx",
-        ".json",
-        ".jsonc",
-        ".mjs",
-        ".ts",
-        ".tsx"
-      ]
+      "extensions": [".cjs", ".css", ".js", ".jsx", ".json", ".jsonc", ".mjs", ".ts", ".tsx"]
     }
   }
 }
