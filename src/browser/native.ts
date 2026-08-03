@@ -72,6 +72,22 @@ export async function checkTarget(
   return `Checked ${target}.`;
 }
 
+/** Click a snapshot ref or selector with native Playwright actionability checks. */
+export async function clickTarget(
+  router: CapabilityRouter,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const target = args.target;
+  if (typeof target !== "string" || target === "") {
+    throw new UobError("INVALID_ARGUMENT", "target is required (snapshot ref or CSS selector).");
+  }
+  const p = await page(router);
+  await router.focus.run(p, async () => {
+    await targetLocator(p, target).click({ timeout: 5000 });
+  });
+  return `Clicked ${target} through the native Playwright fallback.`;
+}
+
 export async function pressSequentially(
   router: CapabilityRouter,
   args: Record<string, unknown>,

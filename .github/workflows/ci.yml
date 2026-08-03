@@ -27,7 +27,7 @@ env:
 jobs:
   verify:
     name: verify (node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -65,7 +65,7 @@ jobs:
 
   package:
     name: package & install
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: verify
     steps:
       - uses: actions/checkout@v7

@@ -64,6 +64,7 @@ async function makeSession(
       key,
       createdAt: NOW.toISOString(),
       heartbeatAt: new Date(NOW.getTime() - (opts.heartbeatAgeMs ?? 0)).toISOString(),
+      readiness: { phase: "ready", readyAt: NOW.toISOString() },
       origin: { cwd: "/tmp/wt" },
       instance: {
         userDataDir: paths.userDataDir,

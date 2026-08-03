@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { seedSessionProfile } from "../../src/session/bootstrap.js";
+import { pluginTrustStorageKey, seedSessionProfile } from "../../src/session/bootstrap.js";
 import { writeManagedMarker } from "../../src/connection/vaults.js";
 import { sessionPaths } from "../../src/config.js";
 
@@ -19,6 +19,10 @@ let home: string;
 let env: NodeJS.ProcessEnv;
 const NOW = new Date("2026-07-28T12:00:00.000Z");
 const KEY = "seed-a3f19c22";
+
+it("uses Obsidian's per-vault plugin trust key", () => {
+  expect(pluginTrustStorageKey("abc123")).toBe("enable-plugin-abc123");
+});
 
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), "knap-seed-"));

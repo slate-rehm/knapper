@@ -9,16 +9,17 @@ set these in each client's MCP server `env` block, or in your shell profile.
 
 ## Connection
 
-| Variable                | Flag             | Default                 | Description                                                          |
-| ----------------------- | ---------------- | ----------------------- | -------------------------------------------------------------------- |
-| `OBSIDIAN_CDP_URL`      | `--cdp-url`      | `http://127.0.0.1:9222` | CDP endpoint Playwright attaches to                                  |
-| `OBSIDIAN_BIN`          | `--obsidian-bin` | Platform default        | Path to the Obsidian executable                                      |
-| `OBSIDIAN_VAULT`        | `--vault`, `-v`  | (active vault)          | Pins CLI-scoped tools to one vault                                   |
-| `OBSIDIAN_TARGET_MATCH` | `--target-match` | (unset)                 | Case-insensitive substring; only attach to matching window title/URL |
-| `KNAP_CLI_TIMEOUT_MS`   | —                | `15000`                 | Timeout per Obsidian CLI invocation                                  |
-| `KNAP_RECONNECT_MS`     | —                | `2000`                  | Base backoff between CDP reconnect attempts                          |
-| `KNAP_SESSION`          | `--session`      | (unset)                 | Bind this server to an isolated session (see below)                  |
-| `KNAP_HOME`             | —                | `~/.knapper_mcp`        | Root for session profiles, scratch vaults, and screenshots           |
+| Variable                 | Flag             | Default                 | Description                                                          |
+| ------------------------ | ---------------- | ----------------------- | -------------------------------------------------------------------- |
+| `OBSIDIAN_CDP_URL`       | `--cdp-url`      | `http://127.0.0.1:9222` | CDP endpoint Playwright attaches to                                  |
+| `OBSIDIAN_BIN`           | `--obsidian-bin` | Platform default        | Path to the Obsidian executable                                      |
+| `OBSIDIAN_VAULT`         | `--vault`, `-v`  | (active vault)          | Pins CLI-scoped tools to one vault                                   |
+| `OBSIDIAN_TARGET_MATCH`  | `--target-match` | (unset)                 | Case-insensitive substring; only attach to matching window title/URL |
+| `KNAP_CLI_TIMEOUT_MS`    | —                | `15000`                 | Timeout per Obsidian CLI invocation                                  |
+| `KNAP_COMMAND_TRANSPORT` | —                | `auto`                  | Renderer command route: `auto`, `cli`, or `playwright`               |
+| `KNAP_RECONNECT_MS`      | —                | `2000`                  | Base backoff between CDP reconnect attempts                          |
+| `KNAP_SESSION`           | `--session`      | (unset)                 | Bind this server to an isolated session (see below)                  |
+| `KNAP_HOME`              | —                | `~/.knapper_mcp`        | Root for session profiles, scratch vaults, and screenshots           |
 
 `KNAP_SESSION` binds the server to one isolated Obsidian instance: its own profile,
 CLI socket, debug port, and scratch vault. Create one with `obsidian_create_session`,
@@ -44,16 +45,20 @@ untouched.
 
 ## Tools and output
 
-| Variable                 | Flag           | Default                        | Description                                          |
-| ------------------------ | -------------- | ------------------------------ | ---------------------------------------------------- |
-| `KNAP_TOOLSETS`          | `--toolsets`   | `core,ui,telemetry,plugin-dev` | Comma-separated toolsets, or `all`                   |
-| `KNAP_SCREENSHOT_DIR`    | `--output-dir` | `./.knapper`                   | Screenshots and snapshot artifacts, relative to cwd  |
-| `KNAP_TELEMETRY_BUFFER`  | —              | `2000`                         | Max retained telemetry events (ring buffer)          |
-| `KNAP_TELEMETRY_NETWORK` | —              | `false`                        | Also capture failed network requests                 |
-| `KNAP_MAX_CONCURRENCY`   | —              | `4`                            | Concurrent read-only tool calls; mutations serialize |
-| `KNAP_LOG_LEVEL`         | `--log-level`  | `info`                         | `debug`, `info`, `warn`, `error`, `silent` — stderr  |
+| Variable                 | Flag           | Default                                       | Description                                          |
+| ------------------------ | -------------- | --------------------------------------------- | ---------------------------------------------------- |
+| `KNAP_TOOLSETS`          | `--toolsets`   | `core,session,ui,telemetry,plugin-dev,editor` | Comma-separated toolsets, or `all`                   |
+| `KNAP_SCREENSHOT_DIR`    | `--output-dir` | `./.knapper`                                  | Screenshots and snapshot artifacts, relative to cwd  |
+| `KNAP_TELEMETRY_BUFFER`  | —              | `2000`                                        | Max retained telemetry events (ring buffer)          |
+| `KNAP_TELEMETRY_NETWORK` | —              | `false`                                       | Also capture failed network requests                 |
+| `KNAP_MAX_CONCURRENCY`   | —              | `4`                                           | Concurrent read-only tool calls; mutations serialize |
+| `KNAP_LOG_LEVEL`         | `--log-level`  | `info`                                        | `debug`, `info`, `warn`, `error`, `silent` — stderr  |
 
 `KNAP_MAX_CONCURRENCY` only raises the ceiling for tools marked `readOnlyHint`.
+
+`KNAP_TOOLSETS` sets the startup surface. Use `obsidian_toolsets` to change the surface at
+runtime. Knapper sends `notifications/tools/list_changed` after each effective change.
+The default toolsets are `core`, `session`, `ui`, `telemetry`, `plugin-dev`, and `editor`.
 Anything that mutates takes an exclusive lock regardless, so real input and UI
 mutations never interleave.
 

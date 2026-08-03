@@ -27,13 +27,16 @@ If another agent might be driving Obsidian — a second worktree, a parallel tas
 the same branch — do not share the user's instance. Create an isolated one:
 
 ```text
-obsidian_create_session label=my-plugin pluginSourceDir=/abs/path/to/plugin
+obsidian_create_session label=my-plugin pluginSourceDir=/abs/path/to/loadable-plugin
 ```
 
 That provisions a private Obsidian: its own profile, CLI socket, debug port, and
 scratch vault, with the plugin already symlinked and community plugins enabled. It
 returns a **session key**. Put it in knapper's MCP `env` block as `KNAP_SESSION` and
 reconnect; every other tool then targets that instance and nothing else.
+
+If creation returns `phase=starting`, call `obsidian_wait_session` until CDP is
+ready. Knapper preserves the live slow-starting instance.
 
 ```text
 obsidian_list_sessions      # who else is running, and which one you are bound to
@@ -84,14 +87,15 @@ The CLI cannot enable itself. Use `obsidian_setup_cli` (writes global `cli: true
 
 ## Provisioning tools
 
-| Tool                   | Purpose                                             |
-| ---------------------- | --------------------------------------------------- |
-| `obsidian_doctor`      | Full diagnosis + remediation                        |
-| `obsidian_launch`      | Start Obsidian with CDP port (and optional vault)   |
-| `obsidian_setup_cli`   | Enable global CLI flag                              |
-| `obsidian_setup_vault` | Prepare dev vault (restrictions, community plugins) |
-| `obsidian_link_plugin` | Symlink plugin build dir into vault                 |
-| `obsidian_status`      | Cheap health snapshot (not a full doctor)           |
+| Tool                    | Purpose                                             |
+| ----------------------- | --------------------------------------------------- |
+| `obsidian_doctor`       | Full diagnosis + remediation                        |
+| `obsidian_launch`       | Start Obsidian with CDP port (and optional vault)   |
+| `obsidian_setup_cli`    | Enable global CLI flag                              |
+| `obsidian_setup_vault`  | Prepare dev vault (restrictions, community plugins) |
+| `obsidian_link_plugin`  | Symlink plugin build dir into vault                 |
+| `obsidian_wait_session` | Finish a session whose CDP endpoint started slowly  |
+| `obsidian_status`       | Cheap health snapshot (not a full doctor)           |
 
 ## Configuration (env vars)
 

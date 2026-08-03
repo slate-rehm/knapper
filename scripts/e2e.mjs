@@ -314,6 +314,9 @@ if (suite("Tool surface & schema integrity")) {
       "obsidian_search",
       "obsidian_logs",
       "obsidian_snapshot",
+      "obsidian_editor_state",
+      "obsidian_editor_widgets",
+      "obsidian_element_screenshot",
       "browser_snapshot",
       "browser_take_screenshot",
     ];
@@ -338,6 +341,7 @@ if (suite("Tool surface & schema integrity")) {
       "obsidian_property_set",
       "obsidian_property_remove",
       "obsidian_theme_set",
+      "obsidian_editor_replace",
     ];
     const bad = shouldBeDestructive.filter(
       (n) => tools.find((t) => t.name === n)?.annotations?.destructiveHint !== true,
@@ -364,6 +368,23 @@ if (suite("Tool surface & schema integrity")) {
     } finally {
       gated.close();
     }
+  });
+
+  await check("runtime toolsets update tools/list and remain recoverable", async () => {
+    try {
+      await client.ok("obsidian_toolsets", { action: "disable", toolset: "editor" });
+      const disabled = await client.send("tools/list");
+      const disabledNames = new Set(disabled.result.tools.map((tool) => tool.name));
+      assert(!disabledNames.has("obsidian_editor_state"), "editor tool stayed listed");
+      assert(disabledNames.has("obsidian_toolsets"), "control tool disabled itself");
+    } finally {
+      await client.ok("obsidian_toolsets", { action: "enable", toolset: "editor" });
+    }
+    const enabled = await client.send("tools/list");
+    assert(
+      enabled.result.tools.some((tool) => tool.name === "obsidian_editor_state"),
+      "editor tool did not return",
+    );
   });
 }
 
@@ -688,6 +709,131 @@ if (suite("UI automation over CDP")) {
   await check("obsidian_screenshot writes a file", async () => {
     const { text, isError } = await client.call("obsidian_screenshot", {});
     assert(!isError, `screenshot errored: ${text.slice(0, 150)}`);
+  });
+}
+
+// --------------------------------------------------------------- suite: editor
+
+if (suite("Editor toolset")) {
+  const note = `${E2E_DIR}/editor.md`;
+
+  await check("editor tools ship in the default toolsets", async () => {
+    // No --toolsets flag: this asserts the editor toolset is default-ON.
+    const dflt = new McpClient(["--vault", VAULT]);
+    try {
+      await dflt.initialize();
+      const res = await dflt.send("tools/list");
+      const have = new Set(res.result.tools.map((t) => t.name));
+      const wanted = [
+        "obsidian_editor_state",
+        "obsidian_editor_set",
+        "obsidian_editor_replace",
+        "obsidian_editor_widgets",
+        "obsidian_element_screenshot",
+      ];
+      const missing = wanted.filter((n) => !have.has(n));
+      assert(missing.length === 0, `missing from default surface: ${missing.join(", ")}`);
+    } finally {
+      dflt.close();
+    }
+  });
+
+  await check("editor_state reports file, mode, cursor, and a doc hash", async () => {
+    await client.ok("obsidian_create", {
+      path: note,
+      content: "# Editor\n\nalpha\nbeta\ngamma\n",
+      overwrite: true,
+    });
+    await client.ok("obsidian_open", { path: note });
+    const { text } = await waitFor(
+      async () => {
+        const r = await client.ok("obsidian_editor_state", {});
+        return /editor\.md/.test(r.text) ? r : false;
+      },
+      { what: "the note to become the active editor" },
+    );
+    assert(/"docHash":\s*"fnv1a-/.test(text), `no docHash: ${text.slice(0, 200)}`);
+    assert(
+      /"mode":\s*"(source|live-preview)"/.test(text),
+      `unexpected mode: ${text.slice(0, 200)}`,
+    );
+    assert(/"docSlice"/.test(text), "no docSlice window");
+  });
+
+  await check("editor_set moves the cursor and reports back", async () => {
+    await client.ok("obsidian_editor_set", { cursor: { line: 3, ch: 0 }, scrollIntoView: true });
+    const { text } = await client.ok("obsidian_editor_state", { windowLines: 4 });
+    assert(/"line":\s*3/.test(text), `cursor did not move: ${text.slice(0, 200)}`);
+  });
+
+  await check("editor_replace refuses a stale hash with a typed remediation", async () => {
+    const { text, isError } = await client.call("obsidian_editor_replace", {
+      mode: "setValue",
+      text: "clobbered",
+      expectedDocHash: "fnv1a-00000000-0",
+    });
+    assert(isError, "a stale hash was accepted");
+    assert(/STALE_REF/.test(text), `wrong error code: ${text.slice(0, 200)}`);
+    assert(/obsidian_editor_state/.test(text), "remediation does not name the fixing tool");
+    // The refusal must not have edited anything.
+    const after = await client.ok("obsidian_editor_state", {});
+    assert(!/clobbered/.test(after.text), "the document changed despite the refusal");
+  });
+
+  await check("editor_replace applies with the current hash", async () => {
+    const state = await client.ok("obsidian_editor_state", {});
+    const hash = /"docHash":\s*"([^"]+)"/.exec(state.text)?.[1];
+    assert(hash, "no hash to authorize the edit");
+    await client.ok("obsidian_editor_replace", {
+      mode: "replaceRange",
+      text: "delta-marker\n",
+      from: { line: 2, ch: 0 },
+      expectedDocHash: hash,
+    });
+    const after = await client.ok("obsidian_editor_state", {});
+    assert(/delta-marker/.test(after.text), "the inserted text is not visible");
+    const newHash = /"docHash":\s*"([^"]+)"/.exec(after.text)?.[1];
+    assert(newHash && newHash !== hash, "the doc hash did not change after an edit");
+  });
+
+  await check("editor_widgets answers with a bounded list", async () => {
+    const { text, isError } = await client.call("obsidian_editor_widgets", {});
+    assert(!isError, `widgets errored: ${text.slice(0, 200)}`);
+    assert(/"returned":/.test(text), "no returned count");
+    assert(/"total":/.test(text), "no total count");
+  });
+
+  await check("editor_widgets accepts an arbitrary selector", async () => {
+    const { text, isError } = await client.call("obsidian_editor_widgets", {
+      selector: ".cm-line",
+    });
+    assert(!isError, `custom selector errored: ${text.slice(0, 200)}`);
+    assert(/"cssPath"/.test(text), "matches carry no cssPath");
+  });
+
+  await check("snapshot scope=editor targets the active editor", async () => {
+    const { text } = await client.ok("obsidian_snapshot", { scope: "editor" });
+    assert(text.length > 20, "empty editor snapshot");
+    assert(/\.cm-editor|markdown-reading-view/.test(text), "selector not reported");
+  });
+
+  await check("element screenshot returns an image plus a metrics block", async () => {
+    const { text, images, isError } = await client.call("obsidian_element_screenshot", {
+      target: ".workspace-leaf.mod-active .cm-editor",
+    });
+    assert(!isError, `element screenshot errored: ${text.slice(0, 200)}`);
+    assert(images.length > 0, "no image content");
+    assert(images[0].data.length > 1000, "image suspiciously small");
+    assert(/devicePixelRatio/.test(text), "no metrics block");
+    assert(/"rect"/.test(text), "no rect in metrics");
+  });
+
+  await check("element screenshot rejects a missing selector actionably", async () => {
+    const { text, isError } = await client.call("obsidian_element_screenshot", {
+      target: "#definitely-not-present-e2e",
+    });
+    assert(isError, "expected an error");
+    assert(/TARGET_NOT_FOUND|No element/i.test(text), `unhelpful: ${text.slice(0, 200)}`);
   });
 }
 
