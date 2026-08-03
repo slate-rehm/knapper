@@ -94,6 +94,20 @@ Use `browser_take_screenshot` for UI proof during automation. Dev-cycle composit
 
 Blocked browser tools (would harm a daily-driver window): navigate, close, resize, file upload, storage state, etc. — the server filters these.
 
+## Editor testing
+
+The editor toolset reads and edits the active editor through `app.workspace.activeEditor`. Use it instead of raw `obsidian_eval` for cursor, selection, and text work.
+
+1. `obsidian_editor_state` — reports the file, the mode (`source`, `live-preview`, `reading`, `none`), the cursor, the selections, and a `docHash` over the full document. It also returns a window of numbered lines around the cursor. It never errors on a reading view or an empty workspace.
+2. `obsidian_editor_set` — moves the cursor or sets selections. Pass `scrollIntoView=true` to center the view.
+3. `obsidian_editor_replace` — edits text. It requires `expectedDocHash` from a fresh `obsidian_editor_state` call. A `STALE_REF` refusal means the document changed under you. The user or another agent edits the same live editor, so take a new state and retry.
+4. `obsidian_editor_widgets` — lists rendered widgets and decorations inside the editor DOM. Pass a `selector` such as `[data-my-plugin]` to find your plugin's decorations. Each match reports a short `cssPath`, its rect, a document position when the CM6 view is reachable, and a text preview.
+
+Two related capture tools:
+
+- `obsidian_snapshot scope=editor` — scopes the ARIA snapshot to the active editor. It falls back to the reading view when no editor exists.
+- `obsidian_element_screenshot target=<selector>` — captures one element as a PNG and pairs it with a metrics block (rect, `devicePixelRatio`, viewport, computed display). Trust the metrics over the pixels when display scaling is in play. It takes a CSS selector only — snapshot refs do not resolve here.
+
 ## Related skills
 
 - **obsidian-plugin-dev** — reload and verify after UI changes.

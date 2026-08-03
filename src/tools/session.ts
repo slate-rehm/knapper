@@ -17,7 +17,14 @@ import { z } from "zod";
 import type { ServerContext } from "../server.js";
 import { cliSocketPathFor } from "../config.js";
 import { UobError } from "../util/errors.js";
-import { closeSession, createSession, listSessions, restartSession } from "../session/registry.js";
+import {
+  closeSession,
+  createSession,
+  listSessions,
+  restartSession,
+  sessionDiagnostics,
+  waitSession,
+} from "../session/registry.js";
 import { assertSessionKey } from "../session/key.js";
 import { reapStaleSessions } from "../session/reap.js";
 import type { SessionDescriptor } from "../session/descriptor.js";
@@ -26,10 +33,13 @@ import type { SessionDescriptor } from "../session/descriptor.js";
 function summarize(descriptor: SessionDescriptor): Record<string, unknown> {
   return {
     session: descriptor.key,
+    phase: descriptor.readiness.phase,
     cdpUrl: descriptor.instance.cdpUrl,
     vault: descriptor.vault?.name,
     vaultPath: descriptor.vault?.path,
     plugin: descriptor.plugin?.id,
+    pluginPreEnabled: descriptor.plugin?.preEnabled,
+    pluginArtifacts: descriptor.plugin?.artifacts,
     pid: descriptor.instance.pid,
     userDataDir: descriptor.instance.userDataDir,
     outputDir: descriptor.instance.outputDir,
@@ -96,8 +106,8 @@ export function registerSessionTools(ctx: ServerContext): void {
         .string()
         .optional()
         .describe(
-          "Absolute path to a plugin project root to symlink into the session vault before first " +
-            "launch. The plugin id is read from its manifest.json.",
+          "Absolute path to a loadable plugin directory containing manifest.json and main.js. " +
+            "Knapper symlinks it before first launch.",
         ),
       pluginId: z
         .string()
@@ -147,14 +157,16 @@ export function registerSessionTools(ctx: ServerContext): void {
       });
 
       const live = (await listSessions({ env: process.env })).filter((s) => s.state === "live");
+      const ready = descriptor.readiness.phase === "ready";
       const lines = [
-        `Session ${descriptor.key} is ready.`,
+        `Session ${descriptor.key} is ${ready ? "ready" : "still starting"}.`,
         `Vault "${descriptor.vault?.name}" at ${descriptor.vault?.path}`,
-        `CDP ${descriptor.instance.cdpUrl}, pid ${descriptor.instance.pid ?? "unknown"}`,
+        `CDP ${descriptor.instance.cdpUrl ?? "not ready"}, pid ${descriptor.instance.pid ?? "unknown"}`,
         descriptor.plugin !== undefined
           ? `Plugin ${descriptor.plugin.id} linked from ${descriptor.plugin.sourceDir}`
           : "No plugin linked.",
         "",
+        ...(ready ? [] : ["Call obsidian_wait_session before reconnecting.", ""]),
         "To target it, add this to knapper's MCP server config and reconnect:",
         `  "env": { "KNAP_SESSION": "${descriptor.key}" }`,
       ];
@@ -171,7 +183,14 @@ export function registerSessionTools(ctx: ServerContext): void {
         lines.push("", `Reaped ${reaped.length} abandoned session(s): ${reaped.join(", ")}`);
       }
 
-      return { text: lines.join("\n"), json: { ...summarize(descriptor), reaped } };
+      return {
+        text: lines.join("\n"),
+        json: {
+          ...summarize(descriptor),
+          diagnostics: await sessionDiagnostics(descriptor),
+          reaped,
+        },
+      };
     },
   });
 
@@ -195,10 +214,12 @@ export function registerSessionTools(ctx: ServerContext): void {
 
       const lines = sessions.map((s) => {
         const d = s.descriptor;
-        const marks = [s.state, s.isCurrent ? "current" : undefined].filter(Boolean).join(", ");
+        const marks = [s.state, d.readiness.phase, s.isCurrent ? "current" : undefined]
+          .filter(Boolean)
+          .join(", ");
         return (
           `${d.key} [${marks}]\n` +
-          `  vault ${d.vault?.name ?? "(none)"} · ${d.instance.cdpUrl} · pid ${d.instance.pid ?? "?"}\n` +
+          `  vault ${d.vault?.name ?? "(none)"} · ${d.instance.cdpUrl ?? "CDP pending"} · pid ${d.instance.pid ?? "?"}\n` +
           `  from ${d.origin.cwd}${d.origin.branch !== undefined ? ` (${d.origin.branch})` : ""}` +
           `${d.plugin !== undefined ? ` · plugin ${d.plugin.id}` : ""}`
         );
@@ -206,14 +227,43 @@ export function registerSessionTools(ctx: ServerContext): void {
 
       return {
         text: lines.join("\n"),
-        json: sessions.map((s) => ({
-          ...summarize(s.descriptor),
-          state: s.state,
-          cliIsolation: s.cliIsolation,
-          isCurrent: s.isCurrent,
-          origin: s.descriptor.origin,
-          heartbeatAt: s.descriptor.heartbeatAt,
-        })),
+        json: await Promise.all(
+          sessions.map(async (s) => ({
+            ...summarize(s.descriptor),
+            state: s.state,
+            phase: s.descriptor.readiness.phase,
+            diagnostics: await sessionDiagnostics(s.descriptor),
+            cliIsolation: s.cliIsolation,
+            isCurrent: s.isCurrent,
+            origin: s.descriptor.origin,
+            heartbeatAt: s.descriptor.heartbeatAt,
+          })),
+        ),
+      };
+    },
+  });
+
+  registry.add({
+    name: "obsidian_wait_session",
+    toolset: "session",
+    capability: "launch",
+    description:
+      "Wait for a starting session's CDP endpoint and finalize its descriptor. Returns immediately " +
+      "when the session is already ready and preserves a live session on timeout.",
+    inputSchema: {
+      session: z
+        .string()
+        .optional()
+        .describe("Session key to wait for. Defaults to the session this server is bound to."),
+      timeoutMs: z.number().optional().describe("How long to wait (default 30000)."),
+    },
+    handler: async (args) => {
+      const descriptor = await waitSession(targetKey(args.session), {
+        ...(typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {}),
+      });
+      return {
+        text: `Session ${descriptor.key} is ready on ${descriptor.instance.cdpUrl}.`,
+        json: { ...summarize(descriptor), diagnostics: await sessionDiagnostics(descriptor) },
       };
     },
   });
@@ -248,12 +298,16 @@ export function registerSessionTools(ctx: ServerContext): void {
       // Only meaningful when this server owns the session: with port 0 the new
       // instance is on a different port, and the router would otherwise keep
       // probing the old one.
-      if (key === currentKey()) await ctx.router.retarget(descriptor.instance.cdpUrl);
+      if (key === currentKey() && descriptor.instance.cdpUrl !== undefined) {
+        await ctx.router.retarget(descriptor.instance.cdpUrl);
+      }
 
       return {
         text:
           `Restarted session ${key}${quit ? "" : " (nothing was running)"}.\n` +
-          `Now on ${descriptor.instance.cdpUrl}, pid ${descriptor.instance.pid ?? "unknown"}.`,
+          (descriptor.readiness.phase === "ready"
+            ? `Now on ${descriptor.instance.cdpUrl}, pid ${descriptor.instance.pid ?? "unknown"}.`
+            : "The process is still starting. Call obsidian_wait_session."),
         json: summarize(descriptor),
       };
     },

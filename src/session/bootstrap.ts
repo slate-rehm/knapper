@@ -24,6 +24,7 @@ import { basename, join, resolve } from "node:path";
 import { sessionPaths, type SessionPaths } from "../config.js";
 import { forbiddenRoot, readManagedMarker, writeManagedMarker } from "../connection/vaults.js";
 import { UobError } from "../util/errors.js";
+import { chromium } from "playwright-core";
 
 export interface SeedOptions {
   key: string;
@@ -41,6 +42,43 @@ export interface SeedOptions {
 export interface SeededSession {
   paths: SessionPaths;
   vault: { id: string; name: string; path: string; grant: "created" | "adopted" };
+}
+
+export function pluginTrustStorageKey(vaultId: string): string {
+  return `enable-plugin-${vaultId}`;
+}
+
+/** Grant plugin trust inside a disposable profile, then reload its renderer. */
+export async function trustDisposableVault(cdpUrl: string, vaultId: string): Promise<void> {
+  const browser = await chromium.connectOverCDP(cdpUrl, {
+    noDefaults: true,
+    isLocal: true,
+    timeout: 10_000,
+  });
+  try {
+    const context = browser.contexts()[0];
+    if (context === undefined) throw new Error("CDP exposed no browser context");
+    const deadline = Date.now() + 10_000;
+    let page = context
+      .pages()
+      .find((candidate) => candidate.url().startsWith("app://obsidian.md/"));
+    while (page === undefined && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      page = context.pages().find((candidate) => candidate.url().startsWith("app://obsidian.md/"));
+    }
+    if (page === undefined) throw new Error("CDP exposed no Obsidian renderer");
+    await page.evaluate((key) => localStorage.setItem(key, "true"), pluginTrustStorageKey(vaultId));
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 });
+  } catch (error) {
+    throw new UobError("APP_UNAVAILABLE", "Could not grant plugin trust in the disposable vault.", {
+      remediation:
+        "Restart the session, or create it without pluginSourceDir and enable the plugin manually.",
+      cause: error,
+      details: { vaultId },
+    });
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
 }
 
 /**

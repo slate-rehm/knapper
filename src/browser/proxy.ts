@@ -25,21 +25,69 @@ import type { CapabilityRouter } from "../connection/router.js";
 import type { Logger } from "../util/logger.js";
 import { UobError } from "../util/errors.js";
 import {
+  ALLOWED_BROWSER_TOOLS,
   ALLOWED_TABS_ACTIONS,
   BLOCKED_BROWSER_TOOLS,
   isAllowedBrowserTool,
   isInputBrowserTool,
 } from "./allowlist.js";
+import { clickTarget } from "./native.js";
 
 export { BLOCKED_BROWSER_TOOLS, ALLOWED_BROWSER_TOOLS } from "./allowlist.js";
 
 /** Playwright's wording when the page, context, or browser died under us. */
 const STALE_TARGET = /(target|page|context|browser).{0,40}(has been closed|closed)/i;
+const CLICK_TIMEOUT = /timeout\s+\d+ms exceeded|TimeoutError/i;
 
 export interface ProxiedTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+}
+
+const FALLBACK_PROPERTIES = {
+  target: { type: "string" },
+  element: { type: "string" },
+  text: { type: "string" },
+  regex: { type: "string" },
+  function: { type: "string" },
+  filename: { type: "string" },
+  key: { type: "string" },
+  action: { type: "string" },
+  level: { type: "string" },
+  type: { type: "string" },
+  scale: { type: "string" },
+  button: { type: "string" },
+  promptText: { type: "string" },
+  startTarget: { type: "string" },
+  startElement: { type: "string" },
+  endTarget: { type: "string" },
+  endElement: { type: "string" },
+  doubleClick: { type: "boolean" },
+  accept: { type: "boolean" },
+  all: { type: "boolean" },
+  fullPage: { type: "boolean" },
+  boxes: { type: "boolean" },
+  depth: { type: "number" },
+  time: { type: "number" },
+  x: { type: "number" },
+  y: { type: "number" },
+  deltaX: { type: "number" },
+  deltaY: { type: "number" },
+  values: { type: "array", items: { type: "string" } },
+  modifiers: { type: "array", items: { type: "string" } },
+  paths: { type: "array", items: { type: "string" } },
+  fields: { type: "array", items: { type: "object" } },
+  data: { type: "object" },
+} satisfies Record<string, unknown>;
+
+/** Stable degraded-mode descriptors; upstream validates the same args again on call. */
+function fallbackTools(): ProxiedTool[] {
+  return [...ALLOWED_BROWSER_TOOLS].sort().map((name) => ({
+    name,
+    description: `Playwright browser operation ${name}.`,
+    inputSchema: { type: "object", properties: FALLBACK_PROPERTIES },
+  }));
 }
 
 export class BrowserProxy {
@@ -63,11 +111,6 @@ export class BrowserProxy {
    * and individual calls can explain the problem.
    */
   async init(): Promise<boolean> {
-    // A prior CDP disconnect leaves a live Client pointing at a dead context.
-    if (this.client && !this.router.playwright.connected) {
-      await this.close().catch(() => undefined);
-    }
-
     if (this.client) return true;
     if (this.initializing) {
       await this.initializing;
@@ -84,12 +127,6 @@ export class BrowserProxy {
   }
 
   private async doInit(): Promise<void> {
-    const availability = await this.router.refreshAvailability();
-    if (!availability.playwright) {
-      this.logger.debug("browser proxy unavailable: no CDP endpoint");
-      return;
-    }
-
     // Resolve through @playwright/mcp's dependency tree so the context we pass in
     // comes from the exact playwright-core build it expects.
     const { createConnection } = await import("@playwright/mcp");
@@ -147,8 +184,15 @@ export class BrowserProxy {
 
   /** The allowlisted tool descriptors, or an empty list when unavailable. */
   async listTools(): Promise<ProxiedTool[]> {
-    await this.init();
-    return this.tools ?? [];
+    try {
+      await this.init();
+      return this.tools ?? fallbackTools();
+    } catch (e) {
+      this.logger.debug("using degraded browser descriptors", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return fallbackTools();
+    }
   }
 
   /**
@@ -265,8 +309,8 @@ export class BrowserProxy {
       }
     }
 
-    const ready = await this.init();
-    if (!ready || !this.client) {
+    const availability = await this.router.refreshAvailability();
+    if (!availability.playwright) {
       throw new UobError(
         "CDP_PORT_CLOSED",
         `Browser automation is unavailable: no CDP endpoint at ${this.config.cdpUrl}.`,
@@ -275,6 +319,19 @@ export class BrowserProxy {
             "Obsidian must be fully quit and cold-started with `--remote-debugging-port`. Electron's " +
             "single-instance lock means adding the flag to a running instance silently does nothing.",
           fixedBy: "obsidian_launch",
+        },
+      );
+    }
+
+    const ready = await this.init();
+    if (!ready || !this.client) {
+      throw new UobError(
+        "CDP_PORT_CLOSED",
+        `Browser automation is unavailable: no CDP endpoint at ${this.config.cdpUrl}.`,
+        {
+          remediation: "Cold-start Obsidian with the debug port, then retry the same browser tool.",
+          fixedBy: "obsidian_launch",
+          details: { tool: name },
         },
       );
     }
@@ -323,6 +380,10 @@ export class BrowserProxy {
       return await call();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      if (name === "browser_click" && CLICK_TIMEOUT.test(message)) {
+        const text = await clickTarget(this.router, args);
+        return { content: [{ type: "text", text }] };
+      }
       if (!STALE_TARGET.test(message)) throw e;
 
       // The upstream server can still be holding a page from a window that has

@@ -31,6 +31,10 @@ function makeRouter() {
   return new CapabilityRouter(loadConfig({}, {}), createLogger("silent"));
 }
 
+function makeRouterWithTransport(commandTransport: "auto" | "cli" | "playwright") {
+  return new CapabilityRouter(loadConfig({ commandTransport }, {}), createLogger("silent"));
+}
+
 /** Both transports up. */
 function bothAvailable() {
   probeCdp.mockResolvedValue({ Browser: "Chrome/142" });
@@ -124,6 +128,11 @@ describe("refreshAvailability", () => {
 });
 
 describe("resolve", () => {
+  it("honors an explicit command transport", async () => {
+    bothAvailable();
+    expect(await makeRouterWithTransport("playwright").resolve("evaluate")).toBe("playwright");
+    expect(await makeRouterWithTransport("cli").resolve("evaluate")).toBe("cli");
+  });
   it("prefers the CLI for evaluate, avoiding the restart Playwright would need", async () => {
     bothAvailable();
     expect(await makeRouter().resolve("evaluate")).toBe("cli");
@@ -153,6 +162,27 @@ describe("resolve", () => {
     nothingAvailable();
     const router = makeRouter();
     expect(await router.resolve("launch")).toBe("local");
+  });
+});
+
+describe("CLI timeout demotion", () => {
+  it("returns the timeout and routes later commands through Playwright", async () => {
+    bothAvailable();
+    const router = makeRouter();
+    const { UobError } = await import("../../src/util/errors.js");
+    const run = vi
+      .spyOn(router.cli, "run")
+      .mockRejectedValueOnce(new UobError("TIMEOUT", "slow CLI"));
+
+    await expect(router.cliCommand(["version"])).rejects.toMatchObject({ code: "TIMEOUT" });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(await router.resolve("cliCommand")).toBe("playwright");
+    expect(router.commandTransportStatus).toMatchObject({
+      mode: "auto",
+      selected: "playwright",
+      cliDegradedUntil: expect.any(String),
+      lastCliTimeoutAt: expect.any(String),
+    });
   });
 });
 

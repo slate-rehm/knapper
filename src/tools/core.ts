@@ -10,8 +10,9 @@ import { z } from "zod";
 import type { ServerContext } from "../server.js";
 import { renderResult } from "../util/serialize.js";
 import { fetchTargets, classifyTargets } from "../connection/cdp/discover.js";
-import { TOOLSET_DESCRIPTIONS } from "../toolsets.js";
+import { TOOLSETS, TOOLSET_DESCRIPTIONS, isToolset } from "../toolsets.js";
 import { UobError } from "../util/errors.js";
+import { CAPABILITIES, CAPABILITY_PREFERENCE } from "../capabilities.js";
 
 export function registerCoreTools(ctx: ServerContext): void {
   const { registry, router, config } = ctx;
@@ -41,8 +42,18 @@ export function registerCoreTools(ctx: ServerContext): void {
             ? "none — every vault-scoped tool will refuse"
             : authorized.map((v) => `${v.name} (${v.grant})`).join(", ")
         }`,
-        `Toolsets enabled: ${[...config.enabledToolsets].join(", ")}`,
+        `Toolsets enabled: ${registry.toolsetState().enabled.join(", ")}`,
+        `Toolsets disabled: ${registry.toolsetState().disabled.join(", ") || "none"}`,
       ];
+      const commandTransport = router.commandTransportStatus;
+      lines.push(
+        `Command transport: ${String(commandTransport.selected)} (${String(commandTransport.mode)})`,
+      );
+      if (commandTransport.cliDegradedUntil !== undefined) {
+        lines.push(
+          `CLI demoted until ${String(commandTransport.cliDegradedUntil)} after a timeout.`,
+        );
+      }
 
       if (health.problems.length > 0) {
         lines.push(
@@ -55,16 +66,95 @@ export function registerCoreTools(ctx: ServerContext): void {
         text: lines.join("\n"),
         json: {
           transports: availability,
+          commandTransport,
           debuggerHeldBy: router.currentDebuggerHolder ?? null,
           windows: health.windows,
           vaults: vaultStatus,
           toolsets: {
-            enabled: [...config.enabledToolsets],
+            ...registry.toolsetState(),
             available: Object.keys(TOOLSET_DESCRIPTIONS),
           },
           tools: registry.byToolset(),
           problemCount: health.problems.length,
         },
+      };
+    },
+  });
+
+  registry.add({
+    name: "obsidian_capabilities",
+    toolset: "core",
+    alwaysEnabled: true,
+    description:
+      "Report every Knapper capability, the live transport that can serve it, and the fixing tool " +
+      "when it is unavailable. Use this before choosing between obsidian_* and browser_* tools.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {},
+    handler: async () => {
+      const availability = await router.refreshAvailability(true);
+      const rows = CAPABILITIES.map((capability) => {
+        const layer = CAPABILITY_PREFERENCE[capability].find((name) => availability[name]) ?? null;
+        const fixedBy = layer !== null ? null : capability === "launch" ? null : "obsidian_launch";
+        return {
+          capability,
+          available: layer !== null,
+          layer,
+          preferredLayers: CAPABILITY_PREFERENCE[capability],
+          fixedBy,
+        };
+      });
+      return {
+        text: rows
+          .map(
+            (row) =>
+              `${row.capability}: ${row.available ? `available via ${row.layer}` : `unavailable; use ${row.fixedBy ?? "local process control"}`}`,
+          )
+          .join("\n"),
+        json: { transports: availability, capabilities: rows },
+      };
+    },
+  });
+
+  registry.add({
+    name: "obsidian_toolsets",
+    toolset: "core",
+    alwaysEnabled: true,
+    description:
+      "List, enable, or disable Knapper toolsets at runtime. Changes update tools/list immediately; " +
+      "this control tool remains available so disabled toolsets can be restored.",
+    annotations: { idempotentHint: true },
+    inputSchema: {
+      action: z.enum(["list", "enable", "disable"]).default("list").describe("Operation to run"),
+      toolset: z
+        .string()
+        .optional()
+        .describe(`Toolset name: ${TOOLSETS.join(", ")}`),
+    },
+    handler: async (args) => {
+      const action = args.action as "list" | "enable" | "disable";
+      const requested = args.toolset as string | undefined;
+      if (action !== "list" && (requested === undefined || !isToolset(requested))) {
+        throw new UobError(
+          "INVALID_ARGUMENT",
+          `Unknown or missing toolset: ${requested ?? "(none)"}.`,
+          {
+            remediation: `Choose one of: ${TOOLSETS.join(", ")}.`,
+            fixedBy: "obsidian_toolsets",
+          },
+        );
+      }
+      const changed =
+        action === "list"
+          ? []
+          : registry.setToolsetEnabled(requested as (typeof TOOLSETS)[number], action === "enable");
+      const state = registry.toolsetState();
+      return {
+        text: [
+          `Enabled: ${state.enabled.join(", ") || "none"}`,
+          `Disabled: ${state.disabled.join(", ") || "none"}`,
+          ...(changed.length > 0 ? [`Changed tools: ${changed.join(", ")}`] : []),
+        ].join("\n"),
+        json: { action, toolset: requested ?? null, changed, ...state },
       };
     },
   });

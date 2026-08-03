@@ -22,11 +22,6 @@ const entry = process.argv[2] ?? join(root, "dist", "cli.js");
 
 /** A port nothing can be listening on, so attach must fail fast. */
 const DEAD_CDP = "http://127.0.0.1:1";
-/**
- * Without a live Obsidian the proxied @playwright/mcp tools cannot be enumerated,
- * so only the natively implemented surface registers. Assert a floor rather than
- * an exact count so this does not become a brittle tripwire on every tool added.
- */
 const MIN_TOOLS = 60;
 
 let failed = 0;
@@ -50,6 +45,7 @@ child.stderr.on("data", (c) => {
 });
 
 const pending = new Map();
+const notifications = [];
 let buffer = "";
 child.stdout.on("data", (chunk) => {
   buffer += chunk.toString();
@@ -63,6 +59,9 @@ child.stdout.on("data", (chunk) => {
       message = JSON.parse(line);
     } catch {
       continue;
+    }
+    if (typeof message.method === "string" && message.id === undefined) {
+      notifications.push(message.method);
     }
     const resolve = pending.get(message.id);
     if (resolve) {
@@ -117,8 +116,18 @@ try {
   );
 
   const names = new Set(tools.map((t) => t.name));
-  for (const required of ["obsidian_status", "obsidian_doctor", "obsidian_eval", "obsidian_logs"]) {
+  for (const required of [
+    "obsidian_status",
+    "obsidian_doctor",
+    "obsidian_capabilities",
+    "obsidian_toolsets",
+    "obsidian_eval",
+    "obsidian_logs",
+  ]) {
     check(`${required} is registered`, names.has(required));
+  }
+  for (const required of ["browser_snapshot", "browser_click", "browser_take_screenshot"]) {
+    check(`${required} is registered without Obsidian`, names.has(required));
   }
   check("no duplicate tool names", names.size === tools.length);
   check(
@@ -150,6 +159,41 @@ try {
     .join("\n");
   check("a call needing the app fails cleanly", evaluated.result?.isError === true);
   check("the failure explains how to fix it", evalText.length > 20, evalText.slice(0, 70));
+
+  const clicked = await send("tools/call", {
+    name: "browser_click",
+    arguments: { target: ".workspace" },
+  });
+  const clickText = (clicked.result?.content ?? [])
+    .filter((c) => c.type === "text")
+    .map((c) => c.text)
+    .join("\n");
+  check("browser calls fail cleanly without CDP", clicked.result?.isError === true);
+  check("browser failure points to obsidian_launch", /obsidian_launch|cold-start/i.test(clickText));
+
+  const disabledEditor = await send("tools/call", {
+    name: "obsidian_toolsets",
+    arguments: { action: "disable", toolset: "editor" },
+  });
+  check("runtime toolset disable succeeds", disabledEditor.result?.isError !== true);
+  const afterDisable = await send("tools/list");
+  const disabledNames = new Set((afterDisable.result?.tools ?? []).map((tool) => tool.name));
+  check("disabled editor tools leave tools/list", !disabledNames.has("obsidian_editor_state"));
+  check("toolset control remains available", disabledNames.has("obsidian_toolsets"));
+  check(
+    "toolset changes emit tools/list_changed",
+    notifications.includes("notifications/tools/list_changed"),
+  );
+
+  await send("tools/call", {
+    name: "obsidian_toolsets",
+    arguments: { action: "enable", toolset: "editor" },
+  });
+  const afterEnable = await send("tools/list");
+  check(
+    "enabled editor tools return to tools/list",
+    (afterEnable.result?.tools ?? []).some((tool) => tool.name === "obsidian_editor_state"),
+  );
 } catch (e) {
   check(`smoke sequence completed`, false, e.message);
 }

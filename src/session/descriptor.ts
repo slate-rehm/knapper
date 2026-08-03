@@ -16,7 +16,12 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { sessionPaths, sessionsDir } from "../config.js";
 import { assertSessionKey } from "./key.js";
 
-export const SESSION_SCHEMA_VERSION = 1;
+export const SESSION_SCHEMA_VERSION = 2;
+
+export type SessionReadiness =
+  | { phase: "starting"; spawnedAt: string; requestedPort: number; lastProbeAt?: string }
+  | { phase: "ready"; readyAt: string }
+  | { phase: "failed"; failedAt: string; reason: string };
 
 export interface SessionDescriptor {
   schema: number;
@@ -27,6 +32,7 @@ export interface SessionDescriptor {
    * authorization input — a live process outranks any heartbeat.
    */
   heartbeatAt: string;
+  readiness: SessionReadiness;
   /** Provenance for humans and `obsidian_list_sessions`. Never used for routing. */
   origin: { cwd: string; branch?: string; label?: string };
   instance: {
@@ -34,8 +40,8 @@ export interface SessionDescriptor {
     /** Undefined outside Linux, where per-session CLI routing is impossible. */
     runtimeDir?: string;
     outputDir: string;
-    cdpPort: number;
-    cdpUrl: string;
+    cdpPort?: number;
+    cdpUrl?: string;
     /**
      * The uuid from `DevToolsActivePort` line 2. Recorded so a reattach can prove
      * it reached *this* instance rather than another session that inherited the
@@ -56,7 +62,13 @@ export interface SessionDescriptor {
    * belongs to the user and closing a session must not offer to delete it.
    */
   vault?: { id: string; name: string; path: string; grant: "created" | "adopted" };
-  plugin?: { id: string; sourceDir: string; linkPath: string };
+  plugin?: {
+    id: string;
+    sourceDir: string;
+    linkPath: string;
+    artifacts?: { manifest: true; main: true; styles: boolean };
+    preEnabled?: boolean;
+  };
   /** The knapper process that provisioned this. Diagnostics only. */
   owner?: { pid: number; startedAt: string; exitedAt?: string };
 }
@@ -82,7 +94,18 @@ export async function readDescriptor(
     const parsed = JSON.parse(await readFile(path, "utf8")) as SessionDescriptor;
     // A descriptor whose key disagrees with its own directory is debris or an
     // impersonation attempt; either way it is not this session.
-    return parsed.key === key ? parsed : undefined;
+    if (parsed.key !== key) return undefined;
+    // Version 1 descriptors only existed after CDP became reachable. Treat them
+    // as ready during the one-release compatibility window.
+    if (parsed.readiness === undefined && parsed.schema < SESSION_SCHEMA_VERSION) {
+      return {
+        ...parsed,
+        schema: SESSION_SCHEMA_VERSION,
+        readiness: { phase: "ready", readyAt: parsed.createdAt },
+      };
+    }
+    if (parsed.readiness === undefined) return undefined;
+    return parsed;
   } catch {
     return undefined;
   }

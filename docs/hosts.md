@@ -49,10 +49,9 @@ else (`".."`, `"../.."`) points outside the repo and fails to resolve.
   are different dialects, so knapper reads every setting from a plain environment variable
   instead of being expressed three ways. Set them in each client's MCP `env` block. See
   [configuration.md](configuration.md).
-- **`browser_*` tools only appear when Obsidian is reachable.** Most of the `ui` toolset is
-  proxied from `@playwright/mcp`, which can only be enumerated over a live CDP connection. If
-  knapper starts before Obsidian, the client caches a short tool list — start Obsidian (or run
-  `obsidian_launch`), then reconnect the MCP server.
+- **`browser_*` tools remain visible when Obsidian is offline.** Calls that need CDP return an
+  actionable error with `obsidian_launch` as the fixing tool. Cold-start Obsidian with the debug
+  port, then retry the same call. You do not need to reconnect only to refresh the tool list.
 
 ## Verifying a host
 
@@ -61,7 +60,7 @@ not require Obsidian:
 
 ```bash
 npx -y github:slate-rehm/knapper --help    # server starts
-npm run smoke                              # degraded-mode MCP contract, 80 tools
+npm run smoke                              # degraded-mode MCP contract, including browser tools
 ```
 
 Then, in the host, confirm `obsidian-instance-setup` and `obsidian-plugin-dev` appear as

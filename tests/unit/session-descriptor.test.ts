@@ -40,6 +40,7 @@ function descriptor(key: string): SessionDescriptor {
     key,
     createdAt: "2026-07-28T12:00:00.000Z",
     heartbeatAt: "2026-07-28T12:00:00.000Z",
+    readiness: { phase: "ready", readyAt: "2026-07-28T12:00:00.000Z" },
     origin: { cwd: "/home/bear/wt/feature", branch: "dev", label: "feature" },
     instance: {
       userDataDir: join(home, "sessions", key, "userdata"),

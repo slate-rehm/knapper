@@ -17,6 +17,7 @@ import {
   writePluginData,
 } from "../obsidian/helpers.js";
 import { getCompletions, cliCommandIds } from "../obsidian/completions.js";
+import { launchWithCdp } from "./provisioning.js";
 
 export function registerObsidianTools(ctx: ServerContext): void {
   const { registry, router, config } = ctx;
@@ -426,15 +427,26 @@ export function registerObsidianTools(ctx: ServerContext): void {
   registry.add({
     name: "obsidian_restart",
     toolset: "core",
-    capability: "cliCommand",
+    capability: "launch",
     description:
-      "Restart the Obsidian app via CLI. Does not add --remote-debugging-port; use obsidian_launch " +
-      "after restart if you need CDP. " +
-      CLOSED_VAULT_WARNING,
+      "Cold-restart this server's Obsidian instance with CDP preserved: quits it and relaunches " +
+      "with --remote-debugging-port, then re-attaches. Under a session, only that session's " +
+      "instance restarts. Equivalent to obsidian_launch with restart=true.",
     inputSchema: {},
     handler: async () => {
-      const { stdout } = await runCli(router, { command: "restart" });
-      return contentOutcome(stdout, "Restart requested");
+      // Deliberately not the in-app CLI `restart` command: Obsidian relaunches
+      // itself without --remote-debugging-port, so every CDP-backed tool then
+      // fails until an obsidian_launch that nothing prompted the agent to run.
+      const result = await launchWithCdp(ctx, { restart: true });
+      return {
+        text: [
+          result.restarted
+            ? "Restarted Obsidian with CDP preserved."
+            : "Obsidian was not running; started it with CDP enabled.",
+          `CDP URL: ${result.cdpUrl}`,
+        ].join("\n"),
+        json: result,
+      };
     },
   });
 }

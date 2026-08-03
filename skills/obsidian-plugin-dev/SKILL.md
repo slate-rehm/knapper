@@ -23,12 +23,12 @@ The composite tool `obsidian_dev_cycle` runs steps 3–4 in one call after you h
 For a dedicated dev vault:
 
 1. `obsidian_setup_vault` — creates or prepares a scratch vault with community plugins enabled and restrictions off (when you need that).
-2. `obsidian_link_plugin` — symlinks your plugin project into the vault.
+2. `obsidian_link_plugin` — symlinks a loadable plugin directory into the vault.
 
 ### `obsidian_link_plugin`
 
 - **vault** — registered vault name (must appear in Obsidian’s vault list).
-- **sourceDir** — absolute path to your plugin root (contains `manifest.json`).
+- **sourceDir** — absolute path to a loadable directory with `manifest.json` and `main.js`.
 - **pluginId** — optional; defaults to `manifest.json` → `id`.
 - **unlink** — remove the symlink only (refuses to delete a real directory).
 
@@ -91,6 +91,33 @@ Plugins can expose Obsidian CLI commands via `Plugin.prototype.registerCliHandle
 
 To test a handler: find its name in `obsidian_commands`, then run it with `obsidian_cli` (raw CLI) or the documented flags for that command.
 
+## Probe globals and editor checks
+
+Expose a probe function from your plugin during development. Return plain data, not class instances:
+
+```javascript
+// in the plugin's onload
+window.myPluginProbe = async () => ({ settings: this.settings, widgetCount: this.widgets.length });
+```
+
+Run it through `obsidian_eval`:
+
+```text
+obsidian_eval code=JSON.stringify(await window.myPluginProbe())
+```
+
+Keep the call on one line. The Playwright transport awaits the promise for you. Also mirror the result to the console as an overflow channel — a large payload then stays readable through `obsidian_logs`:
+
+```text
+obsidian_eval code=(async () => { const r = await window.myPluginProbe(); console.log("probe:", JSON.stringify(r)); return JSON.stringify(r); })()
+```
+
+For editor-rendering plugins, pair the probe with the editor toolset:
+
+- `obsidian_editor_state` — file, mode, cursor, and a `docHash` of the document.
+- `obsidian_editor_widgets selector=[data-my-plugin]` — verify your decorations actually rendered, with rects and document positions.
+- `obsidian_editor_replace` — drive hash-guarded text edits to trigger your extension, then re-run the probe.
+
 ## Clean slate testing
 
 `obsidian_reset_state` disables the plugin, resets `data.json` to `{}`, re-enables, and returns the previous settings JSON so you can restore them. Destructive — use only on dev vaults.
@@ -100,7 +127,7 @@ To test a handler: find its name in `obsidian_commands`, then run it with `obsid
 1. `obsidian_doctor` — fix CLI/CDP/argv issues.
 2. `obsidian_launch` — cold start with `--remote-debugging-port`.
 3. `obsidian_setup_vault` or use an existing dev vault.
-4. `obsidian_link_plugin` from your repo root.
+4. `obsidian_link_plugin` from your loadable build directory.
 5. `obsidian_plugin_enable` if needed.
 6. Iterate: **build → `obsidian_dev_cycle`**.
 7. Use `obsidian_exercise_command` for command-centric features.

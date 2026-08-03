@@ -17,6 +17,10 @@ import {
 } from "../obsidian/helpers.js";
 import { cliValue } from "../connection/cli/exec.js";
 import { parseCliJson } from "../util/serialize.js";
+import {
+  captureElementScreenshot,
+  elementScreenshotSchema,
+} from "../browser/element-screenshot.js";
 
 const vaultOpt = {
   vault: z.string().optional().describe("Target vault name; overrides the session default"),
@@ -188,6 +192,14 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
       vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
+      // Field observation: these window captures have arrived cropped relative to
+      // the real window on Wayland/Hyprland with mixed-DPI displays. The capture
+      // itself happens inside Obsidian's own `dev:screenshot` handler, so the
+      // cause is not visible from this repo — Electron's capturePage() sizes its
+      // image as DIPs times the display scale factor, and any rect that handler
+      // derives in physical pixels would crop exactly like that. Until confirmed,
+      // obsidian_element_screenshot pairs every capture with a metrics block so
+      // agents can trust the numbers over the pixels.
       const outPath =
         (args.path as string | undefined) ??
         join(config.outputDir, `obsidian-window-${Date.now()}.png`);
@@ -216,5 +228,24 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
         images: [{ data: b64, mimeType: "image/png" }],
       };
     },
+  });
+
+  registry.add({
+    name: "obsidian_element_screenshot",
+    // Registered from this module so the three capture surfaces (page, OS window,
+    // element) stay documented side by side, but shipped in the default-on `ui`
+    // toolset: verifying one rendered widget is everyday plugin-dev work, not a
+    // niche devtools task.
+    toolset: "ui",
+    capability: "screenshot",
+    description:
+      "Capture one element as a clipped PNG via the Playwright page, selected by CSS selector. " +
+      "Pairs the image with a metrics block (rect, devicePixelRatio, viewport, computed " +
+      "display/visibility) measured in the live DOM — trust those numbers over the pixels when " +
+      "display scaling is in play. Complements browser_take_screenshot (viewport) and " +
+      "obsidian_screenshot (OS window).",
+    annotations: { readOnlyHint: true },
+    inputSchema: elementScreenshotSchema,
+    handler: async (args) => captureElementScreenshot(router, args),
   });
 }

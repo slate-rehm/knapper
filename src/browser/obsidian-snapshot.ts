@@ -9,20 +9,26 @@ import { UobError } from "../util/errors.js";
 
 const SNAPSHOT_CAP = 80_000;
 
-const SCOPE_SELECTORS: Record<string, string> = {
+export const SCOPE_SELECTORS: Record<string, string> = {
   "active-leaf": ".workspace-leaf.mod-active",
   workspace: ".workspace",
   modal: ".modal-container, .prompt",
   settings: ".vertical-tab-content, .modal.mod-settings",
+  // The reading view is the fallback, not an alternative: a comma list matches in
+  // document order and the source view precedes the reading view inside a leaf,
+  // so `.first()` lands on the cm-editor whenever the note is in an editing mode.
+  editor:
+    ".workspace-leaf.mod-active .cm-editor, .workspace-leaf.mod-active .markdown-reading-view",
 };
 
 export const obsidianSnapshotSchema = {
   scope: z
-    .enum(["active-leaf", "workspace", "modal", "settings", "selector"])
+    .enum(["active-leaf", "workspace", "modal", "settings", "editor", "selector"])
     .default("active-leaf")
     .describe(
       "Region to snapshot. Prefer active-leaf for the current note or pane; workspace for layout; " +
-        "modal for command palette or dialogs; settings for the settings UI; selector for a custom CSS scope.",
+        "modal for command palette or dialogs; settings for the settings UI; editor for just the " +
+        "active editor (reading view when no editor); selector for a custom CSS scope.",
     ),
   selector: z
     .string()

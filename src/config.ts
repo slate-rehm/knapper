@@ -13,6 +13,7 @@ import { parseToolsets, type Toolset } from "./toolsets.js";
 
 /** Transport the MCP server listens on. */
 export type TransportKind = "stdio" | "http";
+export type CommandTransport = "auto" | "cli" | "playwright";
 
 export const TRANSPORT_KINDS = ["stdio", "http"] as const;
 
@@ -61,6 +62,8 @@ export interface Config {
   outputDir: string;
   /** Timeout for a single Obsidian CLI invocation, in ms. */
   cliTimeoutMs: number;
+  /** Transport preference for renderer commands that both CLI and CDP can serve. */
+  commandTransport: CommandTransport;
   /** Session key when this server is bound to one, else undefined. */
   sessionId?: string;
   /**
@@ -109,6 +112,7 @@ export interface ConfigOverrides {
   reconnectMs?: number;
   outputDir?: string;
   cliTimeoutMs?: number;
+  commandTransport?: string;
   sessionId?: string;
   userDataDir?: string;
   runtimeDir?: string;
@@ -287,6 +291,12 @@ function boolFrom(raw: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
+function commandTransportFrom(raw: string | undefined): CommandTransport {
+  const value = raw ?? "auto";
+  if (value === "auto" || value === "cli" || value === "playwright") return value;
+  throw new Error(`Invalid KNAP_COMMAND_TRANSPORT "${value}". Use auto, cli, or playwright.`);
+}
+
 export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): Config {
   const cdpUrl = overrides.cdpUrl ?? env.OBSIDIAN_CDP_URL ?? DEFAULT_CDP_URL;
 
@@ -333,6 +343,9 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
       env.SCREENSHOT_DIR ??
       join(process.cwd(), ".knapper"),
     cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.KNAP_CLI_TIMEOUT_MS, 15_000),
+    commandTransport: commandTransportFrom(
+      overrides.commandTransport ?? env.KNAP_COMMAND_TRANSPORT,
+    ),
     ...(sessionId !== undefined ? { sessionId } : {}),
     userDataDir,
     obsidianConfigPath: obsidianConfigPath(userDataDir),
@@ -378,6 +391,27 @@ export async function loadSessionConfig(
       fixedBy: "obsidian_create_session",
       details: { session: key },
     });
+  }
+  if (
+    descriptor.readiness.phase !== "ready" &&
+    overrides.cdpUrl === undefined &&
+    env.OBSIDIAN_CDP_URL === undefined
+  ) {
+    throw new UobError(
+      "SESSION_NOT_RUNNING",
+      `Session "${key}" is ${descriptor.readiness.phase}.`,
+      {
+        remediation:
+          descriptor.readiness.phase === "starting"
+            ? "Call obsidian_wait_session before binding the MCP server to this session."
+            : "Restart the session or create a new one.",
+        fixedBy:
+          descriptor.readiness.phase === "starting"
+            ? "obsidian_wait_session"
+            : "obsidian_restart_session",
+        details: { session: key, phase: descriptor.readiness.phase },
+      },
+    );
   }
 
   return loadConfig(
