@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,5 +124,16 @@ describe("DefaultProfileLease", () => {
     await expect(lease.run("obsidian_status", async () => "ok")).rejects.toMatchObject({
       code: "DEFAULT_PROFILE_BUSY",
     });
+  });
+
+  it("surfaces a failed active-call decrement", async () => {
+    const lease = new DefaultProfileLease({ idleTimeoutMs: 30_000, env });
+    Object.assign(lease, {
+      touch: vi.fn().mockRejectedValue(new Error("lease write failed")),
+    });
+
+    await expect(lease.run("obsidian_status", async () => "ok")).rejects.toThrow(
+      "lease write failed",
+    );
   });
 });

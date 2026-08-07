@@ -208,12 +208,29 @@ export class DefaultProfileLease {
       Math.min(30_000, Math.max(5_000, Math.floor(this.opts.idleTimeoutMs / 3))),
     );
     heartbeat.unref();
+    let value: T | undefined;
+    let callError: unknown;
     try {
-      return await fn();
-    } finally {
-      clearInterval(heartbeat);
-      await this.touch(-1).catch(() => undefined);
+      value = await fn();
+    } catch (error) {
+      callError = error;
     }
+    clearInterval(heartbeat);
+    let releaseError: unknown;
+    try {
+      await this.touch(-1);
+    } catch (error) {
+      releaseError = error;
+    }
+    if (callError !== undefined && releaseError !== undefined) {
+      throw new AggregateError(
+        [callError, releaseError],
+        "The tool call and default-profile lease cleanup both failed.",
+      );
+    }
+    if (callError !== undefined) throw callError;
+    if (releaseError !== undefined) throw releaseError;
+    return value as T;
   }
 
   async release(): Promise<void> {
