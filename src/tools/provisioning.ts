@@ -3,25 +3,146 @@
  */
 
 import { z } from "zod";
-import { lstat, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { copyFile, lstat, mkdir, readFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type { ServerContext } from "../server.js";
 import { TOOLSET_DESCRIPTIONS, type Toolset } from "../toolsets.js";
 import { launchObsidian, type LaunchResult } from "../connection/launch.js";
-import { findDownloadedAsarVersion, versionDrift } from "../obsidian/version-drift.js";
-import { isObsidianRunning } from "../connection/health.js";
+import {
+  buildObsidianVersions,
+  detectInstalledObsidianPackageVersion,
+  findDownloadedAsarVersion,
+} from "../obsidian/version-drift.js";
+import { isObsidianRunning, type HealthReport } from "../connection/health.js";
+import type { CapabilityRouter } from "../connection/router.js";
 import {
   createManagedVault,
   findVault,
   readGlobalConfig,
   removeManagedVault,
   writeCliFlag,
-  MANAGED_MARKER,
 } from "../connection/vaults.js";
-import { cliSocketPathFor } from "../config.js";
+import { cliSocketPathFor, knapperHome } from "../config.js";
 import { UobError } from "../util/errors.js";
 import { linkPlugin, unlinkPlugin } from "../session/plugin-link.js";
 import { contentOutcome, runCli } from "../obsidian/helpers.js";
+import { patchDescriptor, readDescriptor } from "../session/descriptor.js";
+import { inspectPluginHealth } from "../devcycle/plugin-health.js";
+import { writeFileAtomic, writeJsonAtomic } from "../util/atomic-json.js";
+
+interface MutableJson<T> {
+  path: string;
+  existed: boolean;
+  value: T;
+}
+
+async function backUpInvalidJson(
+  path: string,
+  raw?: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  const directory = join(knapperHome(env), "backups", "invalid-json");
+  const backup = join(directory, `${basename(path)}.${Date.now()}.${randomUUID()}.invalid`);
+  try {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    if (raw !== undefined) await writeFileAtomic(backup, raw, { mode: 0o600 });
+    else await copyFile(path, backup);
+    return backup;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readJsonForMutation<T>(
+  path: string,
+  validate: (value: unknown) => value is T,
+  fallback: T,
+  env?: NodeJS.ProcessEnv,
+): Promise<MutableJson<T>> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { path, existed: false, value: fallback };
+    }
+    const backupPath = await backUpInvalidJson(path, undefined, env);
+    throw new UobError("INVALID_ARGUMENT", `Cannot read ${path}. The file was not replaced.`, {
+      remediation:
+        "Repair the file permissions or restore the configuration, then run setup again.",
+      details: { path, backupPath: backupPath ?? null },
+      cause: error,
+    });
+  }
+
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!validate(value)) throw new Error("The JSON value has the wrong shape.");
+    return { path, existed: true, value };
+  } catch (error) {
+    const backupPath = await backUpInvalidJson(path, raw, env);
+    throw new UobError("INVALID_ARGUMENT", `${path} is not valid configuration JSON.`, {
+      remediation: "Repair the original file, then run setup again. Knapper did not replace it.",
+      details: { path, backupPath: backupPath ?? null },
+      cause: error,
+    });
+  }
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+export async function preflightVaultSetup(
+  vaultPath: string,
+  pluginId?: string,
+  env?: NodeJS.ProcessEnv,
+) {
+  const obsidianDir = join(vaultPath, ".obsidian");
+  const app = await readJsonForMutation(
+    join(obsidianDir, "app.json"),
+    isJsonObject,
+    {} as Record<string, unknown>,
+    env,
+  );
+  const enabled = await readJsonForMutation(
+    join(obsidianDir, "community-plugins.json"),
+    isStringArray,
+    [] as string[],
+    env,
+  );
+
+  if (pluginId !== undefined && pluginId !== "") {
+    try {
+      const manifest = await lstat(join(obsidianDir, "plugins", pluginId, "manifest.json"));
+      if (!manifest.isFile()) throw new Error("not a file");
+    } catch (error) {
+      throw new UobError(
+        "INVALID_ARGUMENT",
+        `Plugin "${pluginId}" is not installed in this vault.`,
+        {
+          remediation: "Link or install the plugin before enabling it.",
+          fixedBy: "obsidian_link_plugin",
+          details: { pluginId, vaultPath },
+          cause: error,
+        },
+      );
+    }
+  }
+
+  return { app, enabled };
+}
+
+export function communityPluginsEnabledConfig(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...value, communityPluginEnabled: true };
+}
 
 async function vaultAutomationState(
   ctx: ServerContext,
@@ -107,7 +228,59 @@ export async function launchWithCdp(
   });
   if (result.cdpUrl !== config.cdpUrl) await router.retarget(result.cdpUrl);
   await router.refreshAvailability(true);
+  if (config.sessionId !== undefined) {
+    const heartbeatAt = new Date().toISOString();
+    await patchDescriptor(config.sessionId, (descriptor) => {
+      const instance = {
+        ...descriptor.instance,
+        cdpPort: result.port,
+        cdpUrl: result.cdpUrl,
+      };
+      if (result.pid !== undefined) instance.pid = result.pid;
+      else delete instance.pid;
+      if (result.pidStartTime !== undefined) instance.pidStartTime = result.pidStartTime;
+      else delete instance.pidStartTime;
+      if (result.browserId !== undefined) instance.browserId = result.browserId;
+      else delete instance.browserId;
+      return {
+        ...descriptor,
+        heartbeatAt,
+        readiness: { phase: "ready", readyAt: heartbeatAt },
+        instance,
+      };
+    });
+  }
   return result;
+}
+
+/**
+ * Read the running app version without turning a diagnostic into a launch.
+ *
+ * The Arch wrapper treats `obsidian version` as an ordinary Electron invocation.
+ * If no instance owns the singleton lock, that command starts the full app without
+ * CDP. The health probe already proves whether a forwarding target exists, so an
+ * offline doctor must stop here instead of creating the failure it is reporting.
+ */
+export async function runningObsidianVersion(
+  router: Pick<CapabilityRouter, "cli">,
+  health: Pick<HealthReport, "running" | "cliEnabled" | "argvCorruption">,
+): Promise<string> {
+  if (!health.running) return "(unavailable — Obsidian is stopped)";
+  if (health.argvCorruption !== undefined) return "(unavailable — CLI arguments are corrupted)";
+  if (!health.cliEnabled) return "(unavailable — Obsidian CLI is disabled)";
+
+  try {
+    const raw = await router.cli.run(["version"], { timeoutMs: 5000 });
+    return (
+      raw
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "")
+        .find((line) => /^v?\d+\.\d+\.\d+/.test(line)) ?? "(unavailable)"
+    );
+  } catch {
+    return "(unavailable)";
+  }
 }
 
 export function registerProvisioningTools(ctx: ServerContext): void {
@@ -116,44 +289,60 @@ export function registerProvisioningTools(ctx: ServerContext): void {
   registry.add({
     name: "obsidian_doctor",
     toolset: "core",
+    alwaysEnabled: true,
+    workspaceIndependent: true,
     description:
       "Full diagnostic: the four precondition states (not running, CLI disabled, CDP closed, " +
       "argv corruption), binary path and version, registered vaults, target vault automation state, " +
       "dev-plugin symlinks, and per-toolset tool availability. Prefer this over obsidian_status when " +
       "something is broken — every problem includes remediation and names a fixing tool when one exists.",
     annotations: { readOnlyHint: true },
+    profileIndependent: true,
     inputSchema: {
       vault: z.string().optional().describe("Vault to inspect for restrict-mode and plugin state"),
+      detail: z
+        .enum(["summary", "full"])
+        .optional()
+        .describe("Summary by default. Full adds authorized paths and local profile diagnostics."),
     },
     handler: async (args) => {
       const vaultArg = args.vault as string | undefined;
+      const full = args.detail === "full";
       const targetVault = vaultArg ?? config.vault;
 
-      const health = await router.health();
+      let health = await router.health({
+        skipCliProbe: config.sessionId === undefined,
+      });
       const availability = await router.refreshAvailability(true);
 
-      let version = "";
-      try {
-        // A cold-starting Obsidian prints startup lines ("Loaded main app package
-        // …") on the same stdout, and taking the whole buffer made doctor report a
-        // log excerpt as the version — in exactly the broken state doctor exists to
-        // diagnose. Pick the line that actually looks like a version.
-        const raw = await router.cli.run(["version"], { timeoutMs: 5000 });
-        const line = raw
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l !== "")
-          .find((l) => /^v?\d+\.\d+\.\d+/.test(l));
-        version = line ?? "(unavailable)";
-      } catch {
-        version = "(unavailable)";
+      let version: string;
+      if (config.sessionId === undefined && health.running) {
+        try {
+          const result = await ctx.profileLease.run("obsidian_doctor", async () => {
+            const leasedHealth = await router.health();
+            return {
+              health: leasedHealth,
+              version: await runningObsidianVersion(router, leasedHealth),
+            };
+          });
+          health = result.health;
+          version = result.version;
+        } catch (error) {
+          version =
+            error instanceof UobError && error.code === "DEFAULT_PROFILE_BUSY"
+              ? "(unavailable — default profile busy)"
+              : "(unavailable)";
+        }
+      } else {
+        version = await runningObsidianVersion(router, health);
       }
+      const defaultProfileLease = await ctx.profileLease.status();
 
-      const toolsets: Record<string, { enabled: boolean; tools: string[] }> = {};
+      const toolsets: Record<string, { enabled: boolean; toolCount: number }> = {};
       const byToolset = registry.groupAllByToolset();
       for (const name of Object.keys(TOOLSET_DESCRIPTIONS) as Toolset[]) {
         const enabled = registry.isToolsetEnabled(name);
-        toolsets[name] = { enabled, tools: byToolset[name] ?? [] };
+        toolsets[name] = { enabled, toolCount: (byToolset[name] ?? []).length };
       }
 
       let vaultState: Awaited<ReturnType<typeof vaultAutomationState>> | undefined;
@@ -166,22 +355,45 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       // can drift for days. A report line, not a precondition: the app works
       // either way, but an agent wondering why a fix "is not live" should see it.
       const downloadedAsar = await findDownloadedAsarVersion(dirname(config.obsidianConfigPath));
-      const drift = versionDrift(version, downloadedAsar);
+      const installedPackage = await detectInstalledObsidianPackageVersion();
+      const versions = buildObsidianVersions({
+        running: version,
+        downloadedAsar,
+        installedPackage: installedPackage?.version,
+        installedPackageSource: installedPackage?.source,
+      });
+      const descriptor =
+        config.sessionId !== undefined ? await readDescriptor(config.sessionId) : undefined;
+      const profile =
+        config.sessionId === undefined
+          ? {
+              kind: "default" as const,
+              workspaceHandle: ctx.currentWorkspaceHandle ?? null,
+              sessionId: null,
+              userDataDir: null,
+              visualIdentity: null,
+            }
+          : {
+              kind: "private" as const,
+              workspaceHandle: ctx.currentWorkspaceHandle ?? null,
+              sessionId: config.sessionId,
+              userDataDir: config.userDataDir,
+              visualIdentity: descriptor?.visualIdentity ?? {
+                state: "degraded" as const,
+                warnings: ["Visual identity was not recorded."],
+              },
+            };
 
       const lines = [
         `Obsidian running: ${health.running ? "yes" : "no"}`,
         `CLI enabled (config): ${health.cliEnabled ? "yes" : "no"}`,
         `CLI reachable: ${health.cliReachable ? "yes" : "no"}`,
-        `CDP reachable: ${health.cdpReachable ? "yes" : "no"} (${health.cdpUrl})`,
+        `CDP reachable: ${health.cdpReachable ? "yes" : "no"}`,
         `Binary: ${config.obsidianBin}`,
         `Version: ${version}`,
-        ...(drift !== undefined
-          ? [
-              `Update pending: ${drift.installed} downloaded, ${drift.running} running — ` +
-                "cold-restart Obsidian (obsidian_restart) to load it.",
-            ]
-          : []),
-        `Config: ${health.configPath}`,
+        `Running vs downloaded ASAR: ${versions.comparisons.runningVsDownloaded}`,
+        `Running vs installed package: ${versions.comparisons.runningVsInstalled}`,
+        ...(full ? [`Config: ${health.configPath}`] : []),
       ];
 
       // Which instance this server drives, and how well CLI commands are pinned to
@@ -189,15 +401,19 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       // which is worth saying out loud because nothing else reports it.
       if (config.sessionId !== undefined) {
         lines.push(
-          `Session: ${config.sessionId}`,
-          `Profile: ${config.userDataDir}`,
+          `Workspace: ${ctx.currentWorkspaceHandle ?? "isolated"}`,
+          ...(full ? [`Profile: ${config.userDataDir}`] : []),
+          `Visual identity: ${profile.visualIdentity?.state ?? "degraded"}`,
           `CLI isolation: ${config.cliIsolation}` +
             (config.cliIsolation === "per-session"
               ? ` (socket ${cliSocketPathFor(config.runtimeDir)})`
               : " — CLI commands are not pinned to this instance; the renderer route is"),
         );
       } else {
-        lines.push("Session: none (driving the installation's own Obsidian)");
+        lines.push(
+          `Workspace: ${ctx.currentWorkspaceHandle ?? "none"} (default Obsidian profile)`,
+          `Default profile: ${defaultProfileLease.state}`,
+        );
       }
 
       if (health.argvCorruption) {
@@ -212,22 +428,22 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       const vaultStatus = await router.fence.status();
       const authorizedCount = vaultStatus.filter((v) => v.authorized).length;
 
-      lines.push("", `Registered vaults (${authorizedCount} authorized):`);
+      lines.push("", `Registered vaults: ${vaultStatus.length} (${authorizedCount} authorized)`);
       for (const v of vaultStatus) {
+        if (!v.authorized) continue;
         const grantTag =
           v.grant === "created"
-            ? "authorized, knapper-created (removable)"
-            : v.grant === "adopted"
-              ? "authorized by the user (never deleted by knapper)"
-              : "NOT AUTHORIZED — vault-scoped tools will refuse";
+            ? "authorized scratch"
+            : "authorized by the user (never deleted by knapper)";
         const tags = [v.open ? "open" : "", grantTag].filter((t) => t !== "").join(", ");
-        lines.push(`  - ${v.name} (${tags}) → ${v.path}`);
+        lines.push(`  - ${v.name} (${tags})${full ? ` → ${v.path}` : ""}`);
       }
       if (authorizedCount === 0) {
         lines.push(
           "  No vault is authorized. Every vault-scoped tool will refuse until the user runs",
           "  `npx knapper authorize <vault path>` themselves, or obsidian_create_vault makes a",
-          "  throwaway one. Do not suggest the authorize command unless the user asked to work",
+          "  registered one. Prefer obsidian_workspace_create for throwaway work. Do not suggest",
+          "  authorization unless the user asked to work",
           "  in a specific existing vault.",
         );
       }
@@ -253,32 +469,47 @@ export function registerProvisioningTools(ctx: ServerContext): void {
 
       lines.push("", "Toolsets:");
       for (const [name, info] of Object.entries(toolsets)) {
-        lines.push(
-          `  ${name}: ${info.enabled ? "enabled" : "disabled"} (${info.tools.length} tools)`,
-        );
+        lines.push(`  ${name}: ${info.enabled ? "enabled" : "disabled"} (${info.toolCount} tools)`);
       }
 
       return {
         text: lines.join("\n"),
         json: {
-          health,
+          health: {
+            running: health.running,
+            cliEnabled: health.cliEnabled,
+            cliReachable: health.cliReachable,
+            cdpReachable: health.cdpReachable,
+            windows: health.cdpReachable
+              ? await router.playwright.windowSummaries().catch(() => [])
+              : [],
+            problems: health.problems,
+            ...(full ? { configPath: health.configPath } : {}),
+          },
           availability,
           binary: config.obsidianBin,
           version,
-          versionDrift: drift ?? null,
+          versions,
           downloadedAsarVersion: downloadedAsar ?? null,
           argvCorruption: health.argvCorruption ?? null,
-          vaults: vaultStatus.map((v) => ({
-            ...v,
-            // Retained for compatibility with the pre-fence shape; `grant` is the
-            // field to read now, since it distinguishes created from adopted.
-            knapperManaged: v.grant === "created",
-          })),
+          vaults: vaultStatus.map((vault) =>
+            vault.authorized
+              ? {
+                  name: vault.name,
+                  open: vault.open,
+                  authorized: true,
+                  grant: vault.grant,
+                  ...(full ? { path: vault.path } : {}),
+                }
+              : { open: vault.open, authorized: false },
+          ),
           authorizedVaultCount: authorizedCount,
           targetVault: targetVault ?? null,
           vaultState: vaultState ?? null,
           toolsets,
           transports: availability,
+          defaultProfileLease,
+          profile,
         },
       };
     },
@@ -342,6 +573,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     inputSchema: {
       enabled: z.boolean().optional().describe("Enable (default) or disable the CLI"),
     },
+    annotations: { readOnlyHint: false, destructiveHint: true },
     handler: async (args) => {
       const enabled = args.enabled !== false;
       const running = await isObsidianRunning(router.processScope);
@@ -396,6 +628,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       vault: z.string().describe("Registered vault name"),
       pluginId: z.string().optional().describe("Community plugin id to enable after setup"),
     },
+    annotations: { readOnlyHint: false, destructiveHint: true },
     handler: async (args) => {
       const vault = args.vault as string;
       const pluginId = args.pluginId as string | undefined;
@@ -407,44 +640,137 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       // silently turned this into a write into any registered vault.
       const target = await router.fence.resolve(vault);
 
-      await runCli(router, { command: "plugins:restrict", args: ["off"], vault });
+      // Complete every read and shape check before the first mutation. Invalid
+      // settings are backed up outside the vault and left unchanged.
+      const preflight = await preflightVaultSetup(target.path, pluginId);
+      const steps: Record<
+        string,
+        {
+          status: "changed" | "unchanged" | "verified" | "failed" | "skipped";
+          error?: string;
+        }
+      > = {
+        preflight: { status: "verified" },
+      };
 
-      const appPath = join(target.path, ".obsidian", "app.json");
-      let appCfg: Record<string, unknown> = {};
+      const appCfg = communityPluginsEnabledConfig(preflight.app.value);
       try {
-        appCfg = JSON.parse(await readFile(appPath, "utf8")) as Record<string, unknown>;
-      } catch {
-        appCfg = {};
-      }
-      appCfg.communityPluginEnabled = true;
-      const { writeFile, mkdir } = await import("node:fs/promises");
-      await mkdir(join(target.path, ".obsidian"), { recursive: true });
-      await writeFile(appPath, `${JSON.stringify(appCfg, null, 2)}\n`, "utf8");
-
-      if (pluginId !== undefined && pluginId !== "") {
-        await runCli(router, {
-          command: "plugin:enable",
-          args: [`id=${pluginId}`],
-          vault,
-        });
+        if (preflight.app.value.communityPluginEnabled === true) {
+          steps.communityPlugins = { status: "unchanged" };
+        } else {
+          await writeJsonAtomic(preflight.app.path, appCfg, { mode: 0o600 });
+          steps.communityPlugins = { status: "changed" };
+        }
+      } catch (error) {
+        steps.communityPlugins = {
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        };
       }
 
+      if (steps.communityPlugins.status !== "failed") {
+        try {
+          const before = await runCli(router, {
+            command: "plugins:restrict",
+            vault,
+          });
+          if (/\boff\b/i.test(before.stdout)) {
+            steps.trust = { status: "unchanged" };
+          } else {
+            await runCli(router, {
+              command: "plugins:restrict",
+              args: ["off"],
+              vault,
+            });
+            steps.trust = { status: "changed" };
+          }
+        } catch (error) {
+          steps.trust = {
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      } else {
+        steps.trust = { status: "skipped" };
+      }
+
+      if (pluginId === undefined || pluginId === "") {
+        steps.pluginEnabled = { status: "skipped" };
+        steps.pluginLoaded = { status: "skipped" };
+      } else if (steps.trust.status === "failed" || steps.communityPlugins.status === "failed") {
+        steps.pluginEnabled = { status: "skipped" };
+        steps.pluginLoaded = { status: "skipped" };
+      } else {
+        try {
+          if (preflight.enabled.value.includes(pluginId)) {
+            steps.pluginEnabled = { status: "unchanged" };
+          } else {
+            await runCli(router, {
+              command: "plugin:enable",
+              args: [`id=${pluginId}`],
+              vault,
+            });
+            steps.pluginEnabled = { status: "changed" };
+          }
+        } catch (error) {
+          steps.pluginEnabled = {
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+
+        if (steps.pluginEnabled.status !== "failed") {
+          try {
+            const health = await inspectPluginHealth(router, pluginId, vault);
+            steps.pluginLoaded = health.loaded
+              ? { status: "verified" }
+              : {
+                  status: "failed",
+                  error: "The plugin is enabled but is not loaded.",
+                };
+          } catch (error) {
+            steps.pluginLoaded = {
+              status: "failed",
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        } else {
+          steps.pluginLoaded = { status: "skipped" };
+        }
+      }
+
+      const failures = Object.entries(steps)
+        .filter(([, step]) => step.status === "failed")
+        .map(([step, result]) => ({
+          step,
+          error: result.error ?? "Unknown error",
+        }));
       const state = await vaultAutomationState(ctx, vault, config.obsidianConfigPath);
       return {
-        text: `Vault "${vault}" is automation-ready (restrict off, community plugins on).`,
-        json: { vault, pluginId: pluginId ?? null, state },
+        text:
+          failures.length === 0
+            ? `Vault "${vault}" is automation-ready.`
+            : `Vault "${vault}" setup completed with ${failures.length} failed step(s).`,
+        json: {
+          ok: failures.length === 0,
+          partial: failures.length > 0,
+          vault,
+          pluginId: pluginId ?? null,
+          steps,
+          failures,
+          state,
+        },
       };
     },
   });
 
   registry.add({
     name: "obsidian_create_vault",
-    toolset: "core",
+    toolset: "vault",
     description:
-      "Create a disposable test vault and register it with Obsidian. Writes a " +
-      `\`${MANAGED_MARKER}\` marker into the directory, which is the only thing that later lets ` +
-      "obsidian_remove_vault delete it — a vault you made by hand can never be removed by that " +
-      "tool. Refuses to adopt a directory that already contains files. Obsidian caches the vault " +
+      "Create a test vault and register it with Obsidian. Stores an external authorization record " +
+      "under KNAP_HOME. Knapper never deletes this directory. Refuses to adopt a directory that " +
+      "already contains files. Obsidian caches the vault " +
       "registry at startup, so the new vault is not usable until a cold restart.",
     inputSchema: {
       path: z.string().describe("Absolute path for the vault directory (created if missing)"),
@@ -455,6 +781,19 @@ export function registerProvisioningTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       const path = args.path as string;
+
+      if (config.sessionId !== undefined) {
+        throw new UobError(
+          "INVALID_ARGUMENT",
+          "A workspace-bound server cannot add another vault to its private profile.",
+          {
+            remediation:
+              "Create a separate workspace for the new vault. This keeps each private profile tied to one vault.",
+            fixedBy: "obsidian_workspace_create",
+          },
+        );
+      }
+
       const result = await createManagedVault(path, new Date(), config.obsidianConfigPath);
 
       let restarted = false;
@@ -464,13 +803,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         // A running instance holds obsidian.json in memory and rewrites it on exit,
         // so the registry edit only takes effect after a genuine cold start.
         try {
-          await launchObsidian({
-            obsidianBin: config.obsidianBin,
-            port: config.cdpPort,
-            restart: true,
-            logger: ctx.logger,
-          });
-          await router.refreshAvailability(true);
+          await launchWithCdp(ctx, { restart: true });
           restarted = true;
 
           // A brand-new vault has community plugins off, so plugin tools fail on
@@ -538,36 +871,34 @@ export function registerProvisioningTools(ctx: ServerContext): void {
           result.createdDirectory
             ? "Directory created."
             : "Directory already existed and was empty.",
-          `Marker written: ${MANAGED_MARKER}`,
+          "Authorization stored outside the vault.",
           status,
         ].join("\n"),
-        json: { ...result, restarted, automationReady, restartError: restartError ?? null },
+        json: {
+          ...result,
+          restarted,
+          automationReady,
+          restartError: restartError ?? null,
+        },
       };
     },
   });
 
   registry.add({
     name: "obsidian_remove_vault",
-    toolset: "core",
+    toolset: "vault",
     description:
-      "Remove a test vault created by obsidian_create_vault: unregister it from Obsidian and, with " +
-      "deleteFiles=true, delete its directory. " +
-      `**Refuses outright unless the vault carries a \`${MANAGED_MARKER}\` marker**, so vaults you ` +
-      "created yourself are never touched — delete those from Obsidian's vault switcher by hand. " +
-      "Also refuses a path that contains another registered vault.",
+      "Unregister an authorized vault from Obsidian. This tool never deletes files. Scratch " +
+      "workspace cleanup is available only through obsidian_workspace_destroy and moves content " +
+      "to recoverable Knapper trash.",
     inputSchema: {
       vault: z
         .string()
         .describe("Registered vault name, or an absolute path to the vault directory"),
-      deleteFiles: z
-        .boolean()
-        .optional()
-        .describe("Also delete the directory and its contents (default: unregister only)"),
     },
     annotations: { destructiveHint: true },
     handler: async (args) => {
       const wanted = args.vault as string;
-      const deleteFiles = args.deleteFiles === true;
 
       const global = await readGlobalConfig(config.obsidianConfigPath);
       const vaults = global?.vaults ?? [];
@@ -584,17 +915,12 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         });
       }
 
-      const result = await removeManagedVault(
-        targetPath,
-        vaults,
-        deleteFiles,
-        config.obsidianConfigPath,
-      );
+      const result = await removeManagedVault(targetPath, vaults, false, config.obsidianConfigPath);
       return {
         text: [
           `Removed test vault at ${result.path}`,
           result.unregistered ? "Unregistered from obsidian.json." : "Was not registered.",
-          result.deletedDirectory ? "Directory deleted." : "Directory left on disk.",
+          "Directory left on disk.",
           "Obsidian caches the registry at startup; restart it to drop the entry from the switcher.",
         ].join("\n"),
         json: result,

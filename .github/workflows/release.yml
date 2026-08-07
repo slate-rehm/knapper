@@ -7,7 +7,7 @@ name: Release
 # This project is not published to any registry. The release artifact is the npm
 # tarball attached to the GitHub Release, which users install by URL:
 #
-#   npm i -g https://github.com/slate-rehm/knapper/releases/download/v0.1.0/knapper-0.1.0.tgz
+#   npm i -g https://github.com/bearfire-dev/knapper/releases/download/v0.6.0-beta.7/knapper-0.6.0-beta.7.tgz
 #
 # The version bump itself is an ordinary change: bump it in a PR into dev, then
 # promote dev -> master. This workflow only tags and releases what is already on

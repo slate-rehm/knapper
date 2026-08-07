@@ -51,6 +51,30 @@ export interface ResolvedPage {
   url: string;
 }
 
+export interface SafeWindowSummary {
+  targetId: string;
+  kind: "main" | "popout";
+  authorized: boolean;
+  title?: string;
+  url?: string;
+  vaultName?: string;
+}
+
+/** Remove all renderer metadata when the window is outside the vault fence. */
+export function safeWindowSummary(
+  window: Omit<ResolvedPage, "page"> & { targetId: string },
+  authorized: boolean,
+): SafeWindowSummary {
+  const base = { targetId: window.targetId, kind: window.kind, authorized };
+  if (!authorized) return base;
+  return {
+    ...base,
+    title: window.title,
+    url: window.url,
+    ...(window.vaultName !== undefined ? { vaultName: window.vaultName } : {}),
+  };
+}
+
 export class PlaywrightSession {
   private browser?: Browser;
   private context?: BrowserContext;
@@ -165,6 +189,41 @@ export class PlaywrightSession {
     return out;
   }
 
+  /**
+   * Window metadata that is safe to return from tools and status reports.
+   * Unauthorized windows reveal only an opaque target id and their window kind.
+   */
+  async windowSummaries(): Promise<SafeWindowSummary[]> {
+    const summaries: SafeWindowSummary[] = [];
+    for (const window of await this.windows()) {
+      const targetId = await this.targetIdFor(window.page);
+      if (targetId === undefined) continue;
+
+      const vaultName = await this.vaultOfWindow(window);
+      let authorized = false;
+      if (vaultName !== undefined) {
+        try {
+          authorized = await this.opts.isVaultAuthorized(vaultName);
+        } catch {
+          authorized = false;
+        }
+      }
+      summaries.push(
+        safeWindowSummary(
+          {
+            targetId,
+            kind: window.kind,
+            title: window.title,
+            url: window.url,
+            ...(vaultName !== undefined ? { vaultName } : {}),
+          },
+          authorized,
+        ),
+      );
+    }
+    return summaries;
+  }
+
   /** Pin subsequent calls to a specific CDP target id. */
   attachTo(targetId: string | undefined): void {
     this.pinnedTargetId = targetId;
@@ -215,18 +274,14 @@ export class PlaywrightSession {
 
         const vaultName = await this.vaultOfWindow(w);
         if (vaultName === undefined || !(await this.opts.isVaultAuthorized(vaultName))) {
-          throw new UobError(
-            "VAULT_NOT_AUTHORIZED",
-            `The pinned window is showing "${vaultName ?? "an unidentifiable vault"}", which is not authorized.`,
-            {
-              remediation:
-                "The window switched vaults after it was pinned, or was never authorized. Attach " +
-                "to an authorized window instead; knapper re-checks the pin on every call rather " +
-                "than trusting it.",
-              fixedBy: "obsidian_list_targets",
-              details: { pinnedTargetId: this.pinnedTargetId, vault: vaultName },
-            },
-          );
+          throw new UobError("VAULT_NOT_AUTHORIZED", "The pinned window is not authorized.", {
+            remediation:
+              "The window switched vaults after it was pinned, or was never authorized. Attach " +
+              "to an authorized window instead; knapper re-checks the pin on every call rather " +
+              "than trusting it.",
+            fixedBy: "obsidian_list_targets",
+            details: { pinnedTargetId: this.pinnedTargetId },
+          });
         }
         return w.page;
       }

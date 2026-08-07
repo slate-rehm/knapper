@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { VaultFence } from "../../src/connection/fence.js";
 import {
   MANAGED_MARKER,
   assertVaultRemovable,
+  removeManagedMarker,
   writeManagedMarker,
   type VaultEntry,
 } from "../../src/connection/vaults.js";
@@ -15,8 +16,8 @@ import { createLogger } from "../../src/util/logger.js";
 /**
  * The fence is the thing standing between an agent and someone's real notes, so
  * these tests are written as statements about what it refuses. Every case uses a
- * throwaway registry and real tmpdirs — the marker contract is a filesystem fact,
- * and mocking the filesystem would test the mock.
+ * throwaway registries and real temporary directories. Authorization identity is
+ * a filesystem fact, so a filesystem mock would not test the safety boundary.
  */
 
 const NOW = new Date("2026-07-26T00:00:00.000Z");
@@ -24,6 +25,7 @@ const logger = createLogger("silent");
 
 interface Fixture {
   configPath: string;
+  env: NodeJS.ProcessEnv;
   vaultPath: (name: string) => string;
 }
 
@@ -38,18 +40,20 @@ async function fixture(names: string[]): Promise<Fixture> {
     vaults[`id${i}`] = { path, open: false };
   }
   await writeFile(configPath, JSON.stringify({ vaults }), "utf8");
-  return { configPath, vaultPath: (name) => join(root, name) };
+  const env = { ...process.env, KNAP_HOME: join(root, "knap-home") };
+  return { configPath, env, vaultPath: (name) => join(root, name) };
 }
 
 const makeFence = (f: Fixture, defaultVault?: string) =>
   new VaultFence({
     configPath: f.configPath,
+    env: f.env,
     logger,
     ...(defaultVault !== undefined ? { defaultVault } : {}),
   });
 
 describe("VaultFence.resolve — refusing to guess", () => {
-  it("REFUSES a registered vault with no marker, which is any vault the user made", async () => {
+  it("REFUSES a registered vault with no authorization", async () => {
     const f = await fixture(["RealNotes"]);
     const fence = makeFence(f);
 
@@ -69,8 +73,8 @@ describe("VaultFence.resolve — refusing to guess", () => {
 
   it("REFUSES to pick when two vaults are authorized", async () => {
     const f = await fixture(["a", "b"]);
-    await writeManagedMarker(f.vaultPath("a"), NOW, "adopted");
-    await writeManagedMarker(f.vaultPath("b"), NOW, "adopted");
+    await writeManagedMarker(f.vaultPath("a"), NOW, "adopted", f.env);
+    await writeManagedMarker(f.vaultPath("b"), NOW, "adopted", f.env);
     const fence = makeFence(f);
 
     await expect(fence.resolve()).rejects.toThrow(/ambiguous/i);
@@ -78,7 +82,7 @@ describe("VaultFence.resolve — refusing to guess", () => {
 
   it("uses the only authorized vault when exactly one exists", async () => {
     const f = await fixture(["scratch", "RealNotes"]);
-    await writeManagedMarker(f.vaultPath("scratch"), NOW, "created");
+    await writeManagedMarker(f.vaultPath("scratch"), NOW, "created", f.env);
     const fence = makeFence(f);
 
     const resolved = await fence.resolve();
@@ -104,17 +108,17 @@ describe("VaultFence.resolve — refusing to guess", () => {
 });
 
 describe("VaultFence — revocation takes effect without a restart", () => {
-  it("stops authorizing as soon as the marker is gone", async () => {
+  it("stops authorizing as soon as the registry record is gone", async () => {
     // `knapper revoke` runs in a different process, so a cached negative would let
     // a revoked vault stay reachable for the life of the server. Positives may be
     // cached; negatives may not.
     const f = await fixture(["scratch"]);
-    await writeManagedMarker(f.vaultPath("scratch"), NOW, "adopted");
+    await writeManagedMarker(f.vaultPath("scratch"), NOW, "adopted", f.env);
     const fence = makeFence(f);
 
     expect((await fence.resolve("scratch")).name).toBe("scratch");
 
-    await rm(join(f.vaultPath("scratch"), MANAGED_MARKER));
+    await removeManagedMarker(f.vaultPath("scratch"), f.env);
     fence.invalidate();
 
     await expect(fence.resolve("scratch")).rejects.toMatchObject({
@@ -130,7 +134,7 @@ describe("VaultFence — revocation takes effect without a restart", () => {
       code: "VAULT_NOT_AUTHORIZED",
     });
 
-    await writeManagedMarker(f.vaultPath("scratch"), NOW, "adopted");
+    await writeManagedMarker(f.vaultPath("scratch"), NOW, "adopted", f.env);
     expect((await fence.resolve("scratch")).grant).toBe("adopted");
   });
 });
@@ -138,36 +142,47 @@ describe("VaultFence — revocation takes effect without a restart", () => {
 describe("assertVaultRemovable — authorization is not permission to delete", () => {
   const entries: VaultEntry[] = [];
 
+  async function scratch(): Promise<{ path: string; env: NodeJS.ProcessEnv }> {
+    const home = await mkdtemp(join(tmpdir(), "knap-home-"));
+    const key = "scratch-a3f19c22";
+    const path = join(home, "sessions", key, key);
+    await mkdir(path, { recursive: true });
+    return { path, env: { ...process.env, KNAP_HOME: home } };
+  }
+
   it("REFUSES to delete a vault the user authorized", async () => {
     // This is the invariant that makes `knapper authorize` safe to run against a
     // vault of real notes. If an adopted grant fed the delete path, the consent
     // step would be a loaded gun.
     const dir = await mkdtemp(join(tmpdir(), "knap-adopted-"));
-    await writeManagedMarker(dir, NOW, "adopted");
+    const env = { ...process.env, KNAP_HOME: join(dir, "knap-home") };
+    await writeManagedMarker(dir, NOW, "adopted", env);
 
-    await expect(assertVaultRemovable(dir, entries)).rejects.toMatchObject({
+    await expect(assertVaultRemovable(dir, entries, env)).rejects.toMatchObject({
       code: "VAULT_NOT_MANAGED",
     });
   });
 
-  it("allows deleting a vault knapper created", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "knap-created-"));
-    await writeManagedMarker(dir, NOW, "created");
+  it("does not let an external record grant session scratch deletion", async () => {
+    const { path, env } = await scratch();
+    await writeManagedMarker(path, NOW, "created", env);
 
-    await expect(assertVaultRemovable(dir, entries)).resolves.toMatchObject({
-      managedBy: "knapper",
+    await expect(assertVaultRemovable(path, entries, env)).rejects.toMatchObject({
+      code: "VAULT_NOT_MANAGED",
     });
   });
 
-  it("treats a pre-fence marker with no grant as created, so old scratch vaults stay removable", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "knap-legacy-"));
+  it("keeps legacy markers inactive", async () => {
+    const { path, env } = await scratch();
     await writeFile(
-      join(dir, MANAGED_MARKER),
+      join(path, MANAGED_MARKER),
       JSON.stringify({ managedBy: "knapper", createdAt: NOW.toISOString(), note: "legacy" }),
       "utf8",
     );
 
-    await expect(assertVaultRemovable(dir, entries)).resolves.toBeDefined();
+    await expect(assertVaultRemovable(path, entries, env)).rejects.toMatchObject({
+      code: "VAULT_NOT_MANAGED",
+    });
   });
 });
 

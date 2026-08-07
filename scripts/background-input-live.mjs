@@ -9,15 +9,41 @@
  * attaches to a daily-driver app, so emulation left switched on would make the
  * user's window behave as permanently focused for the rest of the session.
  *
- *   VAULT=agent-vault node scripts/background-input-live.mjs
+ * The suite launches its own private profile and dynamic CDP endpoint.
+ *
+ *   node scripts/background-input-live.mjs
  */
 
 import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { createDisposableWorkspace, createLiveHome, removeLiveHome } from "./lib/live-harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const VAULT = process.env.VAULT ?? "agent-vault";
+let VAULT;
+const CONTROL_TOOLS = new Set([
+  "obsidian_agent_open",
+  "obsidian_agent_close",
+  "obsidian_workspace_claim_default",
+  "obsidian_workspace_stop",
+  "obsidian_workspace_release",
+]);
+let agentHandle;
+let workspaceHandle;
+const execFileAsync = promisify(execFile);
+
+const activeDesktopWindow = async () => {
+  if (!process.env.HYPRLAND_INSTANCE_SIGNATURE) return undefined;
+  try {
+    const { stdout } = await execFileAsync("hyprctl", ["activewindow", "-j"]);
+    const window = JSON.parse(stdout);
+    return { address: window.address, class: window.class, title: window.title };
+  } catch {
+    return undefined;
+  }
+};
 
 class McpClient {
   #child;
@@ -25,9 +51,10 @@ class McpClient {
   #pending = new Map();
   #nextId = 1;
 
-  constructor(args = []) {
+  constructor(args = [], env = process.env) {
     this.#child = spawn("node", [join(root, "dist", "cli.js"), ...args], {
       stdio: ["pipe", "pipe", "pipe"],
+      env,
     });
     this.#child.stdout.on("data", (c) => this.#onData(c));
     this.#child.stderr.on("data", (c) => {
@@ -69,16 +96,18 @@ class McpClient {
   }
 
   async call(name, args = {}) {
-    const res = await this.send("tools/call", { name, arguments: args });
+    const input =
+      workspaceHandle !== undefined && !CONTROL_TOOLS.has(name)
+        ? { ...args, workspaceHandle }
+        : args;
+    const res = await this.send("tools/call", { name, arguments: input });
+    if (res.error) throw new Error(`${name}: ${res.error.message}`);
     const text = (res.result?.content ?? []).map((c) => c.text ?? "").join("\n");
-    const m = /```json\n([\s\S]*?)\n```/.exec(text);
-    let json;
-    try {
-      json = m ? JSON.parse(m[1]) : undefined;
-    } catch {
-      json = undefined;
-    }
-    return { text, json, isError: res.result?.isError === true };
+    return {
+      text,
+      json: res.result?.structuredContent,
+      isError: res.result?.isError === true,
+    };
   }
 
   close() {
@@ -122,12 +151,23 @@ console.log("\n\x1b[1m=== knapper background input — live ===\x1b[0m");
 console.log(`vault: ${VAULT}`);
 console.log("Do NOT click into Obsidian while this runs.\n");
 
-const client = new McpClient(["--toolsets", "all", "--vault", VAULT]);
+const liveHome = await createLiveHome("knapper-bg-input-");
+const client = new McpClient(["--toolsets", "all"], liveHome.env);
 await client.send("initialize", {
   protocolVersion: "2024-11-05",
   capabilities: {},
   clientInfo: { name: "bg-input-live", version: "1" },
 });
+const isolated = await createDisposableWorkspace(client, root, {
+  home: liveHome.home,
+  agentLabel: "bg-input-live",
+  label: "background-input-scratch",
+});
+agentHandle = isolated.agentHandle;
+workspaceHandle = isolated.workspaceHandle;
+VAULT = isolated.session.vault?.name;
+assert(typeof VAULT === "string", "isolated workspace has no vault identity");
+const foregroundBefore = await activeDesktopWindow();
 
 console.log("Preconditions");
 await check("Obsidian is NOT the focused window (this test is meaningless otherwise)", async () => {
@@ -175,15 +215,17 @@ await check("Escape closes the palette again", async () => {
   assert(/false/.test(open), "the palette is still open");
 });
 
-console.log("\nEmulation is not left switched on");
-await check("document.hasFocus() is false again after input", async () => {
-  // The steady-state property scripts/smoke-test.md checks by hand: the user's
-  // window must not behave as permanently focused once knapper is done with it.
-  const focused = await evalIn(client, "document.hasFocus()");
-  assert(/false/.test(focused), "focus emulation leaked past the input call");
+console.log("\nInput does not steal desktop focus");
+await check("the desktop foreground window is unchanged after input", async () => {
+  const foregroundAfter = await activeDesktopWindow();
+  if (foregroundBefore === undefined || foregroundAfter === undefined) return;
+  assert(
+    foregroundAfter.address === foregroundBefore.address,
+    `desktop focus moved from ${foregroundBefore.class} to ${foregroundAfter.class}`,
+  );
 });
 
-await check("an unpaired browser_keydown does not leak emulation past shutdown", async () => {
+await check("an unpaired browser_keydown is released during MCP shutdown", async () => {
   const down = await client.call("browser_keydown", { key: "Shift" });
   assert(!down.isError, `keydown failed: ${down.text.slice(0, 200)}`);
 
@@ -194,15 +236,31 @@ await check("an unpaired browser_keydown does not leak emulation past shutdown",
   client.close();
   await new Promise((r) => setTimeout(r, 1200));
 
-  const after = new McpClient(["--toolsets", "all", "--vault", VAULT]);
-  await after.send("initialize", {
-    protocolVersion: "2024-11-05",
-    capabilities: {},
-    clientInfo: { name: "bg-input-live-2", version: "1" },
-  });
-  const focused = await evalIn(after, "document.hasFocus()");
-  after.close();
-  assert(/false/.test(focused), "a dropped session left the window emulating focus");
+  const after = new McpClient(["--toolsets", "all", "--vault", VAULT], liveHome.env);
+  try {
+    await after.send("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "bg-input-live-2", version: "1" },
+    });
+    const stopped = await after.call("obsidian_workspace_stop", { workspaceHandle });
+    assert(!stopped.isError, `workspace stop failed: ${stopped.text}`);
+    const released = await after.call("obsidian_workspace_release", { workspaceHandle });
+    assert(!released.isError, `workspace release failed: ${released.text}`);
+    workspaceHandle = undefined;
+    const closed = await after.call("obsidian_agent_close", { agentHandle });
+    assert(!closed.isError, `agent close failed: ${closed.text}`);
+  } finally {
+    after.close();
+    await removeLiveHome(liveHome.home);
+  }
+  const foregroundAfter = await activeDesktopWindow();
+  if (foregroundBefore !== undefined && foregroundAfter !== undefined) {
+    assert(
+      foregroundAfter.address === foregroundBefore.address,
+      `desktop focus moved from ${foregroundBefore.class} to ${foregroundAfter.class}`,
+    );
+  }
 });
 
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);

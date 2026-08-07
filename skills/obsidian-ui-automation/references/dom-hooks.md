@@ -5,7 +5,7 @@ scopes. Verified against Obsidian **1.12.7**.
 
 This is a condensed subset. The canonical version — with per-selector verification notes,
 the full `data-type` table, and body-class observations — is `docs/dom-hooks.md` in the
-[knapper repo](https://github.com/slate-rehm/knapper/blob/master/docs/dom-hooks.md). Keep the
+[knapper repo](https://github.com/bearfire-dev/knapper/blob/master/docs/dom-hooks.md). Keep the
 two in agreement; do not add a selector here that is not there.
 
 ## Stable (prefer these)

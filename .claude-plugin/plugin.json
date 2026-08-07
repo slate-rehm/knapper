@@ -1,13 +1,13 @@
 {
   "name": "knapper",
-  "version": "0.6.0-beta.6",
+  "version": "0.6.0-beta.7",
   "description": "MCP server for Obsidian plugin development: integrated browser, debugging, and session-based vaults for agents.",
   "author": {
     "name": "slate-rehm",
     "url": "https://github.com/slate-rehm"
   },
-  "homepage": "https://github.com/slate-rehm/knapper#readme",
-  "repository": "https://github.com/slate-rehm/knapper",
+  "homepage": "https://github.com/bearfire-dev/knapper#readme",
+  "repository": "https://github.com/bearfire-dev/knapper",
   "license": "MIT",
   "keywords": ["obsidian", "mcp", "plugin-development", "playwright", "cdp", "automation"]
 }

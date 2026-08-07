@@ -2,23 +2,34 @@
  * Live verification of the vault fence against a running Obsidian.
  *
  * The unit tests prove the fence's logic; this proves it is actually wired into
- * every path that reaches the app. It needs at least one authorized vault and one
- * unauthorized vault open at the same time, which is the situation that matters and
- * the one no mock reproduces.
+ * every path that reaches the app. It launches a private disposable workspace. If
+ * that private registry has no second unauthorized window, the cross-window checks
+ * skip instead of opening a user vault.
  *
- * Non-destructive by design: it reads, refuses, and never writes a note. Safe to
- * run against a machine with real vaults open — that is the point.
+ * Non-destructive by design: it reads, refuses, and never writes a note.
  *
- *   AUTHORIZED=agent-vault UNAUTHORIZED=content node scripts/fence-live.mjs
+ *   node scripts/fence-live.mjs
  */
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { createDisposableWorkspace, createLiveHome, removeLiveHome } from "./lib/live-harness.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const AUTHORIZED = process.env.AUTHORIZED ?? "agent-vault";
-const UNAUTHORIZED = process.env.UNAUTHORIZED ?? "content";
+let AUTHORIZED;
+let UNAUTHORIZED;
+const CONTROL_TOOLS = new Set([
+  "obsidian_agent_open",
+  "obsidian_agent_close",
+  "obsidian_workspace_claim_default",
+  "obsidian_workspace_stop",
+  "obsidian_workspace_release",
+]);
+let agentHandle;
+let workspaceHandle;
 
 class McpClient {
   #child;
@@ -26,9 +37,10 @@ class McpClient {
   #pending = new Map();
   #nextId = 1;
 
-  constructor(args = []) {
+  constructor(args = [], env = process.env) {
     this.#child = spawn("node", [join(root, "dist", "cli.js"), ...args], {
       stdio: ["pipe", "pipe", "pipe"],
+      env,
     });
     this.#child.stdout.on("data", (c) => this.#onData(c));
     this.#child.stderr.on("data", (c) => {
@@ -70,25 +82,24 @@ class McpClient {
   }
 
   async call(name, args = {}) {
-    const res = await this.send("tools/call", { name, arguments: args });
+    const input =
+      workspaceHandle !== undefined && !CONTROL_TOOLS.has(name)
+        ? { ...args, workspaceHandle }
+        : args;
+    const res = await this.send("tools/call", { name, arguments: input });
+    if (res.error) throw new Error(`${name}: ${res.error.message}`);
     const text = (res.result?.content ?? []).map((c) => c.text ?? "").join("\n");
-    return { text, isError: res.result?.isError === true, json: extractJson(text), raw: res };
+    return {
+      text,
+      isError: res.result?.isError === true,
+      json: res.result?.structuredContent,
+      raw: res,
+    };
   }
 
   close() {
     this.#child.stdin.end();
     this.#child.kill();
-  }
-}
-
-/** The registry renders a tool's structured payload as a fenced json block. */
-function extractJson(text) {
-  const m = /```json\n([\s\S]*?)\n```/.exec(text);
-  if (!m) return undefined;
-  try {
-    return JSON.parse(m[1]);
-  } catch {
-    return undefined;
   }
 }
 
@@ -125,12 +136,66 @@ console.log("\n\x1b[1m=== knapper vault fence — live ===\x1b[0m");
 console.log(`authorized:   ${AUTHORIZED}`);
 console.log(`unauthorized: ${UNAUTHORIZED}\n`);
 
-const client = new McpClient(["--toolsets", "all"]);
+const liveHome = await createLiveHome("knapper-fence-");
+const client = new McpClient(["--toolsets", "all"], liveHome.env);
 await client.send("initialize", {
   protocolVersion: "2024-11-05",
   capabilities: {},
   clientInfo: { name: "fence-live", version: "1" },
 });
+const isolated = await createDisposableWorkspace(client, root, {
+  home: liveHome.home,
+  agentLabel: "fence-live",
+  label: "fence-authorized-scratch",
+});
+agentHandle = isolated.agentHandle;
+workspaceHandle = isolated.workspaceHandle;
+AUTHORIZED = isolated.session.vault?.name;
+assert(typeof AUTHORIZED === "string", "isolated workspace has no vault identity");
+
+// Seed a second private-profile vault while Obsidian is stopped. It receives the
+// same conspicuous session identity plugin, but no Knapper authorization record.
+// This creates the unsafe upstream-current-page condition without opening or
+// registering any user vault.
+const unauthorizedVaultId = randomBytes(8).toString("hex");
+const trustedIdentity = await client.call("obsidian_eval", {
+  vault: AUTHORIZED,
+  code: `localStorage.setItem(${JSON.stringify(`enable-plugin-${unauthorizedVaultId}`)}, "true")`,
+});
+assert(!trustedIdentity.isError, `identity trust seed failed: ${trustedIdentity.text}`);
+const stoppedForSeed = await client.call("obsidian_workspace_stop", { workspaceHandle });
+assert(!stoppedForSeed.isError, `workspace stop failed: ${stoppedForSeed.text}`);
+UNAUTHORIZED = `${AUTHORIZED}-unauthorized`;
+const unauthorizedPath = join(dirname(isolated.vaultPath), UNAUTHORIZED);
+await mkdir(join(unauthorizedPath, ".obsidian"), { recursive: true, mode: 0o700 });
+const { SESSION_IDENTITY_PLUGIN_ID, seedSessionIdentityPlugin } = await import(
+  join(root, "dist", "session", "bootstrap.js")
+);
+await seedSessionIdentityPlugin(unauthorizedPath, isolated.session.key);
+await Promise.all([
+  writeFile(
+    join(unauthorizedPath, ".obsidian", "app.json"),
+    JSON.stringify({ communityPluginEnabled: true }),
+    "utf8",
+  ),
+  writeFile(
+    join(unauthorizedPath, ".obsidian", "community-plugins.json"),
+    `${JSON.stringify([SESSION_IDENTITY_PLUGIN_ID], null, 2)}\n`,
+    "utf8",
+  ),
+  writeFile(join(unauthorizedPath, "private-sentinel.md"), "unauthorized private fixture\n"),
+]);
+const registryPath = join(isolated.session.instance.userDataDir, "obsidian.json");
+const privateRegistry = JSON.parse(await readFile(registryPath, "utf8"));
+privateRegistry.vaults ??= {};
+privateRegistry.vaults[unauthorizedVaultId] = {
+  path: unauthorizedPath,
+  ts: Date.now(),
+  open: true,
+};
+await writeFile(registryPath, `${JSON.stringify(privateRegistry, null, 2)}\n`, "utf8");
+const restartedAfterSeed = await client.call("obsidian_workspace_restart", { workspaceHandle });
+assert(!restartedAfterSeed.isError, `workspace restart failed: ${restartedAfterSeed.text}`);
 
 console.log("Preconditions");
 await check("the authorized vault reports as authorized", async () => {
@@ -142,9 +207,12 @@ await check("the authorized vault reports as authorized", async () => {
 
 await check("the unauthorized vault reports as unauthorized", async () => {
   const { json } = await client.call("obsidian_status");
-  const v = (json?.vaults ?? []).find((x) => x.name === UNAUTHORIZED);
-  assert(v, `${UNAUTHORIZED} is not registered`);
-  assert(!v.authorized, `${UNAUTHORIZED} IS authorized — pick a different UNAUTHORIZED vault`);
+  const hidden = (json?.vaults ?? []).filter((entry) => entry.authorized === false);
+  assert(hidden.length > 0, `no unauthorized vault is open; expected ${UNAUTHORIZED}`);
+  assert(
+    hidden.every((entry) => entry.name === undefined),
+    "status leaked an unauthorized name",
+  );
 });
 
 console.log("\nReads are fenced");
@@ -217,17 +285,20 @@ await check("obsidian_files lists the authorized vault", async () => {
 console.log("\nWindow targeting");
 await check("obsidian_list_targets hides note names of unauthorized windows", async () => {
   const { json } = await client.call("obsidian_list_targets");
-  const bad = (json ?? []).find((t) => t.vaultName === UNAUTHORIZED);
+  const targets = Array.isArray(json) ? json : (json?.result ?? []);
+  const bad = targets.find((target) => target.authorized === false);
   assert(bad, `no window open for ${UNAUTHORIZED}; open it to test this`);
-  assert(bad.authorized === false, "unauthorized window was marked authorized");
-  assert(bad.noteName === null, `leaked the open note name: ${bad.noteName}`);
+  assert(bad.title === undefined, `leaked the window title: ${bad.title}`);
+  assert(bad.vaultName === undefined, `leaked the vault name: ${bad.vaultName}`);
+  assert(bad.url === undefined, `leaked the target URL: ${bad.url}`);
 });
 
 await check("obsidian_attach refuses to pin to an unauthorized window", async () => {
   const { json } = await client.call("obsidian_list_targets");
-  const bad = (json ?? []).find((t) => t.vaultName === UNAUTHORIZED);
+  const targets = Array.isArray(json) ? json : (json?.result ?? []);
+  const bad = targets.find((target) => target.authorized === false);
   assert(bad, `no window open for ${UNAUTHORIZED}`);
-  assertFenced(await client.call("obsidian_attach", { targetId: bad.id }), "obsidian_attach");
+  assertFenced(await client.call("obsidian_attach", { targetId: bad.targetId }), "obsidian_attach");
 });
 
 console.log("\nProvisioning is fenced");
@@ -243,7 +314,7 @@ await check("obsidian_link_plugin refuses to symlink into an unauthorized vault"
   });
   assert(r.isError, "expected a refusal");
   assert(
-    /VAULT_NOT_AUTHORIZED|not authorized/i.test(r.text),
+    /VAULT_NOT_AUTHORIZED|not (?:been )?authorized/i.test(r.text),
     `wrong reason: ${r.text.slice(0, 200)}`,
   );
 });
@@ -252,7 +323,7 @@ await check("obsidian_setup_vault refuses to configure an unauthorized vault", a
   const r = await client.call("obsidian_setup_vault", { vault: UNAUTHORIZED });
   assert(r.isError, "expected a refusal");
   assert(
-    /VAULT_NOT_AUTHORIZED|not authorized/i.test(r.text),
+    /VAULT_NOT_AUTHORIZED|not (?:been )?authorized/i.test(r.text),
     `wrong reason: ${r.text.slice(0, 200)}`,
   );
 });
@@ -267,7 +338,15 @@ await check("obsidian_remove_vault refuses a vault it did not create", async () 
   );
 });
 
+const stopped = await client.call("obsidian_workspace_stop", { workspaceHandle });
+assert(!stopped.isError, `workspace stop failed: ${stopped.text}`);
+const released = await client.call("obsidian_workspace_release", { workspaceHandle });
+assert(!released.isError, `workspace release failed: ${released.text}`);
+workspaceHandle = undefined;
+const closed = await client.call("obsidian_agent_close", { agentHandle });
+assert(!closed.isError, `agent close failed: ${closed.text}`);
 client.close();
+await removeLiveHome(liveHome.home);
 
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);
 if (failures.length > 0) {

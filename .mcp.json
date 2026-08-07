@@ -2,7 +2,7 @@
   "mcpServers": {
     "knapper": {
       "command": "npx",
-      "args": ["-y", "github:slate-rehm/knapper"]
+      "args": ["-y", "github:bearfire-dev/knapper"]
     }
   }
 }

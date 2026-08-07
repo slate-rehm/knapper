@@ -24,12 +24,15 @@ import { createInterface } from "node:readline/promises";
 import { stat } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
+import { obsidianConfigPath } from "./config.js";
+import { recoverVaultTransaction } from "./connection/vault-transaction.js";
 import {
   forbiddenRoot,
   markerGrant,
   readGlobalConfig,
   readManagedMarker,
   removeManagedMarker,
+  vaultAuthorizationRegistryPath,
   writeManagedMarker,
   type VaultEntry,
 } from "./connection/vaults.js";
@@ -48,7 +51,10 @@ export function terminalIo(): AuthorizeIo {
     err: (line) => process.stderr.write(`${line}\n`),
     isTty: process.stdin.isTTY === true && process.stdout.isTTY === true,
     prompt: async (question) => {
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const rl = createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
       try {
         return (await rl.question(question)).trim();
       } finally {
@@ -78,8 +84,8 @@ interface ResolvedTarget {
  * both and always *reporting* the resolved absolute path keeps the confirmation
  * honest either way.
  */
-async function resolveTarget(input: string): Promise<ResolvedTarget> {
-  const vaults = (await readGlobalConfig())?.vaults ?? [];
+async function resolveTarget(input: string, configPath: string): Promise<ResolvedTarget> {
+  const vaults = (await readGlobalConfig(configPath))?.vaults ?? [];
   const expanded = expandHome(input);
   const looksLikePath =
     isAbsolute(expanded) || expanded.startsWith("./") || expanded.startsWith("../");
@@ -102,8 +108,11 @@ export async function runAuthorize(
   input: string,
   io: AuthorizeIo,
   now = new Date(),
+  env: NodeJS.ProcessEnv = process.env,
+  configPath = obsidianConfigPath(),
 ): Promise<number> {
-  const target = await resolveTarget(input);
+  await recoverVaultTransaction(configPath, vaultAuthorizationRegistryPath(env), env);
+  const target = await resolveTarget(input, configPath);
 
   const forbidden = forbiddenRoot(target.path);
   if (forbidden !== undefined) {
@@ -124,7 +133,7 @@ export async function runAuthorize(
     return 1;
   }
 
-  const existing = await readManagedMarker(target.path);
+  const existing = await readManagedMarker(target.path, env);
   if (existing) {
     io.out(`"${target.name}" is already authorized (${markerGrant(existing)}).`);
     io.out(`  ${target.path}`);
@@ -181,10 +190,10 @@ export async function runAuthorize(
     return 1;
   }
 
-  const marker = await writeManagedMarker(target.path, now, "adopted");
+  const marker = await writeManagedMarker(target.path, now, "adopted", env, configPath);
   io.out("");
   io.out(`Authorized "${target.name}".`);
-  io.out(`  Marker: ${resolve(target.path, ".knapper-managed")}`);
+  io.out(`  Registry: ${vaultAuthorizationRegistryPath(env)}`);
   io.out(`  Granted: ${marker.authorizedAt ?? marker.createdAt}`);
   if (!target.registered) {
     io.out("");
@@ -194,33 +203,44 @@ export async function runAuthorize(
   return 0;
 }
 
-export async function runRevoke(input: string, io: AuthorizeIo): Promise<number> {
-  const target = await resolveTarget(input);
-  const existing = await readManagedMarker(target.path);
-  if (!existing) {
+export async function runRevoke(
+  input: string,
+  io: AuthorizeIo,
+  env: NodeJS.ProcessEnv = process.env,
+  configPath = obsidianConfigPath(),
+): Promise<number> {
+  await recoverVaultTransaction(configPath, vaultAuthorizationRegistryPath(env), env);
+  const target = await resolveTarget(input, configPath);
+  const existing = await readManagedMarker(target.path, env);
+  const removed = await removeManagedMarker(target.path, env, configPath);
+  if (!removed) {
+    if (existing !== undefined) {
+      io.err(`"${target.name}" is still authorized, but Knapper could not match its record.`);
+      io.err(`  ${target.path}`);
+      io.err("The vault directory may be missing or moved. Restore it, then revoke again.");
+      return 1;
+    }
     io.out(`"${target.name}" was not authorized. Nothing to do.`);
     return 0;
   }
 
-  const removed = await removeManagedMarker(target.path);
-  if (!removed) {
-    io.err(`Could not remove the marker at ${resolve(target.path, ".knapper-managed")}.`);
-    io.err("Check file permissions, or delete that file by hand.");
-    return 1;
-  }
-
   io.out(`Revoked knapper's access to "${target.name}".`);
   io.out(`  ${target.path}`);
-  if (markerGrant(existing) === "created") {
+  if (existing !== undefined && markerGrant(existing) === "created") {
     io.out("");
-    io.out("This was a knapper-created vault. Its files are still on disk; obsidian_remove_vault");
-    io.out("can no longer delete it now that the marker is gone.");
+    io.out("This was a Knapper-created vault. Its files are still on disk.");
+    io.out("Knapper can no longer access it.");
   }
   return 0;
 }
 
-export async function runListAuthorizations(io: AuthorizeIo): Promise<number> {
-  const vaults = (await readGlobalConfig())?.vaults ?? [];
+export async function runListAuthorizations(
+  io: AuthorizeIo,
+  env: NodeJS.ProcessEnv = process.env,
+  configPath = obsidianConfigPath(),
+): Promise<number> {
+  await recoverVaultTransaction(configPath, vaultAuthorizationRegistryPath(env), env);
+  const vaults = (await readGlobalConfig(configPath))?.vaults ?? [];
   if (vaults.length === 0) {
     io.out("Obsidian has no registered vaults.");
     return 0;
@@ -228,7 +248,7 @@ export async function runListAuthorizations(io: AuthorizeIo): Promise<number> {
 
   const rows = await Promise.all(
     vaults.map(async (v) => {
-      const marker = v.path === "" ? undefined : await readManagedMarker(v.path);
+      const marker = v.path === "" ? undefined : await readManagedMarker(v.path, env);
       return { vault: v, grant: marker ? markerGrant(marker) : undefined };
     }),
   );
@@ -239,7 +259,7 @@ export async function runListAuthorizations(io: AuthorizeIo): Promise<number> {
   for (const { vault, grant } of rows) {
     const access =
       grant === "created"
-        ? "authorized (knapper-created, removable)"
+        ? "authorized (Knapper-created)"
         : grant === "adopted"
           ? "authorized by you"
           : "not authorized";

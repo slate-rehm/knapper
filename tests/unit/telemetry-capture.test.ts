@@ -20,6 +20,9 @@ function fakePage() {
     listenerCount(event: string) {
       return handlers.get(event)?.size ?? 0;
     },
+    emit(event: string, value?: unknown) {
+      for (const handler of handlers.get(event) ?? []) handler(value);
+    },
   };
 }
 
@@ -37,9 +40,16 @@ function fakeContext(pages: ReturnType<typeof fakePage>[]) {
   };
 }
 
-function makeCapture(context: ReturnType<typeof fakeContext>, pageAuthorized = true) {
+function makeCapture(
+  context: ReturnType<typeof fakeContext>,
+  pageAuthorized: boolean | (() => boolean | Promise<boolean>) = true,
+) {
   const store = new TelemetryStore(100);
-  const isPageAuthorized = vi.fn().mockResolvedValue(pageAuthorized);
+  const isPageAuthorized = vi
+    .fn()
+    .mockImplementation(() =>
+      typeof pageAuthorized === "function" ? pageAuthorized() : Promise.resolve(pageAuthorized),
+    );
   const router = {
     refreshAvailability: vi.fn().mockResolvedValue({ playwright: true }),
     claimDebugger: vi.fn(),
@@ -78,6 +88,47 @@ describe("TelemetryCapture.arm — the vault fence", () => {
     expect(result.armed).toBe(true);
     expect(context.listenerCount("page")).toBe(1);
   });
+
+  it("fails closed when the authorization lookup throws", async () => {
+    const page = fakePage();
+    const context = fakeContext([page]);
+    const { capture } = makeCapture(context, () => {
+      throw new Error("authorization unavailable");
+    });
+
+    const result = await capture.arm();
+
+    expect(result).toEqual({ armed: true, pages: 0 });
+    expect(page.listenerCount("console")).toBe(0);
+  });
+
+  it("drops events after a subscribed page loses authorization", async () => {
+    let authorized = true;
+    const page = fakePage();
+    const context = fakeContext([page]);
+    const { capture, store, isPageAuthorized } = makeCapture(context, () => authorized);
+    await capture.arm();
+    authorized = false;
+
+    page.emit("pageerror", new Error("private note title"));
+    await vi.waitFor(() => expect(isPageAuthorized).toHaveBeenCalledTimes(3));
+
+    expect(store.query().records).toEqual([]);
+  });
+
+  it("drops events from listeners retained after capture resets", async () => {
+    const page = fakePage();
+    const context = fakeContext([page]);
+    const { capture, store, isPageAuthorized } = makeCapture(context);
+    await capture.arm();
+    const checksBeforeReset = isPageAuthorized.mock.calls.length;
+
+    capture.reset();
+    page.emit("pageerror", new Error("old session content"));
+
+    expect(store.query().records).toEqual([]);
+    expect(isPageAuthorized).toHaveBeenCalledTimes(checksBeforeReset);
+  });
 });
 
 describe("TelemetryCapture.arm", () => {
@@ -86,11 +137,24 @@ describe("TelemetryCapture.arm", () => {
     const context = fakeContext([page]);
     const { capture } = makeCapture(context);
 
-    await capture.arm();
-    await capture.arm();
+    const first = await capture.arm();
+    const second = await capture.arm();
 
+    expect(first.pages).toBe(1);
+    expect(second.pages).toBe(1);
     expect(page.listenerCount("console")).toBe(1);
     expect(context.listenerCount("page")).toBe(1);
+  });
+
+  it("reports only subscriptions that remain authorized", async () => {
+    let authorized = true;
+    const page = fakePage();
+    const context = fakeContext([page]);
+    const { capture } = makeCapture(context, () => authorized);
+
+    expect((await capture.arm()).pages).toBe(1);
+    authorized = false;
+    expect((await capture.arm()).pages).toBe(0);
   });
 
   it("wires network listeners when network is enabled after a plain arm", async () => {
@@ -126,5 +190,20 @@ describe("TelemetryCapture.arm", () => {
     await capture.arm();
     expect(context2.listenerCount("page")).toBe(1);
     expect(page2.listenerCount("console")).toBe(1);
+  });
+
+  it("re-wires the same pages after availability drops and returns", async () => {
+    const page = fakePage();
+    const context = fakeContext([page]);
+    const { capture, router, store } = makeCapture(context);
+
+    await capture.arm();
+    router.refreshAvailability.mockResolvedValueOnce({ playwright: false });
+    await capture.arm();
+    await capture.arm();
+    page.emit("pageerror", new Error("after reconnect"));
+    await vi.waitFor(() => expect(store.query().records).toHaveLength(1));
+
+    expect(store.query().records[0]?.text).toContain("after reconnect");
   });
 });

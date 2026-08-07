@@ -6,18 +6,27 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeDescriptor, SESSION_SCHEMA_VERSION } from "../../src/session/descriptor.js";
+import {
+  writeDescriptor,
+  SESSION_SCHEMA_VERSION,
+  type SessionReadiness,
+} from "../../src/session/descriptor.js";
 import { reapStaleSessions } from "../../src/session/reap.js";
-import { sessionState, STALE_AFTER_MS } from "../../src/session/registry.js";
-import { writeManagedMarker } from "../../src/connection/vaults.js";
+import {
+  sessionCleanupEligibleAt,
+  sessionCleanupExpired,
+  sessionState,
+  STALE_AFTER_MS,
+} from "../../src/session/registry.js";
 import { sessionPaths } from "../../src/config.js";
 
 let home: string;
 let env: NodeJS.ProcessEnv;
 const NOW = new Date("2026-07-28T12:00:00.000Z");
+const ABANDONED_AGE_MS = 25 * 60 * 60_000;
 
 beforeEach(async () => {
   home = await mkdtemp(join(tmpdir(), "knap-reap-"));
@@ -44,6 +53,8 @@ async function makeSession(
     heartbeatAgeMs?: number;
     pid?: number;
     grant?: "created" | "adopted";
+    connectedOwner?: boolean;
+    readiness?: SessionReadiness;
     /** Put the vault somewhere other than inside the session root. */
     vaultPath?: string;
   } = {},
@@ -52,7 +63,7 @@ async function makeSession(
   const vaultPath = opts.vaultPath ?? paths.vaultDir;
   await mkdir(paths.userDataDir, { recursive: true });
   await mkdir(vaultPath, { recursive: true });
-  await writeManagedMarker(vaultPath, NOW, opts.grant ?? "created");
+  const [rootIdentity, vaultIdentity] = await Promise.all([stat(paths.root), stat(vaultPath)]);
   await writeFile(
     join(paths.userDataDir, "obsidian.json"),
     JSON.stringify({ vaults: { abc: { path: vaultPath, ts: 1, open: true } }, cli: true }),
@@ -64,8 +75,16 @@ async function makeSession(
       key,
       createdAt: NOW.toISOString(),
       heartbeatAt: new Date(NOW.getTime() - (opts.heartbeatAgeMs ?? 0)).toISOString(),
-      readiness: { phase: "ready", readyAt: NOW.toISOString() },
+      readiness: opts.readiness ?? { phase: "ready", readyAt: NOW.toISOString() },
       origin: { cwd: "/tmp/wt" },
+      ownership: {
+        rootPath: await realpath(paths.root),
+        vaultPath: await realpath(vaultPath),
+        rootDevice: rootIdentity.dev,
+        rootInode: rootIdentity.ino,
+        vaultDevice: vaultIdentity.dev,
+        vaultInode: vaultIdentity.ino,
+      },
       instance: {
         userDataDir: paths.userDataDir,
         runtimeDir: paths.runtimeDir,
@@ -82,6 +101,9 @@ async function makeSession(
         path: vaultPath,
         grant: opts.grant ?? "created",
       },
+      ...(opts.connectedOwner === true
+        ? { owner: { pid: process.pid, startedAt: NOW.toISOString() } }
+        : {}),
     },
     env,
   );
@@ -104,10 +126,48 @@ describe("sessionState", () => {
   });
 });
 
+describe("disconnected-session grace", () => {
+  it("keeps a disconnected session for ten minutes", async () => {
+    await makeSession("grace-a3f19c22");
+    const { readDescriptor } = await import("../../src/session/descriptor.js");
+    const descriptor = await readDescriptor("grace-a3f19c22", env);
+    expect(sessionCleanupEligibleAt(descriptor!, 600_000)).toBe("2026-07-28T12:10:00.000Z");
+    expect(sessionCleanupExpired(descriptor!, new Date("2026-07-28T12:09:59.999Z"), 600_000)).toBe(
+      false,
+    );
+    expect(sessionCleanupExpired(descriptor!, new Date("2026-07-28T12:10:00.000Z"), 600_000)).toBe(
+      true,
+    );
+    descriptor!.heartbeatAt = "not-a-date";
+    expect(sessionCleanupEligibleAt(descriptor!, 600_000)).toBeUndefined();
+    expect(sessionCleanupExpired(descriptor!, new Date("2026-07-28T12:10:00.000Z"), 600_000)).toBe(
+      false,
+    );
+  });
+});
+
 describe("reapStaleSessions", () => {
+  it("keeps a failed descriptor during the grace period and then collects it", async () => {
+    const readiness: SessionReadiness = {
+      phase: "failed",
+      failedAt: NOW.toISOString(),
+      reason: "Obsidian terminated with SIGSEGV before CDP became reachable.",
+    };
+    await makeSession("failed-new-a3f19c22", { readiness });
+    await makeSession("failed-old-a3f19c22", {
+      readiness,
+      heartbeatAgeMs: 10 * 60_000,
+    });
+
+    const report = await reapStaleSessions({ now: NOW, env, idleTimeoutMs: 10 * 60_000 });
+
+    expect(report.kept.map((entry) => entry.key)).toContain("failed-new-a3f19c22");
+    expect(report.reaped).toContain("failed-old-a3f19c22");
+  });
+
   it("reports without deleting on a dry run", async () => {
     const { vaultPath } = await makeSession("old-a3f19c22", {
-      heartbeatAgeMs: STALE_AFTER_MS + 60_000,
+      heartbeatAgeMs: ABANDONED_AGE_MS,
     });
     const report = await reapStaleSessions({ dryRun: true, now: NOW, env, deleteVaults: true });
     expect(report.candidates.map((c) => c.key)).toEqual(["old-a3f19c22"]);
@@ -117,12 +177,13 @@ describe("reapStaleSessions", () => {
 
   it("collects a long-abandoned session", async () => {
     const { vaultPath } = await makeSession("old-a3f19c22", {
-      heartbeatAgeMs: STALE_AFTER_MS + 60_000,
+      heartbeatAgeMs: ABANDONED_AGE_MS,
     });
     const report = await reapStaleSessions({ now: NOW, env, deleteVaults: true });
     expect(report.reaped).toEqual(["old-a3f19c22"]);
     expect(await exists(vaultPath)).toBe(false);
     expect(await exists(sessionPaths("old-a3f19c22", env).root)).toBe(false);
+    expect(report.candidates[0]?.key).toBe("old-a3f19c22");
   });
 
   it("leaves a merely-orphaned session alone without force", async () => {
@@ -130,13 +191,26 @@ describe("reapStaleSessions", () => {
     await makeSession("recent-a3f19c22");
     const report = await reapStaleSessions({ now: NOW, env });
     expect(report.reaped).toEqual([]);
-    expect(report.kept.map((k) => k.reason)).toContain("recently active; use force to reap");
+    expect(report.kept.map((k) => k.reason).join("\n")).toMatch(/cleanup after/);
   });
 
   it("collects an orphaned session when forced", async () => {
     await makeSession("recent-a3f19c22");
     const report = await reapStaleSessions({ force: true, now: NOW, env });
     expect(report.reaped).toEqual(["recent-a3f19c22"]);
+  });
+
+  it("never collects a session with a connected MCP owner", async () => {
+    await makeSession("owned-a3f19c22", {
+      heartbeatAgeMs: STALE_AFTER_MS + 60_000,
+      connectedOwner: true,
+    });
+    const report = await reapStaleSessions({ force: true, now: NOW, env });
+    expect(report.reaped).toEqual([]);
+    expect(report.kept).toContainEqual({
+      key: "owned-a3f19c22",
+      reason: "owning MCP server is connected",
+    });
   });
 
   it("does not treat a recycled pid as a live instance", async () => {
@@ -166,12 +240,13 @@ describe("reapStaleSessions", () => {
     // Authorization is consent to operate, never permission to delete. The
     // descriptor claiming ownership must not override the marker on disk.
     const { vaultPath } = await makeSession("adopt-a3f19c22", {
-      heartbeatAgeMs: STALE_AFTER_MS + 60_000,
+      heartbeatAgeMs: ABANDONED_AGE_MS,
       grant: "adopted",
     });
     const report = await reapStaleSessions({ now: NOW, env, deleteVaults: true });
     expect(await exists(vaultPath)).toBe(true);
-    expect(report.reaped).toEqual(["adopt-a3f19c22"]);
+    expect(report.reaped).toEqual([]);
+    expect(report.kept.map((entry) => entry.reason).join("\n")).toMatch(/reap failed/);
   });
 
   it("never deletes a vault outside the session directory", async () => {
@@ -187,10 +262,9 @@ describe("reapStaleSessions", () => {
     });
 
     const report = await reapStaleSessions({ now: NOW, env, deleteVaults: true });
-    expect(report.reaped).toEqual(["outside-a3f19c22"]);
+    expect(report.reaped).toEqual([]);
     expect(await exists(join(outside, "Important.md"))).toBe(true);
-    // The session's own profile is still reclaimed; only the vault is spared.
-    expect(await exists(sessionPaths("outside-a3f19c22", env).root)).toBe(false);
+    expect(await exists(sessionPaths("outside-a3f19c22", env).root)).toBe(true);
   });
 
   it("keeps the vault when deleteVaults is not set", async () => {

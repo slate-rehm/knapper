@@ -5,7 +5,8 @@ description: Debug Obsidian plugins with knapper telemetry: cursor-based obsidia
 
 # Obsidian debugging with telemetry
 
-Telemetry tools need the MCP server attached to a live Obsidian window (CDP for capture hooks; some reads work with CLI-only but tailing is most useful with CDP active).
+Telemetry tools need a workspace handle and a live Obsidian window. Pass
+`workspaceHandle` on every telemetry call. CDP provides capture hooks.
 
 ## The core primitive: cursor tailing
 
@@ -16,10 +17,10 @@ This is the reliable answer to: _“What happened because of what I just did?”
 ### Pattern
 
 ```text
-obsidian_log_mark(label="before-reload")   # optional but readable
-obsidian_plugin_reload(id="my-plugin")
+obsidian_log_mark(workspaceHandle=<workspaceHandle>, label="before-reload")
+obsidian_plugin_reload(workspaceHandle=<workspaceHandle>, id="my-plugin")
 # … reproduce issue …
-obsidian_logs(since=<cursor from mark or prior logs call>)
+obsidian_logs(workspaceHandle=<workspaceHandle>, since=<cursor from mark or prior logs call>)
 ```
 
 1. Note cursor **before** the action (from `obsidian_log_mark` or a prior `obsidian_logs`).

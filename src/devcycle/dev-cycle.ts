@@ -1,12 +1,12 @@
 /**
- * obsidian_dev_cycle — reload plugin, wait, screenshot, return logs since mark.
+ * obsidian_dev_cycle — reload plugin, verify health, and return logs since mark.
  */
 
 import type { Config } from "../config.js";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { TelemetryCapture } from "../telemetry/capture.js";
 import type { TelemetryStore } from "../telemetry/store.js";
-import type { ToolImage, ToolOutcome } from "../tools/registry.js";
+import type { ToolOutcome } from "../tools/registry.js";
 import { appendTelemetrySummary } from "../telemetry/helpers.js";
 import {
   captureScreenshot,
@@ -16,14 +16,24 @@ import {
   openNotePath,
   reloadPlugin,
   settleMs,
-  verdictText,
 } from "./helpers.js";
+import { inspectPluginHealth, type PluginHealthInfo } from "./plugin-health.js";
+
+export type DevCycleScreenshotMode = "none" | "full";
 
 export interface DevCycleInput {
   pluginId: string;
   openPath?: string;
   waitMs?: number;
   vault?: string;
+  screenshot?: DevCycleScreenshotMode;
+}
+
+function healthProblem(info: PluginHealthInfo): string | undefined {
+  if (!info.exists) return "the plugin is not installed";
+  if (!info.enabled) return "the plugin is not enabled";
+  if (!info.loaded) return "the plugin is not loaded";
+  return undefined;
 }
 
 export async function runDevCycle(
@@ -35,6 +45,7 @@ export async function runDevCycle(
   toolArgs: Record<string, unknown>,
 ): Promise<ToolOutcome> {
   const waitMs = input.waitMs ?? 1500;
+  const screenshotMode = input.screenshot ?? "none";
   const label = devCycleMarkerLabel(input.pluginId);
   const mark = telemetry.mark(label);
 
@@ -62,6 +73,16 @@ export async function runDevCycle(
 
   await settleMs(waitMs);
 
+  let health: PluginHealthInfo | undefined;
+  let healthError: string | undefined;
+  if (reloadOk) {
+    try {
+      health = await inspectPluginHealth(router, input.pluginId, input.vault);
+    } catch (error) {
+      healthError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   const slice = logsSinceMark(telemetry, mark.seq, input.pluginId);
   const pluginErrors = telemetry.query({
     since: mark.seq,
@@ -69,23 +90,44 @@ export async function runDevCycle(
     minLevel: "error",
     limit: 50,
   });
-  const { verdict, text: verdictLine } = verdictText(input.pluginId, reloadOk, slice);
-  const screenshot = await captureScreenshot(router, input.vault);
+  const problem = health === undefined ? undefined : healthProblem(health);
+  const verdict =
+    !reloadOk || health === undefined
+      ? "unknown"
+      : problem || slice.pluginErrors > 0
+        ? "errors"
+        : "clean";
+  const verdictLine = !reloadOk
+    ? `Could not confirm reload of ${input.pluginId}. Check CLI output.`
+    : health === undefined
+      ? `Reloaded ${input.pluginId}, but could not verify its live state.`
+      : problem !== undefined
+        ? `Reloaded ${input.pluginId}, but ${problem}.`
+        : slice.pluginErrors > 0
+          ? `Reloaded ${input.pluginId} with ${slice.pluginErrors} error(s) since mark.`
+          : `Reloaded ${input.pluginId} cleanly and verified it is enabled and loaded.`;
+  const screenshot =
+    screenshotMode === "full"
+      ? await captureScreenshot(router, config.outputDir, input.vault)
+      : undefined;
 
   const lines = [
     verdictLine,
     "",
     `Marker: ${label} (cursor ${mark.seq})`,
     `Reload output: ${reloadStdout.trim() === "" ? "(ok)" : reloadStdout.trim()}`,
+    `Health: ${
+      health === undefined
+        ? (healthError ?? "not checked")
+        : `exists=${health.exists}, enabled=${health.enabled}, loaded=${health.loaded}`
+    }`,
     "",
     "Logs since mark:",
     formatLogSection(slice),
   ];
 
-  const images: ToolImage[] | undefined = screenshot !== undefined ? [screenshot] : undefined;
-
   let body = lines.join("\n");
-  body = appendTelemetrySummary(body, telemetry, mark.seq);
+  body = appendTelemetrySummary(body, telemetry, mark.seq, input.pluginId);
 
   return {
     text: body,
@@ -94,14 +136,23 @@ export async function runDevCycle(
       pluginId: input.pluginId,
       mark: { label, cursor: mark.seq },
       reload: { ok: reloadOk, stdout: reloadStdout.trim() },
+      health: health ?? null,
+      healthError: healthError ?? null,
       logs: {
         errors: slice.errors,
+        allErrors: slice.allErrors,
         warnings: slice.warnings,
+        pluginErrorCount: slice.pluginErrors,
+        unattributedErrorCount: slice.unattributedErrors,
+        otherPluginErrorCount: slice.otherPluginErrors,
         pluginErrors: pluginErrors.records,
         records: slice.records,
       },
-      screenshot: screenshot !== undefined,
+      screenshot: {
+        mode: screenshotMode,
+        captured: screenshot !== undefined,
+        file: screenshot ?? null,
+      },
     },
-    ...(images !== undefined ? { images } : {}),
   };
 }

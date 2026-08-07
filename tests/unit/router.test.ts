@@ -186,6 +186,41 @@ describe("CLI timeout demotion", () => {
   });
 });
 
+describe("CLI JSON evaluation", () => {
+  it("lets Obsidian serialize a multiline IIFE instead of wrapping it", async () => {
+    cliOnly();
+    const router = makeRouter();
+    vi.spyOn(router.fence, "resolve").mockResolvedValue({
+      id: "abc",
+      name: "scratch",
+      path: "/tmp/scratch",
+      grant: "adopted",
+    });
+    const evaluate = vi.spyOn(router.cli, "evaluate").mockResolvedValue('=> {"editor":true}\n');
+    const code = "(() => {\n  return { editor: true };\n})()";
+
+    await expect(router.evaluateJson<{ editor: boolean }>(code)).resolves.toMatchObject({
+      value: { editor: true },
+      layer: "cli",
+    });
+    expect(evaluate).toHaveBeenCalledWith(code, "scratch");
+  });
+
+  it("preserves a scalar string returned by the CLI", async () => {
+    cliOnly();
+    const router = makeRouter();
+    vi.spyOn(router.fence, "resolve").mockResolvedValue({
+      id: "abc",
+      name: "scratch",
+      path: "/tmp/scratch",
+      grant: "adopted",
+    });
+    vi.spyOn(router.cli, "evaluate").mockResolvedValue("=> ready\n");
+
+    await expect(router.evaluateJson<string>('"ready"')).resolves.toMatchObject({ value: "ready" });
+  });
+});
+
 describe("resolve failures name the right precondition", () => {
   it("blames the closed port for a Playwright-only capability", async () => {
     cliOnly();
@@ -264,5 +299,28 @@ describe("debugger tracking", () => {
     router.claimDebugger("playwright");
     router.releaseDebugger("cliCdp");
     expect(router.currentDebuggerHolder).toBe("playwright");
+  });
+});
+
+describe("runtime rebinding", () => {
+  it("rebuilds target-specific transports after the config changes", async () => {
+    nothingAvailable();
+    const config = loadConfig({}, {});
+    const router = new CapabilityRouter(config, createLogger("silent"));
+    const oldCli = router.cli;
+    const oldPlaywright = router.playwright;
+
+    config.sessionId = "bound-a3f19c22";
+    config.userDataDir = "/tmp/bound/userdata";
+    config.obsidianConfigPath = "/tmp/bound/userdata/obsidian.json";
+    config.runtimeDir = "/tmp/bound/run";
+    config.cdpUrl = "http://127.0.0.1:43123";
+    config.cdpPort = 43123;
+    await router.rebind();
+
+    expect(router.cli).not.toBe(oldCli);
+    expect(router.playwright).not.toBe(oldPlaywright);
+    expect(router.supervisor.started).toBe(true);
+    await router.dispose();
   });
 });

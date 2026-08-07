@@ -8,6 +8,10 @@
 /** Tools that must never be forwarded even if they appear in listTools(). */
 export const BLOCKED_BROWSER_TOOLS = new Set([
   "browser_close",
+  "browser_console_messages",
+  "browser_evaluate",
+  "browser_find",
+  "browser_generate_locator",
   "browser_navigate",
   "browser_navigate_back",
   "browser_navigate_forward",
@@ -21,21 +25,23 @@ export const BLOCKED_BROWSER_TOOLS = new Set([
   "browser_network_requests",
   "browser_network_clear",
   "browser_console_clear",
+  "browser_tabs",
+  "browser_verify_element_visible",
+  "browser_verify_list_visible",
+  "browser_verify_text_visible",
+  "browser_verify_value",
 ]);
 
 /**
  * Core interaction surface with `vision` + `testing` capabilities enabled upstream.
- * Count: 27 proxied tools at @playwright/mcp@0.0.78.
+ * Arbitrary evaluation and the redundant discovery/assertion tools stay private.
+ * Their output can include data from every page in the shared browser context.
  */
 export const ALLOWED_BROWSER_TOOLS = new Set([
   "browser_click",
-  "browser_console_messages",
   "browser_drag",
   "browser_drop",
-  "browser_evaluate",
   "browser_fill_form",
-  "browser_find",
-  "browser_generate_locator",
   "browser_handle_dialog",
   "browser_hover",
   "browser_mouse_click_xy",
@@ -47,13 +53,8 @@ export const ALLOWED_BROWSER_TOOLS = new Set([
   "browser_press_key",
   "browser_select_option",
   "browser_snapshot",
-  "browser_tabs",
   "browser_take_screenshot",
   "browser_type",
-  "browser_verify_element_visible",
-  "browser_verify_list_visible",
-  "browser_verify_text_visible",
-  "browser_verify_value",
   "browser_wait_for",
 ]);
 
@@ -64,11 +65,8 @@ export function isAllowedBrowserTool(name: string): boolean {
 /**
  * Proxied tools that deliver real mouse or keyboard input.
  *
- * Two things key off this set. The vault fence re-points the proxy at the
- * authorized window before each of these, and `FocusEmulator` wraps them so the
- * input lands even when Obsidian is not the foreground window. Read-only tools are
- * excluded on purpose: they need neither, and holding a shared lock while toggling
- * emulation would let a reader flip it off under a concurrent write.
+ * `FocusEmulator` wraps these tools so input lands when Obsidian is not the
+ * foreground window. The proxy fences and targets every tool, including reads.
  */
 export const INPUT_BROWSER_TOOLS = new Set([
   "browser_click",
@@ -91,13 +89,3 @@ export const INPUT_BROWSER_TOOLS = new Set([
 export function isInputBrowserTool(name: string): boolean {
   return INPUT_BROWSER_TOOLS.has(name);
 }
-
-/**
- * `browser_tabs` actions knapper will forward.
- *
- * `select` and `close` are the only allowlisted levers that can move the proxy off
- * the window the fence just pointed it at — `select` silently, `close` permanently.
- * Listing tabs is the useful half and cannot retarget anything, so that is the half
- * we keep. knapper drives tab selection itself via `obsidian_attach`.
- */
-export const ALLOWED_TABS_ACTIONS = new Set(["list"]);

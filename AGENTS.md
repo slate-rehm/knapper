@@ -31,7 +31,8 @@ src/
   browser/proxy.ts       proxies @playwright/mcp, filters destructive tools
   telemetry/             console/error/network ring buffer, plugin attribution
   devcycle/              composites (dev_cycle, exercise, reset_state)
-  session/               isolated instances: key, descriptor, bootstrap, registry, reap
+  session/               internal isolated-instance descriptors, launch, and cleanup
+  agent/, workspace/     durable public handles and leases
 scripts/                 acceptance, e2e, ci-smoke, version sync
 
 skills/                  plugin skills (obsidian-debugging, -instance-setup,
@@ -67,11 +68,10 @@ npm run build      # tsc -> dist/
 npm run smoke      # degraded-mode MCP check, no Obsidian required
 ```
 
-Live suites need Obsidian cold-started with `--remote-debugging-port=9222` and the
-`uob-test-vault` scratch vault. **Never point these at a real vault** — they create,
-rename, and delete notes. They authorize that vault for knapper themselves
-(`scripts/authorize-test-vault.mjs`), writing the marker directly rather than going
-through `knapper authorize`, which requires a TTY a test runner does not have.
+Live suites create a temporary `KNAP_HOME`, a private Obsidian profile, a scratch
+vault, and a dynamic CDP port. They must never use the default profile or a caller
+vault. The harness proves that each selected vault is disposable before it writes
+notes.
 
 ```bash
 npm run acceptance  # 23 checks over the critical seams
@@ -79,23 +79,22 @@ npm run e2e         # 79 checks: vault round-trips, UI, telemetry, dev cycle, er
 ```
 
 ```bash
-npm run fence      # 16 live checks: refusals against a real unauthorized vault
-npm run bg-input   # 6 live checks: input with Obsidian unfocused, emulation reverted
-npm run sessions   # 26 live checks: two isolated instances, scoped restart, cleanup
+npm run fence      # live checks for authorized and unauthorized private windows
+npm run bg-input   # 6 live checks: background input without desktop focus theft
+npm run workspaces # isolated instances, reconnect, scoped restart, quarantine
 ```
 
-`npm run sessions` needs no pre-launched Obsidian and no scratch vault — it provisions
-two sessions, asserts they cannot see each other, and tears both down. Run it for
-anything touching `src/session/`, `launch.ts`, or the process-scoping predicates.
+Each live suite provisions its own workspace and tears it down. Run `npm run
+workspaces` for anything that changes `src/session/`, `launch.ts`, workspace
+leases, or process-scoping predicates.
 
 `npm run check && npm run typecheck && npm test && npm run acceptance` is the
 minimum before proposing a change. Run `npm run e2e` for anything touching the
 router, a tool handler, or the CLI argv grammar.
 
-`npm run fence` needs one authorized and one unauthorized vault open at once — the
-situation no mock reproduces. `npm run bg-input` is only meaningful when Obsidian is
-**not** the foreground window; run it from a terminal without clicking into Obsidian
-first, or it proves nothing.
+`npm run fence` creates separate authorized and unauthorized private windows when
+the platform supports them. `npm run bg-input` is only meaningful when Obsidian is
+not the foreground window. Run it without clicking the private Obsidian window.
 
 ## Conventions that matter
 
@@ -137,29 +136,22 @@ reordering two lines would have reopened it. `fence-live.mjs` now asserts both
 refuse. The two remaining `findVault` callers are deliberate: `vaultAutomationState`
 is read-only diagnostics that must be able to inspect an unauthorized vault to
 explain the refusal, and `obsidian_remove_vault` is guarded by
-`assertVaultRemovable`'s marker check, which is strictly stronger.
+`removeManagedVault` can only unregister. It never deletes a vault directory.
 
 If you add a fallback that catches and retries, call
 `rethrowIfRefused` first — `obsidian_search` used to swallow a refusal and retry the
 read unscoped.
 
-**Writing a `created` marker is granting deletion, so treat it as the privileged
-act it is.** `removeManagedVault` deletes exactly what carries one, correctly and
-without further questions — which means every writer of that marker is a place a
-user's real vault can be handed to the reaper. `createManagedVault` has always
-refused a non-empty directory for this reason; `seedSessionProfile` did not, so
-`obsidian_create_session vaultPath=<a vault with notes in it>` stamped it `created`
-and automatic cleanup later `rm -rf`'d it. A new marker writer needs the same
-refusal, and `adoptVault` is the path for a vault that already holds notes — it
-preserves an `adopted` grant precisely so consent never becomes delete permission.
+**Vault authorization is external and never grants directory deletion.** Store it in
+`KNAP_HOME/vault-authorizations.json`. Bind each record to the canonical path,
+device, and inode. Legacy `.knapper-managed` files are inert. Use locked atomic
+writes with mode `0600`.
 
-**The reaper deletes with no agent in the loop, so it gets a narrower rule than the
-tools do.** It only ever deletes a vault living _inside_ the session's own root
-(`onlyVaultInsideRoot`); one the caller pointed elsewhere is a directory a human
-chose, and reclaiming an abandoned Electron profile is not a reason to touch it.
-`obsidian_close_session` keeps the full behaviour, because there an agent asked for
-that vault by name. Note that `obsidian_create_session` reaps opportunistically —
-any weakening of these rules ships as a delete that nobody requested.
+**Isolated cleanup can only quarantine an exact scratch root.** Workspace creation
+does not accept a caller vault path. Before cleanup, verify the derived layout,
+real paths, symlink state, device, inode, and Knapper-created grant. Move the whole
+root to `KNAP_HOME/trash`. Never hard-delete it. Never quarantine the default
+Obsidian profile. `KNAP_IDLE_TIMEOUT_MS` defaults to 24 hours.
 
 **Errors are a feature.** Use typed `UobError` from `src/util/errors.ts` with a
 `remediation` and, where possible, a `fixedBy` naming the tool that fixes it. The
@@ -205,12 +197,10 @@ second copy. Bump both together.
 - Delegate independent workstreams to parallel subagents with **strict file
   ownership**, since they share one working tree. Overlapping edits corrupt each
   other. Follow implementation with an audit subagent that runs `npm run check`.
-- Prefer an isolated session for live work: `obsidian_create_session` gives you a
-  private Obsidian, profile, CLI socket, debug port, and scratch vault, so two agents
-  no longer contend. Put the returned key in `KNAP_SESSION` and reconnect.
-- Without a session there is still only one Obsidian and one CDP endpoint, so two
-  agents driving the _default_ profile produce garbage for both — serialize that, or
-  give each agent a session.
+- Open an agent handle, then create an isolated workspace for live work. Pass its
+  `workspaceHandle` to every operational tool.
+- One MCP server owns the default profile at a time. On `DEFAULT_PROFILE_BUSY`,
+  create an isolated workspace and retry with its handle.
 - `npm run bg-input` stays serialized regardless: it depends on Obsidian not being the
   foreground window, which is one global property of the desktop, and it fails open.
 - Use mermaid flowcharts to explain architecture in plans.

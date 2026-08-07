@@ -17,12 +17,13 @@ export function registerPluginDevTools(ctx: ServerContext): void {
     name: "obsidian_dev_cycle",
     toolset: "plugin-dev",
     handlesOwnTelemetry: true,
+    annotations: { readOnlyHint: false, destructiveHint: true },
     description:
       "Answer “did my plugin change work?” in one call: insert a telemetry mark, reload the plugin " +
-      "via CLI, optionally open a note, wait for the UI to settle, capture a screenshot, and return " +
+      "via CLI, verify that it exists, is enabled, and is loaded, then return " +
       "console errors since the mark (attributed to the plugin when possible). Prefer this after " +
       "editing plugin source over manual reload + log spelunking. Side effects: reloads the plugin; " +
-      "may open a note; reload throws away in-memory plugin state.",
+      "may open a note; an optional full screenshot requires CDP; reload throws away in-memory plugin state.",
     inputSchema: {
       pluginId: z.string().min(1).describe("Plugin id folder name under .obsidian/plugins/"),
       openPath: z
@@ -34,7 +35,11 @@ export function registerPluginDevTools(ctx: ServerContext): void {
         .int()
         .nonnegative()
         .optional()
-        .describe("Milliseconds to wait after reload before screenshot/logs (default 1500)"),
+        .describe("Milliseconds to wait after reload before health and log checks (default 1500)"),
+      screenshot: z
+        .enum(["none", "full"])
+        .optional()
+        .describe("Screenshot mode (default none); full captures the Obsidian window contents"),
       vault: z
         .string()
         .optional()
@@ -51,6 +56,7 @@ export function registerPluginDevTools(ctx: ServerContext): void {
           openPath: args.openPath as string | undefined,
           waitMs: args.waitMs as number | undefined,
           vault: vaultName(args, config),
+          screenshot: args.screenshot as "none" | "full" | undefined,
         },
         args,
       ),
@@ -61,6 +67,7 @@ export function registerPluginDevTools(ctx: ServerContext): void {
     toolset: "plugin-dev",
     capability: "evaluate",
     handlesOwnTelemetry: true,
+    annotations: { readOnlyHint: false, destructiveHint: true },
     description:
       "Run an Obsidian command-palette command by id (via app.commands.executeCommandById), wait for " +
       "the UI to settle, and return workspace state before/after plus new console output since a " +

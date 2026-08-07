@@ -31,14 +31,19 @@ authorized.
 
 ## The vault fence
 
-Every path that reads or writes vault content resolves a target vault first, and refuses when
-it cannot. A vault is reachable only if it carries a `.knapper-managed` marker, written by
-exactly two things:
+Every path that reads or writes vault content resolves a target vault first. It refuses an
+unauthorized target. Knapper stores grants in
+`KNAP_HOME/vault-authorizations.json`, outside the vault. Each grant binds the canonical path,
+device, inode, and directory birth time. The registry uses locked atomic writes with mode
+`0600`.
 
-| Grant     | Written by                                                    | knapper may                        |
-| --------- | ------------------------------------------------------------- | ---------------------------------- |
-| `created` | `obsidian_create_vault`                                       | read, write, **and delete** it     |
-| `adopted` | `knapper authorize <path>` — run by you, in your own terminal | read and write it, never delete it |
+| Grant     | Written by                                                    | Knapper may       |
+| --------- | ------------------------------------------------------------- | ----------------- |
+| `created` | `obsidian_create_vault`                                       | read and write it |
+| `adopted` | `knapper authorize <path>` — run by you, in your own terminal | read and write it |
+
+Legacy `.knapper-managed` files are inert. They do not grant access or deletion rights.
+Knapper never uses a vault authorization as permission to delete the vault directory.
 
 No MCP tool can grant access. `knapper authorize` refuses without an interactive TTY and makes
 you retype the vault name, so it cannot be completed from inside an automation run — an agent
@@ -64,8 +69,8 @@ What the fence covers, and why each one is separate:
   lines quote note titles and file contents.
 - **`obsidian_reset_state`.** The one path that writes vault files directly on disk re-checks
   the vault directory it got from the renderer before writing.
-- **Window listings.** `obsidian_list_targets` reports the vault name of an unauthorized
-  window — you need that to diagnose a refusal — but not the note title it has open.
+- **Window listings.** Diagnostics return only an opaque target identifier for an unauthorized
+  window. They omit vault names, paths, note titles, URLs, and workspace content.
 
 Refusals raise `VAULT_NOT_AUTHORIZED`, kept distinct from `VAULT_NOT_MANAGED` (which is about
 deletion provenance) so the two never blur together.
@@ -87,14 +92,9 @@ Neither is enabled by default in a stock Obsidian install. The user has to opt i
 
 The default `stdio` transport has no listener and is what MCP clients use.
 
-`--transport http` **does** bind a TCP listener (default `127.0.0.1:9223`, endpoint `/mcp`).
-It has **no authentication of any kind**. Anything that can reach that port can execute
-arbitrary JavaScript inside your Obsidian renderer and read or delete your vault.
-
-It binds to loopback unless you override `MCP_HOST`, and it logs a warning when you do. DNS
-rebinding protection is on for non-wildcard hosts. Only one session is served at a time. If
-you need remote access, put it behind a tunnel or an authenticating reverse proxy — do not
-expose the port directly.
+`--transport http` binds a TCP listener on loopback only. The default endpoint is
+`127.0.0.1:9223/mcp`. Knapper refuses every non-loopback bind because this transport has no
+authentication. Host and origin validation also restrict requests to loopback names.
 
 ## Powerful tools
 
@@ -122,24 +122,10 @@ Moves files to the system trash. `permanent: true` must be set explicitly to byp
 
 ### `obsidian_remove_vault` — `destructiveHint`
 
-Can delete an entire vault directory, so it is gated on provenance rather than on a
-confirmation flag an agent would happily set itself.
-
-A vault is removable **only** if it carries a `.knapper-managed` marker with the `created`
-grant — that is, one `obsidian_create_vault` made itself. Any other vault fails with
-`VAULT_NOT_MANAGED` and nothing is changed, unregistered, or deleted.
-
-This is why the marker records _how_ access was granted. A vault you authorized with
-`knapper authorize` carries the `adopted` grant, and is explicitly **not** removable: letting
-that grant feed the delete path would turn a consent step into a loaded gun. `obsidian_create_vault`
-in turn refuses to adopt a directory that already contains files, so an existing vault cannot
-acquire a `created` marker by accident.
-
-Two further refusals apply regardless of the marker: a path that is your home directory, a
-filesystem root, or a top-level system directory, and a path that contains another registered
-vault (which would take that vault with it).
-
-Deleting the marker from a vault makes it permanent again.
+Unregisters an authorized Knapper-created vault. It never deletes the directory. It rejects
+user-adopted vaults. Isolated workspace cleanup uses `obsidian_workspace_destroy`, which first
+stops the private instance, verifies the exact Knapper-owned root, and moves that root to
+recoverable trash under `KNAP_HOME`.
 
 ### Withheld browser tools
 
@@ -157,7 +143,8 @@ knapper is not a read-only bridge. It writes, outside the vault as well as insid
 | Path                                       | Written by                                                             | Why                                                                    |
 | ------------------------------------------ | ---------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `<userData>/obsidian.json`                 | `obsidian_setup_cli`, `obsidian_create_vault`, `obsidian_remove_vault` | Flips the global `cli` flag; registers and unregisters vaults          |
-| `<vault>/.knapper-managed`                 | `obsidian_create_vault`, `knapper authorize`                           | Grant marker; permits access at all, and (only when `created`) removal |
+| `<KNAP_HOME>/vault-authorizations.json`    | `obsidian_create_vault`, `knapper authorize`, `knapper revoke`         | External path and filesystem-identity grants, mode `0600`              |
+| `<KNAP_HOME>/trash/`                       | `obsidian_workspace_destroy`                                           | Recoverable quarantine for verified private workspace roots            |
 | `<vault>/.obsidian/plugins/<id>`           | `obsidian_link_plugin`                                                 | Creates or replaces a **symlink**. Refuses to clobber a real directory |
 | `<vault>/.obsidian/plugins/<id>/data.json` | `obsidian_reset_state`                                                 | Overwrites plugin settings with `{}`; returns the previous contents    |
 | `./.knapper/`                              | screenshot and snapshot tools                                          | Output artifacts, under `KNAP_SCREENSHOT_DIR`                          |
@@ -187,6 +174,6 @@ reading it first.
 
 ## Reporting a vulnerability
 
-Open a [security advisory](https://github.com/slate-rehm/knapper/security/advisories/new) on
+Open a [security advisory](https://github.com/bearfire-dev/knapper/security/advisories/new) on
 the repository, or a regular issue if the problem is not sensitive. There is no formal SLA on
 this project — it is maintained on a best-effort basis.

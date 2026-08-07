@@ -42,6 +42,11 @@ export type ErrorCode =
    * than "create one".
    */
   | "SESSION_NOT_RUNNING"
+  /** The launched Obsidian process failed before it exposed a CDP endpoint. */
+  | "OBSIDIAN_LAUNCH_FAILED"
+  /** Another MCP server currently owns the installation's default profile. */
+  | "DEFAULT_PROFILE_BUSY"
+  | "WORKSPACE_BUSY"
   | "INTERNAL";
 
 export interface UobErrorOptions {

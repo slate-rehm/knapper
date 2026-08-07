@@ -50,7 +50,7 @@ Prefer `[data-type="markdown"]` plus `.mod-active` to target the editor leaf.
 
 ## Body state classes
 
-Use for cheap assertions with `browser_verify_*` or `browser_evaluate`.
+Use for cheap assertions with `obsidian_snapshot` or a narrowly scoped `obsidian_eval` probe.
 
 | Class                                        | Meaning                    | Verified on Linux test session                                                                                              |
 | -------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------- |

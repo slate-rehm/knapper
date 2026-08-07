@@ -15,7 +15,7 @@
  * The random suffix is not decoration: two agents on the *same* branch in the same
  * worktree must get different sessions, so the key cannot be a pure function of the
  * path. Provenance (cwd, branch) is recorded inside the descriptor instead, which
- * is what `obsidian_list_sessions` reports.
+ * appears in internal workspace diagnostics.
  */
 
 import { randomBytes } from "node:crypto";
@@ -45,12 +45,14 @@ export function slugify(raw: string): string {
  */
 export function assertSessionKey(raw: string): string {
   if (!SESSION_KEY_RE.test(raw)) {
-    throw new UobError("INVALID_ARGUMENT", `"${raw}" is not a valid knapper session key.`, {
-      remediation:
-        "Session keys look like `my-plugin-a3f19c22`. Use one reported by " +
-        "obsidian_list_sessions, or create a session with obsidian_create_session.",
-      details: { session: raw },
-    });
+    throw new UobError(
+      "INVALID_ARGUMENT",
+      `"${raw}" is not a valid internal workspace descriptor key.`,
+      {
+        remediation:
+          "Do not repair or reuse this workspace. Create a new isolated workspace and inspect the damaged record manually.",
+      },
+    );
   }
   return raw;
 }

@@ -16,22 +16,23 @@
  *    depending on playwright-core directly.
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Page } from "playwright-core";
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport, type CallToolResult } from "@modelcontextprotocol/server";
+import { lstat, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import type { BrowserContext, Page } from "playwright-core";
 import type { Config } from "../config.js";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { Logger } from "../util/logger.js";
 import { UobError } from "../util/errors.js";
 import {
   ALLOWED_BROWSER_TOOLS,
-  ALLOWED_TABS_ACTIONS,
   BLOCKED_BROWSER_TOOLS,
   isAllowedBrowserTool,
   isInputBrowserTool,
 } from "./allowlist.js";
 import { clickTarget } from "./native.js";
+import { saveArtifact } from "../util/artifacts.js";
 
 export { BLOCKED_BROWSER_TOOLS, ALLOWED_BROWSER_TOOLS } from "./allowlist.js";
 
@@ -39,10 +40,131 @@ export { BLOCKED_BROWSER_TOOLS, ALLOWED_BROWSER_TOOLS } from "./allowlist.js";
 const STALE_TARGET = /(target|page|context|browser).{0,40}(has been closed|closed)/i;
 const CLICK_TIMEOUT = /timeout\s+\d+ms exceeded|TimeoutError/i;
 
+function invalidScreenshotFilename(value: unknown): UobError {
+  return new UobError(
+    "INVALID_ARGUMENT",
+    `Invalid screenshot filename: ${typeof value === "string" ? value : String(value)}.`,
+    {
+      remediation:
+        "Use a relative, unused filename that stays inside the configured screenshot directory.",
+    },
+  );
+}
+
+async function nearestRealPath(path: string): Promise<string> {
+  let candidate = path;
+  while (true) {
+    try {
+      return await realpath(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) throw error;
+      candidate = parent;
+    }
+  }
+}
+
+/** Refuse screenshot paths that can overwrite or escape the configured output directory. */
+export async function validateScreenshotFilename(outputDirectory: string, value: unknown) {
+  if (value === undefined) return;
+  if (typeof value !== "string" || value.trim() === "" || isAbsolute(value)) {
+    throw invalidScreenshotFilename(value);
+  }
+
+  const outputDir = resolve(outputDirectory);
+  const target = resolve(outputDir, value);
+  const relativeTarget = relative(outputDir, target);
+  if (
+    relativeTarget === "" ||
+    relativeTarget === ".." ||
+    relativeTarget.startsWith(`..${sep}`) ||
+    isAbsolute(relativeTarget)
+  ) {
+    throw invalidScreenshotFilename(value);
+  }
+
+  try {
+    await lstat(target);
+    throw new UobError("INVALID_ARGUMENT", `The screenshot target already exists: ${value}.`, {
+      remediation: "Choose a new relative filename inside the configured screenshot directory.",
+      details: { filename: value },
+    });
+  } catch (error) {
+    if (error instanceof UobError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  // Existing symlinked parents can redirect an approved relative path outside
+  // outputDir, including when the final parent does not exist yet.
+  const [realOutputDir, realParent] = await Promise.all([
+    nearestRealPath(outputDir),
+    nearestRealPath(dirname(target)),
+  ]);
+  const relativeParent = relative(realOutputDir, realParent);
+  if (
+    relativeParent === ".." ||
+    relativeParent.startsWith(`..${sep}`) ||
+    isAbsolute(relativeParent)
+  ) {
+    throw invalidScreenshotFilename(value);
+  }
+}
+
 export interface ProxiedTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+}
+
+/**
+ * Give the upstream server a context that contains only the approved page.
+ *
+ * Playwright MCP keeps its own current-tab state. Passing the real context lets
+ * that state move to any Obsidian window. The facade preserves context operations
+ * but hides every other page and suppresses later page events.
+ */
+export function contextForPage(context: BrowserContext, page?: Page): BrowserContext {
+  let facade: BrowserContext;
+  facade = new Proxy(context, {
+    get(target, property) {
+      if (property === "pages") return () => (page === undefined ? [] : [page]);
+      if (property === "newPage") {
+        return async () => {
+          throw new UobError(
+            "INVALID_ARGUMENT",
+            "Knapper does not allow the browser backend to create a new page.",
+            {
+              remediation:
+                "Open the window in Obsidian, then select an authorized target from obsidian_list_targets.",
+              fixedBy: "obsidian_list_targets",
+            },
+          );
+        };
+      }
+      if (property === "browser") return () => null;
+
+      const value = Reflect.get(target, property, target) as unknown;
+      if (typeof value !== "function") return value;
+
+      if (
+        property === "on" ||
+        property === "addListener" ||
+        property === "once" ||
+        property === "off" ||
+        property === "removeListener"
+      ) {
+        return (event: unknown, ...args: unknown[]) => {
+          if (event === "page") return facade;
+          return Reflect.apply(value, target, [event, ...args]) as unknown;
+        };
+      }
+
+      return (...args: unknown[]) => Reflect.apply(value, target, args) as unknown;
+    },
+  });
+  return facade;
 }
 
 const FALLBACK_PROPERTIES = {
@@ -81,12 +203,19 @@ const FALLBACK_PROPERTIES = {
   data: { type: "object" },
 } satisfies Record<string, unknown>;
 
+const DESCRIBED_FALLBACK_PROPERTIES = Object.fromEntries(
+  Object.entries(FALLBACK_PROPERTIES).map(([name, schema]) => [
+    name,
+    { ...schema, description: `Fallback Playwright argument: ${name}.` },
+  ]),
+);
+
 /** Stable degraded-mode descriptors; upstream validates the same args again on call. */
 function fallbackTools(): ProxiedTool[] {
   return [...ALLOWED_BROWSER_TOOLS].sort().map((name) => ({
     name,
     description: `Playwright browser operation ${name}.`,
-    inputSchema: { type: "object", properties: FALLBACK_PROPERTIES },
+    inputSchema: { type: "object", properties: DESCRIBED_FALLBACK_PROPERTIES },
   }));
 }
 
@@ -94,6 +223,9 @@ export class BrowserProxy {
   private client?: Client;
   private tools?: ProxiedTool[];
   private initializing?: Promise<void>;
+  private proxiedTargetId?: string;
+  private proxiedPage?: Page;
+  private callTail: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly config: Config,
@@ -127,27 +259,28 @@ export class BrowserProxy {
   }
 
   private async doInit(): Promise<void> {
-    // Resolve through @playwright/mcp's dependency tree so the context we pass in
-    // comes from the exact playwright-core build it expects.
-    const { createConnection } = await import("@playwright/mcp");
-
     const session = this.router.playwright;
-    await session.connect();
     this.router.claimDebugger("playwright");
 
+    const context = await session.connect();
+    const { client, tools } = await this.createClient(contextForPage(context));
+
+    this.client = client;
+    this.tools = tools;
+    this.logger.info(`browser proxy ready with ${tools.length} tools`);
+  }
+
+  private async createClient(
+    context: BrowserContext,
+  ): Promise<{ client: Client; tools: ProxiedTool[] }> {
+    const { createConnection } = await import("@playwright/mcp");
     const server = await createConnection(
       {
         capabilities: ["vision", "testing"],
         browser: { isolated: false },
         outputDir: this.config.outputDir,
       },
-      // Resolve the context per call rather than capturing one. Obsidian restarting
-      // gives the session a brand-new BrowserContext, and a captured one stayed
-      // pinned to the dead browser — every browser_* tool then failed forever with
-      // "Target page, context or browser has been closed" while knapper's own CDP
-      // tools had already recovered. session.connect() reuses a live connection and
-      // rebuilds a dead one.
-      async () => session.connect(),
+      async () => context,
     );
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -163,6 +296,9 @@ export class BrowserProxy {
         name: t.name,
         ...(t.description !== undefined ? { description: t.description } : {}),
         inputSchema: t.inputSchema as Record<string, unknown>,
+        ...(t.outputSchema !== undefined
+          ? { outputSchema: t.outputSchema as Record<string, unknown> }
+          : {}),
       }));
 
     const skipped = listed.tools.filter(
@@ -174,12 +310,12 @@ export class BrowserProxy {
       });
     }
 
-    this.client = client;
-    this.tools = tools;
-    this.logger.info(`browser proxy ready with ${tools.length} tools`, {
+    this.logger.debug("browser proxy client created", {
+      exposed: tools.length,
       upstream: listed.tools.length,
       blocked: listed.tools.filter((t) => BLOCKED_BROWSER_TOOLS.has(t.name)).length,
     });
+    return { client, tools };
   }
 
   /** The allowlisted tool descriptors, or an empty list when unavailable. */
@@ -198,80 +334,68 @@ export class BrowserProxy {
   /**
    * Point the proxied server at the window knapper is pinned to.
    *
-   * We hand `createConnection` the whole BrowserContext, so @playwright/mcp keeps
-   * its *own* notion of the current tab and never consults our pin. That made
-   * `obsidian_attach` a half-truth: knapper's own CDP tools followed it while every
-   * browser_* tool stayed on whatever page the proxy latched onto first — so an
-   * agent could pin to a scratch vault and still be typing into a real one.
-   *
-   * `browser_tabs select` is the only lever upstream exposes for this, so the pin
-   * is translated into a tab index. Best effort: a failure here must not take down
-   * the attach call, which still succeeds for the native layer.
+   * The proxy gets a new single-page context facade for the pinned CDP target.
+   * Best effort: a failure here must not take down the attach call, which still
+   * succeeds for the native layer.
    */
   async selectPinnedPage(): Promise<boolean> {
-    try {
-      if (!(await this.init()) || !this.client) return false;
-      const page = await this.router.playwright.page();
-      return await this.pointProxyAt(page);
-    } catch (e) {
-      this.logger.warn("could not point the browser proxy at the pinned window", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return false;
-    }
+    return this.serialized(async () => {
+      try {
+        if (!(await this.init()) || !this.client) return false;
+        const page = await this.router.playwright.page();
+        return await this.pointProxyAt(page);
+      } catch (e) {
+        this.logger.warn("could not point the browser proxy at the pinned window", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return false;
+      }
+    });
   }
 
   /**
-   * Make upstream's "current tab" be `page`.
+   * Bind upstream to `page` and no other page.
    *
    * Returns false rather than throwing so `obsidian_attach` can report partial
-   * success, but `callTool` treats false as a refusal: forwarding real input to
+   * success, but `callTool` treats false as a refusal. Forwarding any operation to
    * whatever tab the proxy happened to latch onto is the failure mode this exists
    * to prevent.
    */
   private async pointProxyAt(page: Page): Promise<boolean> {
-    if (!this.client) return false;
     try {
-      const title = await page.title();
-
-      // The index must come from upstream's own tab list, not from
-      // context.pages(). Those are different index spaces: context.pages() also
-      // contains metadata workers and blob pages, while upstream lists only real
-      // windows. Indexing the former into the latter selected an unrelated tab
-      // (or none) and quietly left the pin unhonored — it happened to line up in
-      // one arrangement of windows, which is worse than failing outright.
-      const listed = await this.client.callTool({
-        name: "browser_tabs",
-        arguments: { action: "list" },
-      });
-      const text = (listed as CallToolResult).content
-        .map((c) => (c.type === "text" ? c.text : ""))
-        .join("\n");
-
-      // Lines look like `- 0: (current) [Title](url)`.
-      const tabs = [...text.matchAll(/^-\s*(\d+):\s*(\(current\)\s*)?\[(.+?)\]\(/gm)].map((m) => ({
-        index: Number(m[1]),
-        current: m[2] !== undefined,
-        title: m[3] ?? "",
-      }));
-
-      // Every Obsidian window shares app://obsidian.md/index.html, so the title —
-      // "<note> - <vault> - Obsidian <version>" — is the only distinguishing field.
-      const match = tabs.find((t) => t.title === title);
-      if (!match) {
-        this.logger.warn("target window is not in the proxy's tab list", { title });
+      const targetId = await this.router.playwright.targetIdFor(page);
+      if (targetId === undefined || !(await this.router.playwright.isPageAuthorized(page))) {
         return false;
       }
 
-      // Skip the round-trip when upstream is already there. This runs before every
-      // input call now, not just on attach, so the common case has to be cheap.
-      if (match.current) return true;
+      if (this.client && this.proxiedTargetId === targetId && this.proxiedPage === page) {
+        return true;
+      }
 
-      await this.client.callTool({
-        name: "browser_tabs",
-        arguments: { action: "select", index: match.index },
-      });
-      this.logger.debug("browser proxy retargeted", { index: match.index, title });
+      const context = await this.router.playwright.connect();
+      const oldClient = this.client;
+      this.client = undefined;
+      this.proxiedTargetId = undefined;
+      this.proxiedPage = undefined;
+      if (oldClient) await oldClient.close().catch(() => undefined);
+
+      const created = await this.createClient(contextForPage(context, page));
+      this.client = created.client;
+      this.tools ??= created.tools;
+
+      // Re-resolve after the asynchronous rebuild. This detects a closed window,
+      // a changed pin, or a vault switch before any proxied operation can run.
+      const verifiedPage = await this.router.playwright.page();
+      const verifiedTargetId = await this.router.playwright.targetIdFor(verifiedPage);
+      if (verifiedTargetId !== targetId || !(await this.router.playwright.isPageAuthorized(page))) {
+        await created.client.close().catch(() => undefined);
+        this.client = undefined;
+        return false;
+      }
+
+      this.proxiedTargetId = targetId;
+      this.proxiedPage = page;
+      this.logger.debug("browser proxy retargeted", { targetId });
       return true;
     } catch (e) {
       this.logger.warn("could not point the browser proxy at the target window", {
@@ -291,22 +415,15 @@ export class BrowserProxy {
       });
     }
 
-    // `select` and `close` would move upstream off the window the fence just
-    // approved, which would make every later input call target something else.
-    if (name === "browser_tabs") {
-      const action = args.action;
-      if (typeof action === "string" && !ALLOWED_TABS_ACTIONS.has(action)) {
-        throw new UobError(
-          "INVALID_ARGUMENT",
-          `browser_tabs "${action}" is not available; only ${[...ALLOWED_TABS_ACTIONS].join(", ")} is.`,
-          {
-            remediation:
-              "Switching or closing tabs behind knapper's back would retarget every later input " +
-              "call. Use obsidian_attach to choose a window; it repoints the proxy for you.",
-            fixedBy: "obsidian_attach",
-          },
-        );
-      }
+    return this.serialized(() => this.callToolLocked(name, args));
+  }
+
+  private async callToolLocked(
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<CallToolResult> {
+    if (name === "browser_take_screenshot") {
+      await validateScreenshotFilename(this.config.outputDir, args.filename);
     }
 
     const availability = await this.router.refreshAvailability();
@@ -323,6 +440,21 @@ export class BrowserProxy {
       );
     }
 
+    // Keep the most common keyboard path out of the upstream tab manager. Its
+    // first-tab initialization can leave Electron's renderer focus state active
+    // after the input call, even though the OS window never came to the front.
+    if (name === "browser_press_key") {
+      const key = args.key;
+      if (typeof key !== "string" || key === "") {
+        throw new UobError("INVALID_ARGUMENT", "key is required.", {
+          remediation: "Pass a Playwright key name or chord, such as Escape or Control+p.",
+        });
+      }
+      const page = await this.router.playwright.page();
+      await this.router.focus.run(page, () => page.keyboard.press(key));
+      return { content: [{ type: "text", text: `Pressed ${key}.` }] };
+    }
+
     const ready = await this.init();
     if (!ready || !this.client) {
       throw new UobError(
@@ -336,28 +468,12 @@ export class BrowserProxy {
       );
     }
 
-    const forward = async (): Promise<CallToolResult> =>
-      this.client!.callTool({
-        name,
-        arguments: stripUndefined(args),
-      }) as Promise<CallToolResult>;
-
     /**
-     * Real input needs two things upstream cannot give us, both resolved here
-     * because @playwright/mcp is a black box we forward to rather than a library
-     * we can reach inside.
-     *
-     * The fence: `page()` throws unless the window belongs to an authorized vault,
-     * and `pointProxyAt` makes upstream's own current-tab notion agree. Without
-     * this the proxy keeps driving whichever tab it latched onto first.
-     *
-     * Focus emulation: set over a *separate* CDP session on the same target, so it
-     * applies to upstream's dispatches without upstream knowing about it. That is
-     * what makes background input work through the proxy at all.
+     * Every call needs the fence and an exact target. Real input also needs focus
+     * emulation. These controls stay here because the upstream server accepts a
+     * shared BrowserContext and otherwise keeps independent current-tab state.
      */
     const call = async (): Promise<CallToolResult> => {
-      if (!isInputBrowserTool(name)) return forward();
-
       const page = await this.router.playwright.page();
       if (!(await this.pointProxyAt(page))) {
         throw new UobError(
@@ -365,13 +481,47 @@ export class BrowserProxy {
           `Refusing to run ${name}: could not point the browser proxy at the authorized window.`,
           {
             remediation:
-              "The window may have closed, or its title changed mid-call. Take a fresh " +
-              "browser_snapshot and retry. knapper will not forward real input without first " +
+              "The window may have closed or switched vaults. Take a fresh " +
+              "browser_snapshot and retry. knapper will not forward a browser call without first " +
               "confirming which window will receive it.",
             fixedBy: "obsidian_list_targets",
             details: { tool: name },
           },
         );
+      }
+
+      const forward = async (): Promise<CallToolResult> =>
+        this.client!.callTool({
+          name,
+          arguments:
+            name === "browser_take_screenshot"
+              ? Object.fromEntries(
+                  Object.entries(stripUndefined(args)).filter(([key]) => key !== "filename"),
+                )
+              : stripUndefined(args),
+        }) as Promise<CallToolResult>;
+
+      if (!isInputBrowserTool(name)) {
+        const result = await forward();
+        if (name !== "browser_take_screenshot" || result.isError) return result;
+        const image = result.content.find((part) => part.type === "image");
+        if (image?.type !== "image") {
+          throw new UobError("APP_UNAVAILABLE", "The browser screenshot returned no image.", {
+            remediation: "Take a fresh browser snapshot, then retry the screenshot.",
+          });
+        }
+        const extension = image.mimeType === "image/jpeg" ? "jpg" : "png";
+        const file = await saveArtifact(
+          this.config.outputDir,
+          typeof args.filename === "string" ? args.filename : undefined,
+          `browser-${Date.now()}.${extension}`,
+          Buffer.from(image.data, "base64"),
+          image.mimeType,
+        );
+        return {
+          content: [{ type: "text", text: `Browser screenshot saved to ${file.path}` }],
+          structuredContent: file,
+        };
       }
       return this.router.focus.run(page, forward);
     };
@@ -421,8 +571,25 @@ export class BrowserProxy {
     const client = this.client;
     this.client = undefined;
     this.tools = undefined;
+    this.proxiedTargetId = undefined;
+    this.proxiedPage = undefined;
     if (client) await client.close().catch(() => undefined);
     this.router.releaseDebugger("playwright");
+  }
+
+  /** Serialize upstream's mutable page state across shared and exclusive tools. */
+  private async serialized<T>(action: () => Promise<T>): Promise<T> {
+    const previous = this.callTail;
+    let release = (): void => undefined;
+    this.callTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous.catch(() => undefined);
+    try {
+      return await action();
+    } finally {
+      release();
+    }
   }
 }
 
