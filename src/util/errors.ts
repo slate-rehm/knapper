@@ -213,15 +213,13 @@ export function authorizeCommand(vaultPath: string): string {
  *
  * `fixedBy` stays unset on purpose: no tool fixes this, which is the point.
  */
-function authorizationRemediation(vaultPath: string | undefined, authorized: string[]): string {
+function authorizationRemediation(authorized: string[]): string {
   const known =
     authorized.length > 0
       ? `Authorized vaults: ${authorized.join(", ")}.`
       : "No vaults are authorized yet.";
   const grant =
-    vaultPath !== undefined
-      ? `The user can grant access by running ${authorizeCommand(vaultPath)} in their own terminal.`
-      : "The user grants access by running `npx knapper authorize <vault path>` in their own terminal.";
+    "The user grants access by running `npx knapper authorize <vault path>` in their own terminal.";
   return (
     `${known} ${grant} Surface that command only if the user has asked to work in this vault — ` +
     "do not volunteer it, and do not run it yourself; it requires an interactive terminal and " +
@@ -231,18 +229,14 @@ function authorizationRemediation(vaultPath: string | undefined, authorized: str
 }
 
 /** A named vault exists but the user has not authorized knapper to touch it. */
-export function vaultNotAuthorized(
-  vault: { name: string; path?: string },
-  authorized: string[],
-): UobError {
+export function vaultNotAuthorized(vault: { name: string }, authorized: string[]): UobError {
   return new UobError(
     "VAULT_NOT_AUTHORIZED",
     `Refusing to touch "${vault.name}" — it has not been authorized for knapper.`,
     {
-      remediation: authorizationRemediation(vault.path, authorized),
+      remediation: authorizationRemediation(authorized),
       details: {
         requested: vault.name,
-        ...(vault.path !== undefined ? { path: vault.path } : {}),
         authorizedVaults: authorized,
       },
     },
@@ -263,7 +257,7 @@ export function vaultTargetAmbiguous(authorized: string[]): UobError {
   return new UobError("VAULT_NOT_AUTHORIZED", message, {
     remediation:
       authorized.length === 0
-        ? authorizationRemediation(undefined, authorized)
+        ? authorizationRemediation(authorized)
         : "Pass an explicit `vault` argument naming one of them, or set OBSIDIAN_VAULT so every " +
           "call in this session resolves the same way. knapper will not guess: with no vault " +
           "named, Obsidian's CLI silently targets whichever vault was last focused.",
