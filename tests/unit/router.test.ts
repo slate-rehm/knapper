@@ -323,4 +323,24 @@ describe("runtime rebinding", () => {
     expect(router.supervisor.started).toBe(true);
     await router.dispose();
   });
+
+  it("does not rebuild transports when disposal starts during rebind", async () => {
+    nothingAvailable();
+    const router = makeRouter();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const close = vi.fn(() => gate);
+    router.playwright.close = close;
+
+    const rebinding = router.rebind();
+    await vi.waitFor(() => expect(close).toHaveBeenCalled());
+    const disposing = router.dispose();
+    release();
+
+    await expect(rebinding).rejects.toThrow(/disposed/i);
+    await disposing;
+    expect(router.supervisor.started).toBe(false);
+  });
 });

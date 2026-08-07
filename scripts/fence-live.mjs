@@ -138,215 +138,225 @@ console.log(`unauthorized: ${UNAUTHORIZED}\n`);
 
 const liveHome = await createLiveHome("knapper-fence-");
 const client = new McpClient(["--toolsets", "all"], liveHome.env);
-await client.send("initialize", {
-  protocolVersion: "2024-11-05",
-  capabilities: {},
-  clientInfo: { name: "fence-live", version: "1" },
-});
-const isolated = await createDisposableWorkspace(client, root, {
-  home: liveHome.home,
-  agentLabel: "fence-live",
-  label: "fence-authorized-scratch",
-});
-agentHandle = isolated.agentHandle;
-workspaceHandle = isolated.workspaceHandle;
-AUTHORIZED = isolated.session.vault?.name;
-assert(typeof AUTHORIZED === "string", "isolated workspace has no vault identity");
+try {
+  await client.send("initialize", {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "fence-live", version: "1" },
+  });
+  const isolated = await createDisposableWorkspace(client, root, {
+    home: liveHome.home,
+    agentLabel: "fence-live",
+    label: "fence-authorized-scratch",
+  });
+  agentHandle = isolated.agentHandle;
+  workspaceHandle = isolated.workspaceHandle;
+  AUTHORIZED = isolated.session.vault?.name;
+  assert(typeof AUTHORIZED === "string", "isolated workspace has no vault identity");
 
-// Seed a second private-profile vault while Obsidian is stopped. It receives the
-// same conspicuous session identity plugin, but no Knapper authorization record.
-// This creates the unsafe upstream-current-page condition without opening or
-// registering any user vault.
-const unauthorizedVaultId = randomBytes(8).toString("hex");
-const trustedIdentity = await client.call("obsidian_eval", {
-  vault: AUTHORIZED,
-  code: `localStorage.setItem(${JSON.stringify(`enable-plugin-${unauthorizedVaultId}`)}, "true")`,
-});
-assert(!trustedIdentity.isError, `identity trust seed failed: ${trustedIdentity.text}`);
-const stoppedForSeed = await client.call("obsidian_workspace_stop", { workspaceHandle });
-assert(!stoppedForSeed.isError, `workspace stop failed: ${stoppedForSeed.text}`);
-UNAUTHORIZED = `${AUTHORIZED}-unauthorized`;
-const unauthorizedPath = join(dirname(isolated.vaultPath), UNAUTHORIZED);
-await mkdir(join(unauthorizedPath, ".obsidian"), { recursive: true, mode: 0o700 });
-const { SESSION_IDENTITY_PLUGIN_ID, seedSessionIdentityPlugin } = await import(
-  join(root, "dist", "session", "bootstrap.js")
-);
-await seedSessionIdentityPlugin(unauthorizedPath, isolated.session.key);
-await Promise.all([
-  writeFile(
-    join(unauthorizedPath, ".obsidian", "app.json"),
-    JSON.stringify({ communityPluginEnabled: true }),
-    "utf8",
-  ),
-  writeFile(
-    join(unauthorizedPath, ".obsidian", "community-plugins.json"),
-    `${JSON.stringify([SESSION_IDENTITY_PLUGIN_ID], null, 2)}\n`,
-    "utf8",
-  ),
-  writeFile(join(unauthorizedPath, "private-sentinel.md"), "unauthorized private fixture\n"),
-]);
-const registryPath = join(isolated.session.instance.userDataDir, "obsidian.json");
-const privateRegistry = JSON.parse(await readFile(registryPath, "utf8"));
-privateRegistry.vaults ??= {};
-privateRegistry.vaults[unauthorizedVaultId] = {
-  path: unauthorizedPath,
-  ts: Date.now(),
-  open: true,
-};
-await writeFile(registryPath, `${JSON.stringify(privateRegistry, null, 2)}\n`, "utf8");
-const restartedAfterSeed = await client.call("obsidian_workspace_restart", { workspaceHandle });
-assert(!restartedAfterSeed.isError, `workspace restart failed: ${restartedAfterSeed.text}`);
-
-console.log("Preconditions");
-await check("the authorized vault reports as authorized", async () => {
-  const { json } = await client.call("obsidian_status");
-  const v = (json?.vaults ?? []).find((x) => x.name === AUTHORIZED);
-  assert(v, `${AUTHORIZED} is not registered with Obsidian`);
-  assert(v.authorized, `${AUTHORIZED} is not authorized; run: knapper authorize ${AUTHORIZED}`);
-});
-
-await check("the unauthorized vault reports as unauthorized", async () => {
-  const { json } = await client.call("obsidian_status");
-  const hidden = (json?.vaults ?? []).filter((entry) => entry.authorized === false);
-  assert(hidden.length > 0, `no unauthorized vault is open; expected ${UNAUTHORIZED}`);
-  assert(
-    hidden.every((entry) => entry.name === undefined),
-    "status leaked an unauthorized name",
-  );
-});
-
-console.log("\nReads are fenced");
-await check("obsidian_files refuses on an unauthorized vault", async () =>
-  assertFenced(await client.call("obsidian_files", { vault: UNAUTHORIZED }), "obsidian_files"),
-);
-
-await check("obsidian_search refuses on an unauthorized vault", async () =>
-  assertFenced(
-    await client.call("obsidian_search", { query: "the", vault: UNAUTHORIZED }),
-    "obsidian_search",
-  ),
-);
-
-await check("obsidian_eval refuses on an unauthorized vault", async () =>
-  assertFenced(
-    await client.call("obsidian_eval", { code: "app.vault.getName()", vault: UNAUTHORIZED }),
-    "obsidian_eval",
-  ),
-);
-
-await check("obsidian_read refuses on an unauthorized vault", async () =>
-  assertFenced(
-    await client.call("obsidian_read", { path: "README.md", vault: UNAUTHORIZED }),
-    "obsidian_read",
-  ),
-);
-
-console.log("\nWrites are fenced");
-await check("obsidian_create refuses on an unauthorized vault", async () =>
-  assertFenced(
-    await client.call("obsidian_create", {
-      path: "knapper-fence-probe.md",
-      content: "should never exist",
-      vault: UNAUTHORIZED,
-    }),
-    "obsidian_create",
-  ),
-);
-
-await check("obsidian_delete refuses on an unauthorized vault", async () =>
-  assertFenced(
-    await client.call("obsidian_delete", { path: "README.md", vault: UNAUTHORIZED }),
-    "obsidian_delete",
-  ),
-);
-
-await check("obsidian_cli refuses a raw command on an unauthorized vault", async () =>
-  assertFenced(
-    await client.call("obsidian_cli", { command: "vault", vault: UNAUTHORIZED }),
-    "obsidian_cli",
-  ),
-);
-
-console.log("\nThe authorized vault still works");
-await check("obsidian_eval reaches the authorized vault", async () => {
-  const r = await client.call("obsidian_eval", {
-    code: "app.vault.getName()",
+  // Seed a second private-profile vault while Obsidian is stopped. It receives the
+  // same conspicuous session identity plugin, but no Knapper authorization record.
+  // This creates the unsafe upstream-current-page condition without opening or
+  // registering any user vault.
+  const unauthorizedVaultId = randomBytes(8).toString("hex");
+  const trustedIdentity = await client.call("obsidian_eval", {
     vault: AUTHORIZED,
+    code: `localStorage.setItem(${JSON.stringify(`enable-plugin-${unauthorizedVaultId}`)}, "true")`,
   });
-  assert(!r.isError, `expected success, got: ${r.text.slice(0, 200)}`);
-  assert(r.text.includes(AUTHORIZED), `evaluated against the wrong vault: ${r.text.slice(0, 200)}`);
-});
+  assert(!trustedIdentity.isError, `identity trust seed failed: ${trustedIdentity.text}`);
+  const stoppedForSeed = await client.call("obsidian_workspace_stop", { workspaceHandle });
+  assert(!stoppedForSeed.isError, `workspace stop failed: ${stoppedForSeed.text}`);
+  UNAUTHORIZED = `${AUTHORIZED}-unauthorized`;
+  const unauthorizedPath = join(dirname(isolated.vaultPath), UNAUTHORIZED);
+  await mkdir(join(unauthorizedPath, ".obsidian"), { recursive: true, mode: 0o700 });
+  const { SESSION_IDENTITY_PLUGIN_ID, seedSessionIdentityPlugin } = await import(
+    join(root, "dist", "session", "bootstrap.js")
+  );
+  await seedSessionIdentityPlugin(unauthorizedPath, isolated.session.key);
+  await Promise.all([
+    writeFile(
+      join(unauthorizedPath, ".obsidian", "app.json"),
+      JSON.stringify({ communityPluginEnabled: true }),
+      "utf8",
+    ),
+    writeFile(
+      join(unauthorizedPath, ".obsidian", "community-plugins.json"),
+      `${JSON.stringify([SESSION_IDENTITY_PLUGIN_ID], null, 2)}\n`,
+      "utf8",
+    ),
+    writeFile(join(unauthorizedPath, "private-sentinel.md"), "unauthorized private fixture\n"),
+  ]);
+  const registryPath = join(isolated.session.instance.userDataDir, "obsidian.json");
+  const privateRegistry = JSON.parse(await readFile(registryPath, "utf8"));
+  privateRegistry.vaults ??= {};
+  privateRegistry.vaults[unauthorizedVaultId] = {
+    path: unauthorizedPath,
+    ts: Date.now(),
+    open: true,
+  };
+  await writeFile(registryPath, `${JSON.stringify(privateRegistry, null, 2)}\n`, "utf8");
+  const restartedAfterSeed = await client.call("obsidian_workspace_restart", { workspaceHandle });
+  assert(!restartedAfterSeed.isError, `workspace restart failed: ${restartedAfterSeed.text}`);
 
-await check("obsidian_files lists the authorized vault", async () => {
-  const r = await client.call("obsidian_files", { vault: AUTHORIZED });
-  assert(!r.isError, `expected success, got: ${r.text.slice(0, 200)}`);
-});
-
-console.log("\nWindow targeting");
-await check("obsidian_list_targets hides note names of unauthorized windows", async () => {
-  const { json } = await client.call("obsidian_list_targets");
-  const targets = Array.isArray(json) ? json : (json?.result ?? []);
-  const bad = targets.find((target) => target.authorized === false);
-  assert(bad, `no window open for ${UNAUTHORIZED}; open it to test this`);
-  assert(bad.title === undefined, `leaked the window title: ${bad.title}`);
-  assert(bad.vaultName === undefined, `leaked the vault name: ${bad.vaultName}`);
-  assert(bad.url === undefined, `leaked the target URL: ${bad.url}`);
-});
-
-await check("obsidian_attach refuses to pin to an unauthorized window", async () => {
-  const { json } = await client.call("obsidian_list_targets");
-  const targets = Array.isArray(json) ? json : (json?.result ?? []);
-  const bad = targets.find((target) => target.authorized === false);
-  assert(bad, `no window open for ${UNAUTHORIZED}`);
-  assertFenced(await client.call("obsidian_attach", { targetId: bad.targetId }), "obsidian_attach");
-});
-
-console.log("\nProvisioning is fenced");
-// These two write into `<vault>/.obsidian` on disk rather than through the CLI, so
-// they used to resolve their target from the vault *registry* — and being
-// registered is not consent. Both would happily install a dev symlink or flip
-// community-plugin settings inside a vault the user never authorized.
-await check("obsidian_link_plugin refuses to symlink into an unauthorized vault", async () => {
-  const r = await client.call("obsidian_link_plugin", {
-    vault: UNAUTHORIZED,
-    sourceDir: root,
-    pluginId: "uob-fence-probe",
+  console.log("Preconditions");
+  await check("the authorized vault reports as authorized", async () => {
+    const { json } = await client.call("obsidian_status");
+    const v = (json?.vaults ?? []).find((x) => x.name === AUTHORIZED);
+    assert(v, `${AUTHORIZED} is not registered with Obsidian`);
+    assert(v.authorized, `${AUTHORIZED} is not authorized; run: knapper authorize ${AUTHORIZED}`);
   });
-  assert(r.isError, "expected a refusal");
-  assert(
-    /VAULT_NOT_AUTHORIZED|not (?:been )?authorized/i.test(r.text),
-    `wrong reason: ${r.text.slice(0, 200)}`,
-  );
-});
 
-await check("obsidian_setup_vault refuses to configure an unauthorized vault", async () => {
-  const r = await client.call("obsidian_setup_vault", { vault: UNAUTHORIZED });
-  assert(r.isError, "expected a refusal");
-  assert(
-    /VAULT_NOT_AUTHORIZED|not (?:been )?authorized/i.test(r.text),
-    `wrong reason: ${r.text.slice(0, 200)}`,
-  );
-});
+  await check("the unauthorized vault reports as unauthorized", async () => {
+    const { json } = await client.call("obsidian_status");
+    const hidden = (json?.vaults ?? []).filter((entry) => entry.authorized === false);
+    assert(hidden.length > 0, `no unauthorized vault is open; expected ${UNAUTHORIZED}`);
+    assert(
+      hidden.every((entry) => entry.name === undefined),
+      "status leaked an unauthorized name",
+    );
+  });
 
-console.log("\nDeletion provenance");
-await check("obsidian_remove_vault refuses a vault it did not create", async () => {
-  const r = await client.call("obsidian_remove_vault", { vault: UNAUTHORIZED });
-  assert(r.isError, "expected a refusal");
-  assert(
-    /VAULT_NOT_MANAGED|did not create|not authorized/i.test(r.text),
-    `wrong reason: ${r.text.slice(0, 200)}`,
+  console.log("\nReads are fenced");
+  await check("obsidian_files refuses on an unauthorized vault", async () =>
+    assertFenced(await client.call("obsidian_files", { vault: UNAUTHORIZED }), "obsidian_files"),
   );
-});
 
-const stopped = await client.call("obsidian_workspace_stop", { workspaceHandle });
-assert(!stopped.isError, `workspace stop failed: ${stopped.text}`);
-const released = await client.call("obsidian_workspace_release", { workspaceHandle });
-assert(!released.isError, `workspace release failed: ${released.text}`);
-workspaceHandle = undefined;
-const closed = await client.call("obsidian_agent_close", { agentHandle });
-assert(!closed.isError, `agent close failed: ${closed.text}`);
-client.close();
-await removeLiveHome(liveHome.home);
+  await check("obsidian_search refuses on an unauthorized vault", async () =>
+    assertFenced(
+      await client.call("obsidian_search", { query: "the", vault: UNAUTHORIZED }),
+      "obsidian_search",
+    ),
+  );
+
+  await check("obsidian_eval refuses on an unauthorized vault", async () =>
+    assertFenced(
+      await client.call("obsidian_eval", { code: "app.vault.getName()", vault: UNAUTHORIZED }),
+      "obsidian_eval",
+    ),
+  );
+
+  await check("obsidian_read refuses on an unauthorized vault", async () =>
+    assertFenced(
+      await client.call("obsidian_read", { path: "README.md", vault: UNAUTHORIZED }),
+      "obsidian_read",
+    ),
+  );
+
+  console.log("\nWrites are fenced");
+  await check("obsidian_create refuses on an unauthorized vault", async () =>
+    assertFenced(
+      await client.call("obsidian_create", {
+        path: "knapper-fence-probe.md",
+        content: "should never exist",
+        vault: UNAUTHORIZED,
+      }),
+      "obsidian_create",
+    ),
+  );
+
+  await check("obsidian_delete refuses on an unauthorized vault", async () =>
+    assertFenced(
+      await client.call("obsidian_delete", { path: "README.md", vault: UNAUTHORIZED }),
+      "obsidian_delete",
+    ),
+  );
+
+  await check("obsidian_cli refuses a raw command on an unauthorized vault", async () =>
+    assertFenced(
+      await client.call("obsidian_cli", { command: "vault", vault: UNAUTHORIZED }),
+      "obsidian_cli",
+    ),
+  );
+
+  console.log("\nThe authorized vault still works");
+  await check("obsidian_eval reaches the authorized vault", async () => {
+    const r = await client.call("obsidian_eval", {
+      code: "app.vault.getName()",
+      vault: AUTHORIZED,
+    });
+    assert(!r.isError, `expected success, got: ${r.text.slice(0, 200)}`);
+    assert(
+      r.text.includes(AUTHORIZED),
+      `evaluated against the wrong vault: ${r.text.slice(0, 200)}`,
+    );
+  });
+
+  await check("obsidian_files lists the authorized vault", async () => {
+    const r = await client.call("obsidian_files", { vault: AUTHORIZED });
+    assert(!r.isError, `expected success, got: ${r.text.slice(0, 200)}`);
+  });
+
+  console.log("\nWindow targeting");
+  await check("obsidian_list_targets hides note names of unauthorized windows", async () => {
+    const { json } = await client.call("obsidian_list_targets");
+    const targets = Array.isArray(json) ? json : (json?.result ?? []);
+    const bad = targets.find((target) => target.authorized === false);
+    assert(bad, `no window open for ${UNAUTHORIZED}; open it to test this`);
+    assert(bad.title === undefined, `leaked the window title: ${bad.title}`);
+    assert(bad.vaultName === undefined, `leaked the vault name: ${bad.vaultName}`);
+    assert(bad.url === undefined, `leaked the target URL: ${bad.url}`);
+  });
+
+  await check("obsidian_attach refuses to pin to an unauthorized window", async () => {
+    const { json } = await client.call("obsidian_list_targets");
+    const targets = Array.isArray(json) ? json : (json?.result ?? []);
+    const bad = targets.find((target) => target.authorized === false);
+    assert(bad, `no window open for ${UNAUTHORIZED}`);
+    assertFenced(
+      await client.call("obsidian_attach", { targetId: bad.targetId }),
+      "obsidian_attach",
+    );
+  });
+
+  console.log("\nProvisioning is fenced");
+  // These two write into `<vault>/.obsidian` on disk rather than through the CLI, so
+  // they used to resolve their target from the vault *registry* — and being
+  // registered is not consent. Both would happily install a dev symlink or flip
+  // community-plugin settings inside a vault the user never authorized.
+  await check("obsidian_link_plugin refuses to symlink into an unauthorized vault", async () => {
+    const r = await client.call("obsidian_link_plugin", {
+      vault: UNAUTHORIZED,
+      sourceDir: root,
+      pluginId: "uob-fence-probe",
+    });
+    assert(r.isError, "expected a refusal");
+    assert(
+      /VAULT_NOT_AUTHORIZED|not (?:been )?authorized/i.test(r.text),
+      `wrong reason: ${r.text.slice(0, 200)}`,
+    );
+  });
+
+  await check("obsidian_setup_vault refuses to configure an unauthorized vault", async () => {
+    const r = await client.call("obsidian_setup_vault", { vault: UNAUTHORIZED });
+    assert(r.isError, "expected a refusal");
+    assert(
+      /VAULT_NOT_AUTHORIZED|not (?:been )?authorized/i.test(r.text),
+      `wrong reason: ${r.text.slice(0, 200)}`,
+    );
+  });
+
+  console.log("\nDeletion provenance");
+  await check("obsidian_remove_vault refuses a vault it did not create", async () => {
+    const r = await client.call("obsidian_remove_vault", { vault: UNAUTHORIZED });
+    assert(r.isError, "expected a refusal");
+    assert(
+      /VAULT_NOT_MANAGED|did not create|not authorized/i.test(r.text),
+      `wrong reason: ${r.text.slice(0, 200)}`,
+    );
+  });
+} finally {
+  if (workspaceHandle !== undefined) {
+    await client.call("obsidian_workspace_stop", { workspaceHandle }).catch(() => undefined);
+    await client.call("obsidian_workspace_release", { workspaceHandle }).catch(() => undefined);
+    workspaceHandle = undefined;
+  }
+  if (agentHandle !== undefined) {
+    await client.call("obsidian_agent_close", { agentHandle }).catch(() => undefined);
+    agentHandle = undefined;
+  }
+  client.close();
+  await removeLiveHome(liveHome.home).catch(() => undefined);
+}
 
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);
 if (failures.length > 0) {

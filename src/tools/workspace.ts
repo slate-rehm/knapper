@@ -294,6 +294,7 @@ export function registerWorkspaceTools(ctx: ServerContext): void {
       label: z.string().optional().describe("Short label for this default-profile claim."),
     },
     handler: async (args) => {
+      await requireAgent(args.agentHandle as string);
       let workspace: WorkspaceRecord | undefined;
       try {
         workspace = await createWorkspaceRecord({
@@ -500,9 +501,9 @@ export function registerWorkspaceTools(ctx: ServerContext): void {
       }
       await removeWorkspaceRecord(workspace.handle);
       await ctx.workspaceLeases.release(workspace.handle);
+      ctx.selectTelemetry("default");
       if (ctx.currentWorkspaceHandle === workspace.handle) {
         ctx.currentWorkspaceHandle = undefined;
-        ctx.selectTelemetry("default");
         await ctx.bindDefaultWorkspace();
       }
       const telemetry =
@@ -569,9 +570,9 @@ export function registerWorkspaceTools(ctx: ServerContext): void {
       }
       await removeWorkspaceRecord(workspace.handle);
       await ctx.workspaceLeases.release(workspace.handle);
+      ctx.selectTelemetry("default");
       if (ctx.currentWorkspaceHandle === workspace.handle) {
         ctx.currentWorkspaceHandle = undefined;
-        ctx.selectTelemetry("default");
         await ctx.bindDefaultWorkspace();
       }
       let telemetryRoot = result.quarantinedPath;

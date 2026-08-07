@@ -478,7 +478,7 @@ same flow as anything else:
 
 ```bash
 git checkout -b release/v0.6.0-beta.7 dev
-npm version patch --no-git-tag-version && npm run versions:sync
+npm version 0.6.0-beta.7 --no-git-tag-version && npm run versions:sync
 # PR into dev, then promote dev -> master
 ```
 

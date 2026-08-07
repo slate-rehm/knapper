@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { VaultFence } from "../../src/connection/fence.js";
@@ -12,6 +12,8 @@ import {
 } from "../../src/connection/vaults.js";
 import { buildArgs } from "../../src/connection/cli/exec.js";
 import { createLogger } from "../../src/util/logger.js";
+import { sessionPaths } from "../../src/config.js";
+import { SESSION_SCHEMA_VERSION, writeDescriptor } from "../../src/session/descriptor.js";
 
 /**
  * The fence is the thing standing between an agent and someone's real notes, so
@@ -136,6 +138,66 @@ describe("VaultFence — revocation takes effect without a restart", () => {
 
     await writeManagedMarker(f.vaultPath("scratch"), NOW, "adopted", f.env);
     expect((await fence.resolve("scratch")).grant).toBe("adopted");
+  });
+});
+
+describe("VaultFence — private session identity", () => {
+  it("refuses a replacement directory at the session vault path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "knap-session-fence-"));
+    const env = { ...process.env, KNAP_HOME: root };
+    const key = "scratch-a3f19c22";
+    const paths = sessionPaths(key, env);
+    await mkdir(paths.vaultDir, { recursive: true });
+    const [canonical, identity] = await Promise.all([
+      realpath(paths.vaultDir),
+      stat(paths.vaultDir),
+    ]);
+    await writeDescriptor(
+      {
+        schema: SESSION_SCHEMA_VERSION,
+        key,
+        createdAt: NOW.toISOString(),
+        heartbeatAt: NOW.toISOString(),
+        readiness: { phase: "ready", readyAt: NOW.toISOString() },
+        origin: { cwd: root },
+        ownership: {
+          rootPath: await realpath(paths.root),
+          vaultPath: canonical,
+          rootDevice: (await stat(paths.root)).dev,
+          rootInode: (await stat(paths.root)).ino,
+          vaultDevice: identity.dev,
+          vaultInode: identity.ino,
+        },
+        instance: {
+          userDataDir: paths.userDataDir,
+          outputDir: paths.outputDir,
+          obsidianBin: "obsidian",
+        },
+        vault: { id: "session-id", name: key, path: paths.vaultDir, grant: "created" },
+      },
+      env,
+    );
+    const configPath = join(paths.userDataDir, "obsidian.json");
+    await mkdir(paths.userDataDir, { recursive: true });
+    await writeFile(
+      configPath,
+      JSON.stringify({ vaults: { "session-id": { path: paths.vaultDir, open: true } } }),
+    );
+    const fence = new VaultFence({
+      configPath,
+      env,
+      logger,
+      sessionKey: key,
+      sessionVaultPath: paths.vaultDir,
+    });
+    expect((await fence.resolve(key)).grant).toBe("created");
+
+    const replaced = `${paths.vaultDir}-replaced`;
+    await rename(paths.vaultDir, replaced);
+    await mkdir(paths.vaultDir);
+    expect((await lstat(paths.vaultDir)).isDirectory()).toBe(true);
+    fence.invalidate();
+    await expect(fence.resolve(key)).rejects.toMatchObject({ code: "VAULT_NOT_AUTHORIZED" });
   });
 });
 

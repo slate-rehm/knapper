@@ -32,23 +32,30 @@ function safeLabel(value: string | undefined): string | undefined {
   return /^[A-Za-z0-9][A-Za-z0-9_.:@/+-]{0,127}$/.test(value) ? value : "[redacted]";
 }
 
+function opaqueIdentifier(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return `sha256:${createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
+}
+
 function safeContext(context: AuditCallContext | undefined): AuditCallContext {
   if (!context) return {};
-  const clientName = safeLabel(context.clientInfo?.name);
-  const clientVersion = safeLabel(context.clientInfo?.version);
+  const clientName = opaqueIdentifier(context.clientInfo?.name);
+  const clientVersion = opaqueIdentifier(context.clientInfo?.version);
   return {
     ...(clientName
       ? { clientInfo: { name: clientName, ...(clientVersion ? { version: clientVersion } : {}) } }
       : {}),
-    ...(safeLabel(context.agentHandle) ? { agentHandle: safeLabel(context.agentHandle) } : {}),
-    ...(safeLabel(context.workspaceHandle)
-      ? { workspaceHandle: safeLabel(context.workspaceHandle) }
+    ...(opaqueIdentifier(context.agentHandle)
+      ? { agentHandle: opaqueIdentifier(context.agentHandle) }
+      : {}),
+    ...(opaqueIdentifier(context.workspaceHandle)
+      ? { workspaceHandle: opaqueIdentifier(context.workspaceHandle) }
       : {}),
     ...(safeLabel(context.transport) ? { transport: safeLabel(context.transport) } : {}),
     ...(safeLabel(context.protocolVersion)
       ? { protocolVersion: safeLabel(context.protocolVersion) }
       : {}),
-    ...(safeLabel(context.traceId) ? { traceId: safeLabel(context.traceId) } : {}),
+    ...(opaqueIdentifier(context.traceId) ? { traceId: opaqueIdentifier(context.traceId) } : {}),
     ...(safeLabel(context.workspaceKind)
       ? { workspaceKind: safeLabel(context.workspaceKind) }
       : {}),
@@ -57,11 +64,8 @@ function safeContext(context: AuditCallContext | undefined): AuditCallContext {
 
 export function requestId(context: ToolRequestContext | undefined): string {
   const supplied = context?.requestId ?? context?.mcpReq?.id;
-  if (typeof supplied === "number") return String(supplied);
-  if (typeof supplied === "string") {
-    const safe = safeLabel(supplied);
-    if (safe !== "[redacted]") return safe ?? randomUUID();
-    return `sha256:${createHash("sha256").update(supplied).digest("hex").slice(0, 24)}`;
+  if (typeof supplied === "number" || typeof supplied === "string") {
+    return opaqueIdentifier(String(supplied)) ?? randomUUID();
   }
   return randomUUID();
 }

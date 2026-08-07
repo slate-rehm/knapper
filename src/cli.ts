@@ -173,6 +173,7 @@ const shutdown = async (reason: string): Promise<void> => {
   ctx.stopJanitor();
   await ctx.browserProxy.close().catch(() => undefined);
   await ctx.router.dispose().catch(() => undefined);
+  ctx.telemetry.closePersistence();
   await ctx.workspaceLeases.releaseAll().catch(() => undefined);
   await ctx.profileLease.release().catch(() => undefined);
   process.exit(0);

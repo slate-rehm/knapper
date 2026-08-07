@@ -143,210 +143,222 @@ function assert(condition, message) {
 const liveHome = await createLiveHome("knapper-acceptance-");
 const client = new McpClient(["--toolsets", "all"], liveHome.env);
 
-console.log("\n=== Unified Obsidian MCP — acceptance run ===\n");
-const init = await client.initialize();
-console.log(`server: ${init.result.serverInfo.name} v${init.result.serverInfo.version}\n`);
-const isolated = await createDisposableWorkspace(client, root, {
-  home: liveHome.home,
-  agentLabel: "acceptance",
-  label: "acceptance-scratch",
-});
-agentHandle = isolated.agentHandle;
-workspaceHandle = isolated.workspaceHandle;
-VAULT = isolated.session.vault?.name;
-assert(typeof VAULT === "string", "isolated workspace has no vault identity");
-for (const [path, content] of [
-  ["Notes/Alpha.md", "# Alpha\n\nxylophone-marmalade\n"],
-  ["Notes/Beta.md", "# Beta\n\n- [ ] An open task\n"],
-]) {
-  const created = await client.call("obsidian_create", { path, content });
-  assert(!created.isError, `fixture creation failed for ${path}: ${created.text}`);
-}
+try {
+  console.log("\n=== Unified Obsidian MCP — acceptance run ===\n");
+  const init = await client.initialize();
+  console.log(`server: ${init.result.serverInfo.name} v${init.result.serverInfo.version}\n`);
+  const isolated = await createDisposableWorkspace(client, root, {
+    home: liveHome.home,
+    agentLabel: "acceptance",
+    label: "acceptance-scratch",
+  });
+  agentHandle = isolated.agentHandle;
+  workspaceHandle = isolated.workspaceHandle;
+  VAULT = isolated.session.vault?.name;
+  assert(typeof VAULT === "string", "isolated workspace has no vault identity");
+  for (const [path, content] of [
+    ["Notes/Alpha.md", "# Alpha\n\nxylophone-marmalade\n"],
+    ["Notes/Beta.md", "# Beta\n\n- [ ] An open task\n"],
+  ]) {
+    const created = await client.call("obsidian_create", { path, content });
+    assert(!created.isError, `fixture creation failed for ${path}: ${created.text}`);
+  }
 
-// ------------------------------------------------------------------ surface
-console.log("Tool surface");
-const listed = await client.send("tools/list");
-const tools = listed.result.tools;
-const names = new Set(tools.map((t) => t.name));
+  // ------------------------------------------------------------------ surface
+  console.log("Tool surface");
+  const listed = await client.send("tools/list");
+  const tools = listed.result.tools;
+  const names = new Set(tools.map((t) => t.name));
 
-await check("all toolsets register a large surface", () => {
-  assert(tools.length > 80, `only ${tools.length} tools`);
-  return `${tools.length} tools`;
-});
-
-await check("every tool has a non-trivial description", () => {
-  const bad = tools.filter((t) => !t.description || t.description.length < 40);
-  assert(bad.length === 0, `thin descriptions: ${bad.map((t) => t.name).join(", ")}`);
-});
-
-await check("destructive browser tools are withheld", () => {
-  const banned = ["browser_close", "browser_navigate", "browser_resize", "browser_run_code_unsafe"];
-  const leaked = banned.filter((n) => names.has(n));
-  assert(leaked.length === 0, `exposed: ${leaked.join(", ")}`);
-});
-
-await check("no duplicate tool names", () => {
-  assert(names.size === tools.length, "duplicates present");
-});
-
-// -------------------------------------------------------------- preconditions
-console.log("\nPreconditions");
-await check("obsidian_doctor reports a healthy instance", async () => {
-  const { text, json, isError } = await client.call("obsidian_doctor");
-  assert(!isError, "doctor returned an error");
-  assert(json && "argvCorruption" in json, "doctor did not report an argvCorruption verdict");
-  assert(json.argvCorruption === null, "argv corruption detected in user-flags.conf");
-  return text.split("\n")[0]?.slice(0, 60);
-});
-
-await check("obsidian_status shows both transports live", async () => {
-  const { text } = await client.call("obsidian_status");
-  assert(/CLI transport: enabled/.test(text), "CLI transport not enabled");
-  assert(/CDP transport: attached/.test(text), "CDP transport not attached");
-});
-
-await check("obsidian_list_targets finds the main window", async () => {
-  const { text } = await client.call("obsidian_list_targets");
-  assert(/\[main\]/.test(text), "no main window classified");
-});
-
-// ------------------------------------------------------------------- CLI path
-console.log("\nObsidian CLI transport");
-await check("obsidian_eval reaches the app object", async () => {
-  const { text } = await client.call("obsidian_eval", { code: "app.vault.getName()" });
-  assert(text.includes(VAULT), `got: ${text.slice(0, 80)}`);
-  return text.trim().slice(0, 40);
-});
-
-await check("obsidian_commands introspects the live command table", async () => {
-  const { text } = await client.call("obsidian_commands", {});
-  assert(text.length > 100, "suspiciously small command list");
-});
-
-await check("obsidian_search does real content search, not path matching", async () => {
-  const { text } = await client.call("obsidian_search", { query: "xylophone-marmalade" });
-  assert(/Alpha/.test(text), `expected Notes/Alpha.md, got: ${text.slice(0, 120)}`);
-  // The phrase appears only in the body, never in a filename, so a path-substring
-  // implementation would find nothing here.
-});
-
-await check("obsidian_read returns note content", async () => {
-  const { text } = await client.call("obsidian_read", { path: "Notes/Beta.md" });
-  assert(/An open task/.test(text), `unexpected content: ${text.slice(0, 120)}`);
-});
-
-// ---------------------------------------------------------------- browser path
-console.log("\nBrowser automation over CDP");
-await check("browser_snapshot returns real Obsidian UI", async () => {
-  const { text } = await client.call("browser_snapshot");
-  assert(text.length > 200, "snapshot too small");
-  assert(/ref=e\d+/.test(text), "no refs in snapshot");
-  return `${text.length} chars`;
-});
-
-await check("obsidian_snapshot scopes to the active leaf", async () => {
-  const { text } = await client.call("obsidian_snapshot", { scope: "active-leaf" });
-  assert(text.length > 20, "scoped snapshot empty");
-  return `${text.length} chars`;
-});
-
-await check("browser_take_screenshot returns an artifact reference", async () => {
-  const { images, json } = await client.call("browser_take_screenshot");
-  assert(images.length === 0, "screenshot must not return inline image content");
-  assert(json?.mimeType === "image/png", "screenshot did not return PNG metadata");
-  assert(Number(json?.size) > 1000, "screenshot artifact is suspiciously small");
-  await stat(json.path);
-  return `${json.mimeType}, ${json.size} bytes`;
-});
-
-// ------------------------------------------------------------------ telemetry
-console.log("\nTelemetry");
-let cursorAfterMark;
-await check("obsidian_logs returns a cursor", async () => {
-  const { json } = await client.call("obsidian_logs", { limit: 5 });
-  assert(Number.isFinite(json?.cursor), "no cursor in response");
-  cursorAfterMark = Number(json.cursor);
-  return `cursor=${cursorAfterMark}`;
-});
-
-await check("obsidian_log_mark inserts a marker", async () => {
-  const { isError } = await client.call("obsidian_log_mark", { label: "acceptance" });
-  assert(!isError, "mark failed");
-});
-
-await check("cursor tailing returns only new records", async () => {
-  const before = await client.call("obsidian_logs", { limit: 1 });
-  const cursor = Number(before.json?.cursor);
-  // Generate exactly one new console record.
-  await client.call("obsidian_eval", { code: 'console.log("acceptance-probe"), 1' });
-  await new Promise((r) => setTimeout(r, 1200));
-  const after = await client.call("obsidian_logs", { since: cursor });
-  const matched = Number(after.json?.matched ?? -1);
-  assert(matched >= 0, "no matched count returned");
-  assert(matched < 50, `tailing returned ${matched} records, looks like a full replay`);
-  return `${matched} new`;
-});
-
-await check("obsidian_telemetry_status reports capture armed", async () => {
-  const { text } = await client.call("obsidian_telemetry_status");
-  assert(/armed/i.test(text), "no armed state reported");
-});
-
-// ------------------------------------------------------------------ dev cycle
-console.log("\nPlugin dev cycle");
-if (PLUGIN !== undefined && process.env.PLUGIN_SOURCE_DIR !== undefined) {
-  await check("obsidian_plugin_list sees the test plugin", async () => {
-    const { text } = await client.call("obsidian_plugin_list");
-    assert(new RegExp(PLUGIN).test(text), "test plugin not installed or enabled");
+  await check("all toolsets register a large surface", () => {
+    assert(tools.length > 80, `only ${tools.length} tools`);
+    return `${tools.length} tools`;
   });
 
-  await check("obsidian_dev_cycle reloads and reports", async () => {
-    const { text, isError } = await client.call("obsidian_dev_cycle", { pluginId: PLUGIN });
-    assert(!isError, `dev cycle errored: ${text.slice(0, 200)}`);
+  await check("every tool has a non-trivial description", () => {
+    const bad = tools.filter((t) => !t.description || t.description.length < 40);
+    assert(bad.length === 0, `thin descriptions: ${bad.map((t) => t.name).join(", ")}`);
+  });
+
+  await check("destructive browser tools are withheld", () => {
+    const banned = [
+      "browser_close",
+      "browser_navigate",
+      "browser_resize",
+      "browser_run_code_unsafe",
+    ];
+    const leaked = banned.filter((n) => names.has(n));
+    assert(leaked.length === 0, `exposed: ${leaked.join(", ")}`);
+  });
+
+  await check("no duplicate tool names", () => {
+    assert(names.size === tools.length, "duplicates present");
+  });
+
+  // -------------------------------------------------------------- preconditions
+  console.log("\nPreconditions");
+  await check("obsidian_doctor reports a healthy instance", async () => {
+    const { text, json, isError } = await client.call("obsidian_doctor");
+    assert(!isError, "doctor returned an error");
+    assert(json && "argvCorruption" in json, "doctor did not report an argvCorruption verdict");
+    assert(json.argvCorruption === null, "argv corruption detected in user-flags.conf");
     return text.split("\n")[0]?.slice(0, 60);
   });
 
-  await check("telemetry attributes a deliberate plugin throw", async () => {
+  await check("obsidian_status shows both transports live", async () => {
+    const { text } = await client.call("obsidian_status");
+    assert(/CLI transport: enabled/.test(text), "CLI transport not enabled");
+    assert(/CDP transport: attached/.test(text), "CDP transport not attached");
+  });
+
+  await check("obsidian_list_targets finds the main window", async () => {
+    const { text } = await client.call("obsidian_list_targets");
+    assert(/\[main\]/.test(text), "no main window classified");
+  });
+
+  // ------------------------------------------------------------------- CLI path
+  console.log("\nObsidian CLI transport");
+  await check("obsidian_eval reaches the app object", async () => {
+    const { text } = await client.call("obsidian_eval", { code: "app.vault.getName()" });
+    assert(text.includes(VAULT), `got: ${text.slice(0, 80)}`);
+    return text.trim().slice(0, 40);
+  });
+
+  await check("obsidian_commands introspects the live command table", async () => {
+    const { text } = await client.call("obsidian_commands", {});
+    assert(text.length > 100, "suspiciously small command list");
+  });
+
+  await check("obsidian_search does real content search, not path matching", async () => {
+    const { text } = await client.call("obsidian_search", { query: "xylophone-marmalade" });
+    assert(/Alpha/.test(text), `expected Notes/Alpha.md, got: ${text.slice(0, 120)}`);
+    // The phrase appears only in the body, never in a filename, so a path-substring
+    // implementation would find nothing here.
+  });
+
+  await check("obsidian_read returns note content", async () => {
+    const { text } = await client.call("obsidian_read", { path: "Notes/Beta.md" });
+    assert(/An open task/.test(text), `unexpected content: ${text.slice(0, 120)}`);
+  });
+
+  // ---------------------------------------------------------------- browser path
+  console.log("\nBrowser automation over CDP");
+  await check("browser_snapshot returns real Obsidian UI", async () => {
+    const { text } = await client.call("browser_snapshot");
+    assert(text.length > 200, "snapshot too small");
+    assert(/ref=e\d+/.test(text), "no refs in snapshot");
+    return `${text.length} chars`;
+  });
+
+  await check("obsidian_snapshot scopes to the active leaf", async () => {
+    const { text } = await client.call("obsidian_snapshot", { scope: "active-leaf" });
+    assert(text.length > 20, "scoped snapshot empty");
+    return `${text.length} chars`;
+  });
+
+  await check("browser_take_screenshot returns an artifact reference", async () => {
+    const { images, json } = await client.call("browser_take_screenshot");
+    assert(images.length === 0, "screenshot must not return inline image content");
+    assert(json?.mimeType === "image/png", "screenshot did not return PNG metadata");
+    assert(Number(json?.size) > 1000, "screenshot artifact is suspiciously small");
+    await stat(json.path);
+    return `${json.mimeType}, ${json.size} bytes`;
+  });
+
+  // ------------------------------------------------------------------ telemetry
+  console.log("\nTelemetry");
+  let cursorAfterMark;
+  await check("obsidian_logs returns a cursor", async () => {
+    const { json } = await client.call("obsidian_logs", { limit: 5 });
+    assert(Number.isFinite(json?.cursor), "no cursor in response");
+    cursorAfterMark = Number(json.cursor);
+    return `cursor=${cursorAfterMark}`;
+  });
+
+  await check("obsidian_log_mark inserts a marker", async () => {
+    const { isError } = await client.call("obsidian_log_mark", { label: "acceptance" });
+    assert(!isError, "mark failed");
+  });
+
+  await check("cursor tailing returns only new records", async () => {
     const before = await client.call("obsidian_logs", { limit: 1 });
     const cursor = Number(before.json?.cursor);
-    await client.call("obsidian_exercise_command", { commandId: `${PLUGIN}:throw-on-purpose` });
-    await new Promise((r) => setTimeout(r, 1500));
-    const after = await client.call("obsidian_logs", { since: cursor, plugin: PLUGIN });
-    assert(new RegExp(PLUGIN).test(after.text), "throw not attributed to the test plugin");
-    return "attributed";
+    // Generate exactly one new console record.
+    await client.call("obsidian_eval", { code: 'console.log("acceptance-probe"), 1' });
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await client.call("obsidian_logs", { since: cursor });
+    const matched = Number(after.json?.matched ?? -1);
+    assert(matched >= 0, "no matched count returned");
+    assert(matched < 50, `tailing returned ${matched} records, looks like a full replay`);
+    return `${matched} new`;
   });
-} else {
-  console.log("  SKIP plugin checks require PLUGIN_SOURCE_DIR and PLUGIN_ID");
+
+  await check("obsidian_telemetry_status reports capture armed", async () => {
+    const { text } = await client.call("obsidian_telemetry_status");
+    assert(/armed/i.test(text), "no armed state reported");
+  });
+
+  // ------------------------------------------------------------------ dev cycle
+  console.log("\nPlugin dev cycle");
+  if (PLUGIN !== undefined && process.env.PLUGIN_SOURCE_DIR !== undefined) {
+    await check("obsidian_plugin_list sees the test plugin", async () => {
+      const { text } = await client.call("obsidian_plugin_list");
+      assert(new RegExp(PLUGIN).test(text), "test plugin not installed or enabled");
+    });
+
+    await check("obsidian_dev_cycle reloads and reports", async () => {
+      const { text, isError } = await client.call("obsidian_dev_cycle", { pluginId: PLUGIN });
+      assert(!isError, `dev cycle errored: ${text.slice(0, 200)}`);
+      return text.split("\n")[0]?.slice(0, 60);
+    });
+
+    await check("telemetry attributes a deliberate plugin throw", async () => {
+      const before = await client.call("obsidian_logs", { limit: 1 });
+      const cursor = Number(before.json?.cursor);
+      await client.call("obsidian_exercise_command", { commandId: `${PLUGIN}:throw-on-purpose` });
+      await new Promise((r) => setTimeout(r, 1500));
+      const after = await client.call("obsidian_logs", { since: cursor, plugin: PLUGIN });
+      assert(new RegExp(PLUGIN).test(after.text), "throw not attributed to the test plugin");
+      return "attributed";
+    });
+  } else {
+    console.log("  SKIP plugin checks require PLUGIN_SOURCE_DIR and PLUGIN_ID");
+  }
+
+  // -------------------------------------------------------------- error contract
+  console.log("\nError contract");
+  await check("a bad vault name yields an actionable error", async () => {
+    const { text, isError } = await client.call("obsidian_cli", {
+      command: "vault",
+      vault: "definitely-not-a-real-vault",
+    });
+    assert(isError, "expected an error result");
+    assert(/vault/i.test(text), "error does not mention the vault");
+  });
+
+  await check(
+    "an in-page throw is reported as an eval failure, not a transport error",
+    async () => {
+      const { text, isError } = await client.call("obsidian_eval", {
+        code: 'throw new Error("intentional-acceptance-throw")',
+      });
+      assert(isError, "expected an error result");
+      assert(/intentional-acceptance-throw/.test(text), `lost the message: ${text.slice(0, 150)}`);
+    },
+  );
+} finally {
+  if (workspaceHandle !== undefined) {
+    await client.call("obsidian_workspace_stop", { workspaceHandle }).catch(() => undefined);
+    await client.call("obsidian_workspace_release", { workspaceHandle }).catch(() => undefined);
+    workspaceHandle = undefined;
+  }
+  if (agentHandle !== undefined) {
+    await client.call("obsidian_agent_close", { agentHandle }).catch(() => undefined);
+    agentHandle = undefined;
+  }
+  client.close();
+  await removeLiveHome(liveHome.home).catch(() => undefined);
 }
-
-// -------------------------------------------------------------- error contract
-console.log("\nError contract");
-await check("a bad vault name yields an actionable error", async () => {
-  const { text, isError } = await client.call("obsidian_cli", {
-    command: "vault",
-    vault: "definitely-not-a-real-vault",
-  });
-  assert(isError, "expected an error result");
-  assert(/vault/i.test(text), "error does not mention the vault");
-});
-
-await check("an in-page throw is reported as an eval failure, not a transport error", async () => {
-  const { text, isError } = await client.call("obsidian_eval", {
-    code: 'throw new Error("intentional-acceptance-throw")',
-  });
-  assert(isError, "expected an error result");
-  assert(/intentional-acceptance-throw/.test(text), `lost the message: ${text.slice(0, 150)}`);
-});
-
-const stopped = await client.call("obsidian_workspace_stop", { workspaceHandle });
-assert(!stopped.isError, `workspace stop failed: ${stopped.text}`);
-const released = await client.call("obsidian_workspace_release", { workspaceHandle });
-assert(!released.isError, `workspace release failed: ${released.text}`);
-workspaceHandle = undefined;
-const closed = await client.call("obsidian_agent_close", { agentHandle });
-assert(!closed.isError, `agent close failed: ${closed.text}`);
-client.close();
-await removeLiveHome(liveHome.home);
 
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);
 if (failures.length > 0) {

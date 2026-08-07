@@ -378,10 +378,12 @@ export function registerCoreTools(ctx: ServerContext): void {
     annotations: { readOnlyHint: true },
     inputSchema: {},
     handler: async () => {
-      const rows = await router.playwright.windowSummaries().catch(() => {
+      const rows = await router.playwright.windowSummaries().catch((error: unknown) => {
+        if (error instanceof UobError) throw error;
         throw new UobError("CDP_PORT_CLOSED", `No CDP endpoint at ${config.cdpUrl}.`, {
           remediation: "Launch Obsidian with --remote-debugging-port.",
           fixedBy: "obsidian_launch",
+          cause: error,
         });
       });
 
