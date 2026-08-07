@@ -230,7 +230,7 @@ export class VaultFence {
         );
       }
       throw vaultNotAuthorized(
-        { name: entry.name, path: entry.path },
+        { name: entry.name },
         (await this.list()).map((v) => v.name),
       );
     }
