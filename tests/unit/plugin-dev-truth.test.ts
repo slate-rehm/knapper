@@ -41,6 +41,13 @@ function outcomeJson(outcome: ToolOutcome): Record<string, unknown> {
   return outcome.json as Record<string, unknown>;
 }
 
+function outcomeText(outcome: ToolOutcome): string {
+  if (typeof outcome !== "object" || outcome === null || !("text" in outcome)) {
+    throw new Error("Expected a text tool outcome.");
+  }
+  return outcome.text;
+}
+
 function registryFor(...toolsets: ("core" | "plugin-dev" | "authoring")[]): ToolRegistry {
   return new ToolRegistry(new Set(toolsets), createLogger("error"), 2);
 }
@@ -348,8 +355,10 @@ describe("plugin and authoring tool contracts", () => {
     const themes = await registry.get("obsidian_themes")!.handler({});
     const snippets = await registry.get("obsidian_snippets")!.handler({});
 
-    expect(outcomeJson(themes)).toEqual({ count: 0, themes: [] });
-    expect(outcomeJson(snippets)).toEqual({ count: 0, snippets: [] });
+    expect(outcomeJson(themes)).toEqual({ items: [], count: 0 });
+    expect(outcomeJson(snippets)).toEqual({ items: [], count: 0 });
+    expect(outcomeText(themes)).toBe('{"items":[],"count":0}');
+    expect(outcomeText(snippets)).toBe('{"items":[],"count":0}');
   });
 
   it("marks repeatable plugin and setup-facing state operations as idempotent", () => {
