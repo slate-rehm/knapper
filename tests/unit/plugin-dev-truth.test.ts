@@ -42,7 +42,12 @@ function outcomeJson(outcome: ToolOutcome): Record<string, unknown> {
 }
 
 function outcomeText(outcome: ToolOutcome): string {
-  if (typeof outcome !== "object" || outcome === null || !("text" in outcome)) {
+  if (
+    typeof outcome !== "object" ||
+    outcome === null ||
+    !("text" in outcome) ||
+    typeof outcome.text !== "string"
+  ) {
     throw new Error("Expected a text tool outcome.");
   }
   return outcome.text;
