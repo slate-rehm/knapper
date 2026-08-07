@@ -714,7 +714,7 @@ async function restartSessionUnlocked(
       heartbeatAt: new Date().toISOString(),
       readiness: { phase: "ready", readyAt: new Date().toISOString() },
       instance: {
-        ...descriptor.instance,
+        ...starting.instance,
         cdpPort: launched.port,
         cdpUrl: launched.cdpUrl,
         ...(launched.browserId !== undefined ? { browserId: launched.browserId } : {}),
@@ -734,7 +734,7 @@ async function restartSessionUnlocked(
         reason: error instanceof Error ? error.message : String(error),
       },
       instance: {
-        ...descriptor.instance,
+        ...starting.instance,
         cdpPort: launched.port,
         cdpUrl: launched.cdpUrl,
         ...(launched.pid !== undefined ? { pid: launched.pid } : {}),

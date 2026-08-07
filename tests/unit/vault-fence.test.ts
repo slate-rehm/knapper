@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { lstat, mkdtemp, mkdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { VaultFence } from "../../src/connection/fence.js";
@@ -190,6 +199,17 @@ describe("VaultFence — private session identity", () => {
       sessionKey: key,
       sessionVaultPath: paths.vaultDir,
     });
+    expect((await fence.resolve(key)).grant).toBe("created");
+
+    const descriptorFile = join(paths.root, "session.json");
+    const persisted = JSON.parse(await readFile(descriptorFile, "utf8"));
+    delete persisted.vault.path;
+    await writeFile(descriptorFile, JSON.stringify(persisted));
+    fence.invalidate();
+    await expect(fence.resolve(key)).rejects.toMatchObject({ code: "VAULT_NOT_AUTHORIZED" });
+    persisted.vault.path = paths.vaultDir;
+    await writeFile(descriptorFile, JSON.stringify(persisted));
+    fence.invalidate();
     expect((await fence.resolve(key)).grant).toBe("created");
 
     const replaced = `${paths.vaultDir}-replaced`;

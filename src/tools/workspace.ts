@@ -75,6 +75,39 @@ async function workspaceSummary(handle: string): Promise<Record<string, unknown>
   };
 }
 
+async function restoreWorkspaceBinding(
+  ctx: ServerContext,
+  previousHandle: string | undefined,
+): Promise<void> {
+  try {
+    if (previousHandle !== undefined) {
+      const previous = await readWorkspace(previousHandle);
+      if (previous?.kind === "isolated" && previous.sessionKey !== undefined) {
+        const descriptor = await readDescriptor(previous.sessionKey);
+        if (descriptor !== undefined) {
+          ctx.selectTelemetry(previous.handle);
+          await ctx.bindSession(descriptor, previous.handle);
+          ctx.currentWorkspaceHandle = previous.handle;
+          return;
+        }
+      } else if (previous?.kind === "default") {
+        ctx.selectTelemetry("default");
+        await ctx.bindDefaultWorkspace();
+        ctx.currentWorkspaceHandle = previous.handle;
+        return;
+      }
+    }
+  } catch (error) {
+    ctx.logger.warn("could not restore the previous workspace after a binding failure", {
+      workspaceHandle: previousHandle,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  ctx.currentWorkspaceHandle = undefined;
+  ctx.selectTelemetry("default");
+  await ctx.bindDefaultWorkspace().catch(() => undefined);
+}
+
 async function archiveWorkspaceTelemetry(
   ctx: ServerContext,
   workspaceHandle: string,
@@ -226,6 +259,7 @@ export function registerWorkspaceTools(ctx: ServerContext): void {
     handler: async (args) => {
       const agentHandle = args.agentHandle as string;
       await requireAgent(agentHandle);
+      const previousHandle = ctx.currentWorkspaceHandle;
       let descriptor;
       let workspace: WorkspaceRecord | undefined;
       try {
@@ -268,6 +302,7 @@ export function registerWorkspaceTools(ctx: ServerContext): void {
             await quarantineSession(descriptor.key).catch(() => undefined);
           }
         }
+        await restoreWorkspaceBinding(ctx, previousHandle);
         throw error;
       }
       return {
@@ -295,6 +330,7 @@ export function registerWorkspaceTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       await requireAgent(args.agentHandle as string);
+      const previousHandle = ctx.currentWorkspaceHandle;
       let workspace: WorkspaceRecord | undefined;
       try {
         workspace = await createWorkspaceRecord({
@@ -302,13 +338,16 @@ export function registerWorkspaceTools(ctx: ServerContext): void {
           kind: "default",
           ...(typeof args.label === "string" ? { label: args.label } : {}),
         });
+        await ctx.workspaceLeases.acquire(workspace.handle, "obsidian_workspace_claim_default");
         ctx.selectTelemetry("default");
         await ctx.bindDefaultWorkspace();
         ctx.currentWorkspaceHandle = workspace.handle;
       } catch (error) {
         if (workspace !== undefined) {
+          await ctx.workspaceLeases.release(workspace.handle).catch(() => undefined);
           await removeWorkspaceRecord(workspace.handle).catch(() => undefined);
         }
+        await restoreWorkspaceBinding(ctx, previousHandle);
         throw error;
       }
       return {

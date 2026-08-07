@@ -88,9 +88,23 @@ export class DefaultProfileLease {
   private async read(): Promise<DefaultProfileLeaseRecord | undefined> {
     try {
       const parsed: unknown = JSON.parse(await readFile(defaultProfileLeasePath(this.env), "utf8"));
-      return isLeaseRecord(parsed) ? parsed : undefined;
-    } catch {
-      return undefined;
+      if (isLeaseRecord(parsed)) return parsed;
+      throw new UobError("DEFAULT_PROFILE_BUSY", "The default-profile lease record is malformed.", {
+        remediation:
+          "Inspect the lease record and its owner before you remove it. Knapper will not overwrite an invalid ownership record.",
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      if (error instanceof UobError) throw error;
+      throw new UobError(
+        "DEFAULT_PROFILE_BUSY",
+        "Knapper could not read the default-profile lease.",
+        {
+          remediation:
+            "Check the lease file permissions and owner before you retry. Knapper will not assume that the profile is free.",
+          cause: error,
+        },
+      );
     }
   }
 

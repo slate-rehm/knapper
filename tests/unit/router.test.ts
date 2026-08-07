@@ -219,6 +219,20 @@ describe("CLI JSON evaluation", () => {
 
     await expect(router.evaluateJson<string>('"ready"')).resolves.toMatchObject({ value: "ready" });
   });
+
+  it("does not coerce JSON-shaped string results into scalar JSON values", async () => {
+    cliOnly();
+    const router = makeRouter();
+    vi.spyOn(router.fence, "resolve").mockResolvedValue({
+      id: "abc",
+      name: "scratch",
+      path: "/tmp/scratch",
+      grant: "adopted",
+    });
+    vi.spyOn(router.cli, "evaluate").mockResolvedValue("=> true\n");
+
+    await expect(router.evaluateJson<string>('"true"')).resolves.toMatchObject({ value: "true" });
+  });
 });
 
 describe("resolve failures name the right precondition", () => {
