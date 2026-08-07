@@ -6,7 +6,7 @@
  * and the CLI-enable tool both read it here rather than asking the app.
  */
 
-import { lstat, readFile, mkdir, readdir, realpath, stat } from "node:fs/promises";
+import { lstat, readFile, mkdir, open, readdir, realpath, rm, stat } from "node:fs/promises";
 import { basename, resolve, sep, dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -109,6 +109,8 @@ export function findVault(config: ObsidianGlobalConfig, nameOrId: string): Vault
 
 /** Legacy marker name. These files no longer grant access or deletion. */
 export const MANAGED_MARKER = ".knapper-managed";
+/** Non-authorizing nonce that binds an external grant to one directory instance. */
+export const KNAPPER_IDENTITY = ".knapper-identity";
 
 /**
  * How Knapper came to authorize a vault.
@@ -139,6 +141,8 @@ interface StoredVaultAuthorization extends ManagedMarker {
   inode: string;
   /** Filesystem birth time prevents an inode-reused replacement from inheriting access. */
   birthtime?: string;
+  /** Matches the Knapper-created nonce in the vault. The external record remains authoritative. */
+  token?: string;
 }
 
 interface VaultAuthorizationRegistry {
@@ -175,6 +179,7 @@ function isStoredAuthorization(value: unknown): value is StoredVaultAuthorizatio
     typeof record.device === "string" &&
     typeof record.inode === "string" &&
     (record.birthtime === undefined || typeof record.birthtime === "string") &&
+    (record.token === undefined || typeof record.token === "string") &&
     typeof record.createdAt === "string" &&
     (record.grant === "created" || record.grant === "adopted") &&
     (record.authorizedAt === undefined || typeof record.authorizedAt === "string") &&
@@ -331,6 +336,63 @@ async function vaultIdentity(
   }
 }
 
+interface VaultIdentityToken {
+  schema: 1;
+  managedBy: "knapper";
+  token: string;
+}
+
+async function readVaultIdentityToken(vaultPath: string): Promise<VaultIdentityToken | undefined> {
+  const path = resolve(vaultPath, KNAPPER_IDENTITY);
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || (await realpath(path)) !== path)
+      return undefined;
+    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<VaultIdentityToken>;
+    if (
+      parsed.schema !== 1 ||
+      parsed.managedBy !== "knapper" ||
+      typeof parsed.token !== "string" ||
+      !/^[a-f0-9]{64}$/.test(parsed.token)
+    ) {
+      return undefined;
+    }
+    return parsed as VaultIdentityToken;
+  } catch {
+    return undefined;
+  }
+}
+
+async function createVaultIdentityToken(vaultPath: string): Promise<VaultIdentityToken> {
+  const path = resolve(vaultPath, KNAPPER_IDENTITY);
+  const existing = await readVaultIdentityToken(vaultPath);
+  if (existing !== undefined) return existing;
+
+  try {
+    await lstat(path);
+    throw new UobError("INVALID_ARGUMENT", `Refusing to replace ${path}.`, {
+      remediation: `Move the existing ${KNAPPER_IDENTITY} file before you authorize this vault.`,
+      details: { path },
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const identity: VaultIdentityToken = {
+    schema: 1,
+    managedBy: "knapper",
+    token: randomBytes(32).toString("hex"),
+  };
+  const handle = await open(path, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(identity)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  return identity;
+}
+
 /** Read the external authorization record. Legacy vault markers are inactive. */
 export async function readManagedMarker(
   vaultPath: string,
@@ -339,13 +401,16 @@ export async function readManagedMarker(
   const identity = await vaultIdentity(vaultPath);
   if (identity === undefined) return undefined;
   const registry = await readAuthorizationRegistry(env, false);
+  const vaultToken = await readVaultIdentityToken(vaultPath);
   const record = registry.authorizations.find(
     (entry) =>
       entry.path === identity.path &&
       entry.device === identity.device &&
       entry.inode === identity.inode &&
       entry.birthtime !== undefined &&
-      entry.birthtime === identity.birthtime,
+      entry.birthtime === identity.birthtime &&
+      entry.token !== undefined &&
+      entry.token === vaultToken?.token,
   );
   if (record === undefined) return undefined;
   const {
@@ -354,6 +419,7 @@ export async function readManagedMarker(
     device: _device,
     inode: _inode,
     birthtime: _birthtime,
+    token: _token,
     ...authorization
   } = record;
   return authorization;
@@ -392,16 +458,29 @@ async function writeManagedMarkerUnlocked(
         },
       );
     }
+    const priorIdentity = await readVaultIdentityToken(vaultPath);
+    const vaultToken = priorIdentity ?? (await createVaultIdentityToken(vaultPath));
     const authorizations = registry.authorizations.filter((entry) => entry.path !== identity.path);
-    authorizations.push({ ...marker, ...identity, literalPath: resolve(vaultPath) });
-    await writeJsonAtomic(
-      vaultAuthorizationRegistryPath(env),
-      {
-        schema: AUTHORIZATION_SCHEMA,
-        authorizations,
-      } satisfies VaultAuthorizationRegistry,
-      { mode: 0o600, directoryMode: 0o700 },
-    );
+    authorizations.push({
+      ...marker,
+      ...identity,
+      literalPath: resolve(vaultPath),
+      token: vaultToken.token,
+    });
+    try {
+      await writeJsonAtomic(
+        vaultAuthorizationRegistryPath(env),
+        {
+          schema: AUTHORIZATION_SCHEMA,
+          authorizations,
+        } satisfies VaultAuthorizationRegistry,
+        { mode: 0o600, directoryMode: 0o700 },
+      );
+    } catch (error) {
+      if (priorIdentity === undefined)
+        await rm(resolve(vaultPath, KNAPPER_IDENTITY), { force: true });
+      throw error;
+    }
   });
   return marker;
 }
@@ -432,6 +511,9 @@ async function removeManagedMarkerUnlocked(
   const targets = new Set(identity === undefined ? [literal] : [identity.path, literal]);
   return withFileLock(vaultAuthorizationLockPath(env), async () => {
     const registry = await readAuthorizationRegistry(env, true);
+    const removed = registry.authorizations.filter(
+      (entry) => targets.has(entry.path) || targets.has(entry.literalPath ?? ""),
+    );
     const authorizations = registry.authorizations.filter(
       (entry) => !targets.has(entry.path) && !targets.has(entry.literalPath ?? ""),
     );
@@ -444,6 +526,10 @@ async function removeManagedMarkerUnlocked(
       } satisfies VaultAuthorizationRegistry,
       { mode: 0o600, directoryMode: 0o700 },
     );
+    const vaultToken = await readVaultIdentityToken(vaultPath);
+    if (vaultToken !== undefined && removed.some((entry) => entry.token === vaultToken.token)) {
+      await rm(resolve(vaultPath, KNAPPER_IDENTITY), { force: true });
+    }
     return true;
   });
 }

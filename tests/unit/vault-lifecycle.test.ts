@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MANAGED_MARKER,
+  KNAPPER_IDENTITY,
   assertVaultRemovable,
   createManagedVault,
   readManagedMarker,
@@ -52,7 +53,7 @@ describe("the external vault authorization registry", () => {
     expect(await readManagedMarker(target, fixture.env)).toBeUndefined();
     await writeManagedMarker(target, NOW, "adopted", fixture.env);
     expect(await readManagedMarker(target, fixture.env)).toMatchObject({ grant: "adopted" });
-    expect(await readdir(target)).toEqual([MANAGED_MARKER]);
+    expect((await readdir(target)).sort()).toEqual([KNAPPER_IDENTITY, MANAGED_MARKER].sort());
     expect(
       JSON.parse(await readFile(vaultAuthorizationRegistryPath(fixture.env), "utf8")),
     ).toMatchObject({ schema: 1, authorizations: [expect.objectContaining({ path: target })] });
@@ -84,6 +85,7 @@ describe("the external vault authorization registry", () => {
     await mkdir(target);
 
     expect(await readManagedMarker(target, fixture.env)).toBeUndefined();
+    await expect(stat(join(target, KNAPPER_IDENTITY))).rejects.toThrow();
   });
 
   it("fails closed and preserves an invalid registry", async () => {
@@ -111,6 +113,7 @@ describe("createManagedVault", () => {
     expect(result.marker.managedBy).toBe("knapper");
     expect(await readManagedMarker(target, fixture.env)).toBeDefined();
     await expect(stat(join(target, MANAGED_MARKER))).rejects.toThrow();
+    expect((await stat(join(target, KNAPPER_IDENTITY))).isFile()).toBe(true);
 
     const registry = JSON.parse(await readFile(fixture.configPath, "utf8"));
     expect(Object.values(registry.vaults)).toContainEqual(
