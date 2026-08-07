@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { closeAgent, openAgent, readAgent, touchAgent } from "../../src/agent/store.js";
+import {
+  closeAgent,
+  openAgent,
+  readAgent,
+  requireAgent,
+  touchAgent,
+} from "../../src/agent/store.js";
 import {
   createWorkspaceRecord,
   readWorkspace,
@@ -88,6 +94,30 @@ describe("agent and workspace handles", () => {
       env,
     });
 
+    await expect(requireWorkspace(workspace.handle, env)).rejects.toMatchObject({
+      code: "SESSION_NOT_FOUND",
+    });
+  });
+
+  it("fails closed when persisted expiry dates are malformed", async () => {
+    const agent = await openAgent({ label: "malformed", env });
+    const workspace = await createWorkspaceRecord({
+      agentHandle: agent.handle,
+      kind: "default",
+      env,
+    });
+    await writeFile(
+      join(agentsDir(env), `${agent.handle}.json`),
+      JSON.stringify({ ...agent, expiresAt: "not-a-date" }),
+    );
+    await writeFile(
+      join(workspacesDir(env), `${workspace.handle}.json`),
+      JSON.stringify({ ...workspace, expiresAt: "not-a-date" }),
+    );
+
+    await expect(requireAgent(agent.handle, env)).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+    });
     await expect(requireWorkspace(workspace.handle, env)).rejects.toMatchObject({
       code: "SESSION_NOT_FOUND",
     });

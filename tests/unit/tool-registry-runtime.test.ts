@@ -224,13 +224,8 @@ describe("ToolRegistry runtime toolsets", () => {
     expect(order).toEqual(["before", "handler"]);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
-      request_id: "request-1",
-      trace_id: "trace-1",
       tool: "audited_example",
       outcome: "success",
-      client: { name: "codex", version: "1.2.3" },
-      agent_handle: "agent-1",
-      workspace_handle: "workspace-1",
       arguments: {
         count: 3,
         keys: ["code", "settings", "text"],
@@ -238,6 +233,12 @@ describe("ToolRegistry runtime toolsets", () => {
         redacted: true,
       },
     });
+    expect(events[0]?.request_id).toMatch(/^sha256:/);
+    expect(events[0]?.trace_id).toMatch(/^sha256:/);
+    expect(events[0]?.client?.name).toMatch(/^sha256:/);
+    expect(events[0]?.client?.version).toMatch(/^sha256:/);
+    expect(events[0]?.agent_handle).toMatch(/^sha256:/);
+    expect(events[0]?.workspace_handle).toMatch(/^sha256:/);
     expect(JSON.stringify(events[0])).not.toContain("private");
   });
 

@@ -117,6 +117,9 @@ class McpClient {
         ? { ...args, workspaceHandle: this.workspaceHandle }
         : args;
     const response = await this.send("tools/call", { name, arguments: input });
+    if (response.error !== undefined) {
+      throw new Error(`${name}: ${response.error.message ?? JSON.stringify(response.error)}`);
+    }
     const content = response.result?.content ?? [];
     return {
       text: content
@@ -170,7 +173,7 @@ async function workspaceInternals(home, workspaceHandle) {
 const home = await mkdtemp(join(TEST_ROOT, "w-"));
 const env = { KNAP_HOME: home };
 const registryBefore = await registryBytes();
-const protectedVault = join(home, "user-owned-vault");
+const protectedVault = join(TEST_ROOT, "user-owned-vault");
 await mkdir(join(protectedVault, ".obsidian"), { recursive: true });
 await writeFile(join(protectedVault, "Important.md"), "protected test content\n", "utf8");
 
@@ -365,7 +368,9 @@ try {
   const registryAfter = await registryBytes();
   check(
     "the user's Obsidian vault registry is byte-for-byte unchanged",
-    registryBefore?.equals(registryAfter) ?? registryAfter === undefined,
+    registryBefore === undefined
+      ? registryAfter === undefined
+      : registryAfter !== undefined && registryBefore.equals(registryAfter),
   );
   check(
     "the user-owned vault is still present after all cleanup",
@@ -394,7 +399,7 @@ try {
     }
     await quarantineSession(key, { env: cleanupEnv }).catch(() => undefined);
   }
-  if (cleanupSafe) await rm(home, { recursive: true, force: true });
+  if (cleanupSafe) await rm(TEST_ROOT, { recursive: true, force: true });
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

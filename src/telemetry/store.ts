@@ -127,6 +127,8 @@ export class TelemetryStore {
   private persistenceBytes = 0;
   private recordsSinceSync = 0;
   private recordsSinceCompaction = 0;
+  private readonly pendingLines: string[] = [];
+  private pendingFlush?: NodeJS.Immediate;
 
   constructor(
     private readonly capacity: number = 2000,
@@ -285,6 +287,7 @@ export class TelemetryStore {
 
   /** Flush and release the durable file before a workspace archive moves it. */
   closePersistence(): void {
+    this.flushPending();
     if (this.persistenceFd === undefined) return;
     try {
       fsyncSync(this.persistenceFd);
@@ -370,13 +373,31 @@ export class TelemetryStore {
 
   private persistLine(value: TelemetryRecord | CursorCheckpoint): void {
     if (this.jsonlPath === undefined) return;
+    this.pendingLines.push(`${JSON.stringify(value)}\n`);
+    if (this.pendingFlush === undefined) {
+      this.pendingFlush = setImmediate(() => {
+        this.pendingFlush = undefined;
+        this.flushPending();
+      });
+      this.pendingFlush.unref();
+    }
+  }
+
+  /** Batch renderer bursts so a console event never performs disk I/O inline. */
+  private flushPending(): void {
+    if (this.pendingFlush !== undefined) {
+      clearImmediate(this.pendingFlush);
+      this.pendingFlush = undefined;
+    }
+    if (this.jsonlPath === undefined || this.pendingLines.length === 0) return;
     try {
-      const line = `${JSON.stringify(value)}\n`;
+      const lines = this.pendingLines.splice(0);
+      const content = lines.join("");
       const fd = this.openPersistence();
-      writeSync(fd, line, undefined, "utf8");
-      this.persistenceBytes += Buffer.byteLength(line);
-      this.recordsSinceSync++;
-      this.recordsSinceCompaction++;
+      writeSync(fd, content, undefined, "utf8");
+      this.persistenceBytes += Buffer.byteLength(content);
+      this.recordsSinceSync += lines.length;
+      this.recordsSinceCompaction += lines.length;
       if (this.recordsSinceSync >= FSYNC_EVERY_RECORDS) {
         fsyncSync(fd);
         this.recordsSinceSync = 0;

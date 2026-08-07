@@ -36,6 +36,26 @@ import type {
   ToolRequestContext,
 } from "../audit/types.js";
 
+const AUDIT_WRITE_TIMEOUT_MS = 250;
+
+async function writeAuditWithTimeout(write: Promise<void>): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      write,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("The audit write timed out.")),
+          AUDIT_WRITE_TIMEOUT_MS,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** What a tool handler may return; the registry normalizes it to MCP content. */
 export type ToolOutcome =
   | string
@@ -463,18 +483,20 @@ export class ToolRegistry {
           } finally {
             if (this.audit !== false) {
               try {
-                await this.audit.write(
-                  toolAuditEvent({
-                    timestamp,
-                    requestId: callRequestId,
-                    tool: def.name,
-                    durationMs: Date.now() - started,
-                    queueMs: admitted ? queueMs : Date.now() - started,
-                    outcome: auditOutcome,
-                    args: callArgs,
-                    ...(auditContext ? { context: auditContext } : {}),
-                    ...(auditError ? { error: auditError } : {}),
-                  }),
+                await writeAuditWithTimeout(
+                  this.audit.write(
+                    toolAuditEvent({
+                      timestamp,
+                      requestId: callRequestId,
+                      tool: def.name,
+                      durationMs: Date.now() - started,
+                      queueMs: admitted ? queueMs : Date.now() - started,
+                      outcome: auditOutcome,
+                      args: callArgs,
+                      ...(auditContext ? { context: auditContext } : {}),
+                      ...(auditError ? { error: auditError } : {}),
+                    }),
+                  ),
                 );
               } catch (auditFailure) {
                 this.logger.warn("audit write failed", {

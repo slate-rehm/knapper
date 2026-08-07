@@ -32,6 +32,7 @@ describe("TelemetryStore JSONL persistence", () => {
     store.add({ source: "console", level: "error", text: "second" });
     store.select(firstHandle);
     expect(store.query().records.map((record) => record.text)).toEqual(["first"]);
+    store.closePersistence();
 
     const restarted = new WorkspaceTelemetryStore(20, dir);
     restarted.select(firstHandle);
@@ -77,6 +78,7 @@ describe("TelemetryStore JSONL persistence", () => {
     const first = new TelemetryStore(10, { jsonlPath: path });
     first.add({ source: "console", level: "info", text: "one" });
     first.add({ source: "pageerror", level: "error", text: "two" });
+    first.closePersistence();
 
     const second = new TelemetryStore(10, { jsonlPath: path });
     const added = second.add({ source: "marker", level: "info", text: "three" });

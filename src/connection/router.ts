@@ -89,7 +89,10 @@ export class CapabilityRouter {
       ...(this.config.vault !== undefined ? { defaultVault: this.config.vault } : {}),
       configPath: this.config.obsidianConfigPath,
       ...(this.config.sessionId !== undefined
-        ? { sessionVaultPath: sessionPaths(this.config.sessionId).vaultDir }
+        ? {
+            sessionKey: this.config.sessionId,
+            sessionVaultPath: sessionPaths(this.config.sessionId).vaultDir,
+          }
         : {}),
       logger: this.logger.child("fence"),
     });
@@ -137,6 +140,7 @@ export class CapabilityRouter {
     this.supervisor.stop();
     await this.focus.dispose().catch(() => undefined);
     await this.playwright.close().catch(() => undefined);
+    if (this.disposed) throw new Error("Cannot rebind a disposed capability router.");
     this.debuggerHolder = undefined;
     this.availability = { playwright: false, cli: false, cliCdp: false, local: true };
     this.availabilityCheckedAt = 0;

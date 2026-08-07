@@ -62,7 +62,7 @@ export async function captureScreenshot(
   try {
     const page = await router.playwright.page(vault);
     const buffer = await page.screenshot({ type: "png" });
-    return saveArtifact(
+    return await saveArtifact(
       outputDir,
       undefined,
       `obsidian-dev-cycle-${Date.now()}.png`,

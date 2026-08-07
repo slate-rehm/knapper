@@ -58,7 +58,13 @@ function describeProxiedTool(tool: ProxiedTool): string {
 }
 
 function annotationsFor(name: string) {
-  return { readOnlyHint: name === "browser_snapshot" || name === "browser_wait_for" };
+  const readOnly = name === "browser_snapshot" || name === "browser_wait_for";
+  return {
+    readOnlyHint: readOnly,
+    destructiveHint: !readOnly && name !== "browser_take_screenshot",
+    idempotentHint: readOnly,
+    openWorldHint: false,
+  };
 }
 
 export async function registerBrowserTools(ctx: ServerContext): Promise<void> {

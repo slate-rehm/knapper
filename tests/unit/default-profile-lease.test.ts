@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DefaultProfileLease } from "../../src/session/default-profile-lease.js";
+import { defaultProfileLeasePath } from "../../src/config.js";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -100,5 +101,27 @@ describe("DefaultProfileLease", () => {
     release();
     await held;
     await local.release();
+  });
+
+  it("does not let a malformed expiry block the profile", async () => {
+    const path = defaultProfileLeasePath(env);
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        token: "untrusted",
+        pid: process.pid,
+        hostname: "remote-host",
+        cwd: root,
+        acquiredAt: new Date().toISOString(),
+        lastActivityAt: new Date().toISOString(),
+        expiresAt: "not-a-date",
+        activeCalls: 1,
+      }),
+    );
+    const lease = new DefaultProfileLease({ idleTimeoutMs: 30_000, env });
+
+    await expect(lease.run("obsidian_status", async () => "ok")).resolves.toBe("ok");
+    await lease.release();
   });
 });

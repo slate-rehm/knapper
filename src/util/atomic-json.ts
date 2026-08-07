@@ -33,11 +33,17 @@ export async function writeFileAtomic(
 
     // Persist the directory entry as well as the file contents. Some filesystems
     // can otherwise lose the rename after a power failure.
-    const directoryHandle = await open(directory, "r");
     try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
+      const directoryHandle = await open(directory, "r");
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
+    } catch {
+      // The rename already completed. Some filesystems do not support directory
+      // fsync, so a durability enhancement must not turn a successful write into
+      // a reported failure.
     }
   } finally {
     await handle?.close().catch(() => undefined);

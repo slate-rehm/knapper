@@ -16,10 +16,35 @@ describe("audit persistence", () => {
     expect(auditDay(new Date("2026-08-06T23:59:59.999Z"))).toBe("2026-08-06");
   });
 
-  it("hashes a request id that could contain private text", () => {
-    const id = requestId({ requestId: "raw message with spaces" });
+  it("hashes every caller-supplied request id", () => {
+    const id = requestId({ requestId: "safe-looking-user@example.com" });
     expect(id).toMatch(/^sha256:[a-f0-9]{24}$/);
-    expect(id).not.toContain("raw message");
+    expect(id).not.toContain("example.com");
+  });
+
+  it("hashes caller-controlled audit context identifiers", () => {
+    const event = toolAuditEvent({
+      timestamp: "2026-08-06T17:00:00.000Z",
+      requestId: requestId({ requestId: "request-token" }),
+      tool: "example",
+      durationMs: 1,
+      queueMs: 0,
+      outcome: "success",
+      args: {},
+      context: {
+        clientInfo: { name: "user@example.com", version: "secret-version" },
+        agentHandle: "agent-secret",
+        workspaceHandle: "workspace-secret",
+        traceId: "trace-secret",
+      },
+    });
+
+    expect(event.request_id).toMatch(/^sha256:/);
+    expect(event.trace_id).toMatch(/^sha256:/);
+    expect(event.client?.name).toMatch(/^sha256:/);
+    expect(event.agent_handle).toMatch(/^sha256:/);
+    expect(event.workspace_handle).toMatch(/^sha256:/);
+    expect(JSON.stringify(event)).not.toMatch(/example\.com|secret/);
   });
 
   it("redacts client-controlled argument keys", () => {

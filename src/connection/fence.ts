@@ -16,8 +16,11 @@
  * inside a vault can grant authorization. See `src/authorize.ts`.
  */
 
+import { lstat, realpath, stat } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import { obsidianConfigPath } from "../config.js";
+import { readDescriptor } from "../session/descriptor.js";
+import { sessionPaths } from "../config.js";
 import type { Logger } from "../util/logger.js";
 import { vaultNotAuthorized, vaultNotFound, vaultTargetAmbiguous } from "../util/errors.js";
 import {
@@ -54,6 +57,8 @@ export interface VaultFenceOptions {
   env?: NodeJS.ProcessEnv;
   /** Exact private-session scratch vault, authorized by its verified layout. */
   sessionVaultPath?: string;
+  /** Session descriptor that owns `sessionVaultPath`. */
+  sessionKey?: string;
 }
 
 /**
@@ -90,10 +95,40 @@ export class VaultFence {
   private async grantFor(vaultPath: string): Promise<MarkerGrant | undefined> {
     const key = resolvePath(vaultPath);
     if (
+      this.opts.sessionKey !== undefined &&
       this.opts.sessionVaultPath !== undefined &&
       key === resolvePath(this.opts.sessionVaultPath)
     ) {
-      return "created";
+      const env = this.opts.env ?? process.env;
+      const descriptor = await readDescriptor(this.opts.sessionKey, env);
+      const ownership = descriptor?.ownership;
+      const expected = sessionPaths(this.opts.sessionKey, env).vaultDir;
+      if (
+        descriptor?.vault?.grant === "created" &&
+        ownership !== undefined &&
+        key === resolvePath(expected) &&
+        resolvePath(descriptor.vault.path) === key
+      ) {
+        try {
+          const [link, canonical, identity] = await Promise.all([
+            lstat(key),
+            realpath(key),
+            stat(key),
+          ]);
+          if (
+            link.isDirectory() &&
+            !link.isSymbolicLink() &&
+            canonical === ownership.vaultPath &&
+            identity.dev === ownership.vaultDevice &&
+            identity.ino === ownership.vaultInode
+          ) {
+            return "created";
+          }
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
     }
     const cached = this.markerCache.get(key);
     if (cached && Date.now() - cached.at < MARKER_TTL_MS) return cached.grant;

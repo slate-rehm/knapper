@@ -637,6 +637,14 @@ export async function restartSession(
   opts: { timeoutMs?: number; logger?: Logger; env?: NodeJS.ProcessEnv } = {},
 ): Promise<RestartSessionResult> {
   const env = opts.env ?? process.env;
+  return withFileLock(registryLockPath(env), () => restartSessionUnlocked(key, opts));
+}
+
+async function restartSessionUnlocked(
+  key: string,
+  opts: { timeoutMs?: number; logger?: Logger; env?: NodeJS.ProcessEnv },
+): Promise<RestartSessionResult> {
+  const env = opts.env ?? process.env;
   const descriptor = await requireDescriptor(key, env);
   const scope = scopeOf(descriptor);
   const stop = await stopSessionUnlocked(key, opts);

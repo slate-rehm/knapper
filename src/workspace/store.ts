@@ -94,7 +94,8 @@ export async function requireWorkspace(
       fixedBy: "obsidian_workspace_create",
     });
   }
-  if (Date.parse(record.expiresAt) <= Date.now()) {
+  const expiresAt = Date.parse(record.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     throw new UobError("SESSION_NOT_FOUND", `Workspace ${handle} expired.`, {
       remediation: "Create or claim a new workspace handle.",
       fixedBy: "obsidian_workspace_create",

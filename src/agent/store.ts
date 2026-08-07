@@ -113,7 +113,8 @@ export async function requireAgent(
       fixedBy: "obsidian_agent_open",
     });
   }
-  if (Date.parse(record.expiresAt) <= Date.now()) {
+  const expiresAt = Date.parse(record.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     throw new UobError("INVALID_ARGUMENT", `Agent handle ${handle} expired.`, {
       remediation: "Create a new handle with obsidian_agent_open.",
       fixedBy: "obsidian_agent_open",

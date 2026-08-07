@@ -51,6 +51,24 @@ function processAlive(pid: number): boolean {
   }
 }
 
+function isLeaseRecord(value: unknown): value is DefaultProfileLeaseRecord {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Partial<DefaultProfileLeaseRecord>;
+  return (
+    typeof record.token === "string" &&
+    Number.isInteger(record.pid) &&
+    Number(record.pid) > 0 &&
+    (record.pidStartTime === undefined || Number.isFinite(record.pidStartTime)) &&
+    typeof record.hostname === "string" &&
+    typeof record.cwd === "string" &&
+    Number.isFinite(Date.parse(record.acquiredAt ?? "")) &&
+    Number.isFinite(Date.parse(record.lastActivityAt ?? "")) &&
+    Number.isFinite(Date.parse(record.expiresAt ?? "")) &&
+    Number.isInteger(record.activeCalls) &&
+    Number(record.activeCalls) >= 0
+  );
+}
+
 export class DefaultProfileLease {
   private readonly token = randomUUID();
   private readonly env: NodeJS.ProcessEnv;
@@ -69,9 +87,8 @@ export class DefaultProfileLease {
 
   private async read(): Promise<DefaultProfileLeaseRecord | undefined> {
     try {
-      return JSON.parse(
-        await readFile(defaultProfileLeasePath(this.env), "utf8"),
-      ) as DefaultProfileLeaseRecord;
+      const parsed: unknown = JSON.parse(await readFile(defaultProfileLeasePath(this.env), "utf8"));
+      return isLeaseRecord(parsed) ? parsed : undefined;
     } catch {
       return undefined;
     }
