@@ -32,8 +32,8 @@ function listOutcome(kind: "themes" | "snippets", stdout: string) {
     .map((line) => line.trim())
     .filter((line) => line !== "");
   return {
-    text: values.join("\n") || `(no ${kind})`,
-    json: { count: values.length, [kind]: values },
+    text: values.length > 0 ? values.join("\n") : JSON.stringify({ items: [], count: 0 }),
+    json: { items: values, count: values.length },
   };
 }
 
