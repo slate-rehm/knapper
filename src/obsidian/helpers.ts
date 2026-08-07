@@ -107,8 +107,14 @@ export async function readPluginData(
   router: CapabilityRouter,
   pluginId: string,
   vault?: string,
-): Promise<unknown> {
-  const code = `(() => { const p = app.plugins.getPlugin(${escEvalString(pluginId)}); return p ? p.data : null; })()`;
+): Promise<{ persisted: unknown; runtime: unknown }> {
+  const code = `(async () => {
+    const p = app.plugins.getPlugin(${escEvalString(pluginId)});
+    if (!p) throw new Error("Plugin not loaded");
+    const persisted = await p.loadData();
+    const runtime = "settings" in p ? p.settings : null;
+    return { persisted: persisted ?? null, runtime: runtime ?? null };
+  })()`;
   return evalJson(router, code, vault);
 }
 

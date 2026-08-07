@@ -11,8 +11,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pluginTrustStorageKey, seedSessionProfile } from "../../src/session/bootstrap.js";
-import { writeManagedMarker } from "../../src/connection/vaults.js";
+import {
+  SESSION_IDENTITY_PLUGIN_ID,
+  pluginTrustStorageKey,
+  seedSessionProfile,
+} from "../../src/session/bootstrap.js";
 import { sessionPaths } from "../../src/config.js";
 
 let home: string;
@@ -47,48 +50,47 @@ async function userVault(path: string): Promise<string> {
 }
 
 describe("seedSessionProfile", () => {
-  it("creates and marks the session's own scratch vault", async () => {
+  it("creates only the session's own scratch vault", async () => {
     const seeded = await seedSessionProfile({ key: KEY, now: NOW, env });
     expect(seeded.vault.grant).toBe("created");
     expect(seeded.vault.path).toBe(sessionPaths(KEY, env).vaultDir);
-    expect(await marked(seeded.vault.path)).toBe(true);
+    expect(await marked(seeded.vault.path)).toBe(false);
+    const identityDir = join(seeded.vault.path, ".obsidian", "plugins", SESSION_IDENTITY_PLUGIN_ID);
+    await expect(readFile(join(identityDir, "main.js"), "utf8")).resolves.toContain(
+      "KNAPPER TEST SESSION",
+    );
+    await expect(readFile(join(identityDir, "styles.css"), "utf8")).resolves.toContain(
+      "knapper-session-banner",
+    );
+    await expect(
+      readFile(join(seeded.vault.path, ".obsidian", "community-plugins.json"), "utf8"),
+    ).resolves.toContain(SESSION_IDENTITY_PLUGIN_ID);
   });
 
-  it("accepts an empty directory the caller named", async () => {
+  it("ignores legacy caller paths and leaves them unchanged", async () => {
     const dir = join(home, "empty");
     await mkdir(dir, { recursive: true });
-    const seeded = await seedSessionProfile({ key: KEY, vaultPath: dir, now: NOW, env });
-    expect(seeded.vault.grant).toBe("created");
-  });
-
-  it("refuses a directory that already holds notes", async () => {
-    // The bug this pins: seeding used to stamp a `created` marker on whatever it
-    // was handed, which handed the user's real vault to the reaper's delete path.
-    const dir = await userVault(join(home, "MyRealNotes"));
-    await expect(
-      seedSessionProfile({ key: KEY, vaultPath: dir, now: NOW, env }),
-    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
-    expect(await marked(dir)).toBe(false);
-    expect(await readFile(join(dir, "Important.md"), "utf8")).toContain("life's work");
-  });
-
-  it("refuses to adopt a vault carrying no marker", async () => {
-    const dir = await userVault(join(home, "NotAuthorized"));
-    await expect(
-      seedSessionProfile({ key: KEY, vaultPath: dir, adopt: true, now: NOW, env }),
-    ).rejects.toMatchObject({ code: "VAULT_NOT_AUTHORIZED" });
-  });
-
-  it("keeps an adopted grant adopted, so consent never becomes delete permission", async () => {
-    const dir = await userVault(join(home, "Authorized"));
-    await writeManagedMarker(dir, NOW, "adopted");
     const seeded = await seedSessionProfile({
       key: KEY,
-      vaultPath: dir,
-      adopt: true,
       now: NOW,
       env,
+      ...({ vaultPath: dir } as Record<string, unknown>),
     });
-    expect(seeded.vault.grant).toBe("adopted");
+    expect(seeded.vault.grant).toBe("created");
+    expect(seeded.vault.path).toBe(sessionPaths(KEY, env).vaultDir);
+    expect((await stat(dir)).isDirectory()).toBe(true);
+  });
+
+  it("never reads, marks, or adopts a caller-owned vault", async () => {
+    const dir = await userVault(join(home, "MyRealNotes"));
+    const seeded = await seedSessionProfile({
+      key: KEY,
+      now: NOW,
+      env,
+      ...({ vaultPath: dir, adopt: true } as Record<string, unknown>),
+    });
+    expect(seeded.vault.path).not.toBe(dir);
+    expect(await marked(dir)).toBe(false);
+    expect(await readFile(join(dir, "Important.md"), "utf8")).toContain("life's work");
   });
 });

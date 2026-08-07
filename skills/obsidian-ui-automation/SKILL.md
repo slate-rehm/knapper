@@ -5,7 +5,8 @@ description: Drive the live Obsidian desktop UI with knapper browser tools (Play
 
 # Obsidian UI automation (snapshot-first)
 
-UI tools require **CDP**: Obsidian must have been **cold-started** with `--remote-debugging-port` (see **obsidian-instance-setup**). CLI-only sessions cannot click or snapshot.
+UI tools require the optional `ui` toolset and a workspace handle. Pass
+`workspaceHandle` to every UI call. Isolated workspaces start with CDP enabled.
 
 ## Tool split
 
@@ -28,8 +29,8 @@ UI tools require **CDP**: Obsidian must have been **cold-started** with `--remot
 Example flow:
 
 ```text
-browser_snapshot()
-browser_click(target="e5", element="New note")
+browser_snapshot(workspaceHandle=<workspaceHandle>)
+browser_click(workspaceHandle=<workspaceHandle>, target="e5", element="New note")
 ```
 
 If you get `STALE_REF`, take a fresh snapshot and pick a new ref.
@@ -92,7 +93,9 @@ Two different captures — do not conflate them:
 
 Use `browser_take_screenshot` for UI proof during automation. Dev-cycle composites may also return images from `obsidian_dev_cycle`.
 
-Blocked browser tools (would harm a daily-driver window): navigate, close, resize, file upload, storage state, etc. — the server filters these.
+Knapper removes browser navigation, tab control, raw evaluation, console reads,
+locator generation, verification helpers, resize, close, file upload, and storage
+state. Each allowed call is fenced to the exact authorized Obsidian page.
 
 ## Editor testing
 
@@ -129,10 +132,10 @@ editor focused, which is what the `focus` argument is for.
 Testing a hotkey binding:
 
 ```text
-obsidian_hotkeys                                  # discover bindings
-obsidian_hotkeys commandId=editor:toggle-bold     # look one up
-obsidian_exercise_hotkey keys=Control+p           # press it, and report if it fired
-obsidian_exercise_hotkey keys=Control+b focus=.cm-content
+obsidian_hotkeys workspaceHandle=<workspaceHandle>
+obsidian_hotkeys workspaceHandle=<workspaceHandle> commandId=editor:toggle-bold
+obsidian_exercise_hotkey workspaceHandle=<workspaceHandle> keys=Control+p
+obsidian_exercise_hotkey workspaceHandle=<workspaceHandle> keys=Control+b focus=.cm-content
 ```
 
 `obsidian_exercise_hotkey` reports a **verdict**, not just success: it samples the

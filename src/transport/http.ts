@@ -17,27 +17,29 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import { randomUUID } from "node:crypto";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  createMcpHandler,
+  type McpServerFactory,
+  validateHostHeader,
+  validateOriginHeader,
+} from "@modelcontextprotocol/server";
 import type { Config } from "../config.js";
 import type { Logger } from "../util/logger.js";
 import { UobError } from "../util/errors.js";
+import { toNodeHandler } from "./node-web-adapter.js";
 
 /** Path the MCP endpoint is served on; clients are configured with `<origin>/mcp`. */
 export const MCP_ENDPOINT = "/mcp";
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"]);
-
-/** Wildcard binds accept connections on every interface, so no single Host value is knowable. */
-const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", ""]);
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1"]);
+const LOOPBACK_REQUEST_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 
 export function isLoopbackHost(host: string): boolean {
   return LOOPBACK_HOSTS.has(host.toLowerCase());
 }
 
 export interface HttpTransportOptions {
-  server: McpServer;
+  factory: McpServerFactory;
   config: Config;
   logger: Logger;
 }
@@ -54,23 +56,8 @@ function jsonRpcError(res: ServerResponse, status: number, code: number, message
   res.writeHead(status, { "Content-Type": "application/json" }).end(body);
 }
 
-/**
- * Host header values accepted when DNS-rebinding protection is on. The port is only
- * known after `listen` resolves (callers may pass 0 for an ephemeral port), so this
- * is built afterwards rather than at construction time.
- */
-function allowedHostsFor(host: string, port: number): string[] {
-  const hosts = new Set([`${host}:${port}`]);
-  if (isLoopbackHost(host)) {
-    hosts.add(`127.0.0.1:${port}`);
-    hosts.add(`localhost:${port}`);
-    hosts.add(`[::1]:${port}`);
-  }
-  return [...hosts];
-}
-
 export async function startHttpTransport({
-  server,
+  factory,
   config,
   logger: parentLogger,
 }: HttpTransportOptions): Promise<HttpTransportHandle> {
@@ -78,12 +65,10 @@ export async function startHttpTransport({
   const host = config.httpHost;
 
   if (!isLoopbackHost(host)) {
-    logger.warn(
-      `binding the MCP endpoint to ${host}, which is not a loopback address — anyone who can ` +
-        "reach this port gains full control of your live Obsidian UI, including file writes and " +
-        "plugin installs. Bind 127.0.0.1 (MCP_HOST) unless you have put authentication in front " +
-        "of this listener.",
-    );
+    throw new UobError("INVALID_ARGUMENT", `HTTP host ${host} is not allowed.`, {
+      remediation: "Bind Knapper to exactly 127.0.0.1 or ::1.",
+      details: { host, allowed: [...LOOPBACK_HOSTS] },
+    });
   }
 
   const httpServer = createHttpServer();
@@ -115,36 +100,15 @@ export async function startHttpTransport({
 
   const address = httpServer.address() as AddressInfo | null;
   const port = address?.port ?? config.httpPort;
-  const allowedHosts = allowedHostsFor(host, port);
 
-  /**
-   * One MCP session at a time. The SDK requires either a fresh transport per stateless
-   * request or one transport per session, and a transport can only be bound to one
-   * `Protocol` instance — but a `ServerContext` owns a single CDP attachment to a single
-   * Obsidian window, so spinning up a server per session would multiply that attachment.
-   * Concurrent agents would fight over the same UI anyway, so the session is armed lazily
-   * and re-armed after the client terminates it with DELETE.
-   */
-  let active: Promise<StreamableHTTPServerTransport> | undefined;
   let closing = false;
-
-  const arm = async (): Promise<StreamableHTTPServerTransport> => {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      // Plain JSON replies instead of a one-shot SSE stream per POST. Server-initiated
-      // messages still use the standalone GET stream; this only affects request/response.
-      enableJsonResponse: true,
-      // Wildcard binds have no single legitimate Host value, so an allowlist there would
-      // reject every real client rather than protect anything.
-      ...(WILDCARD_HOSTS.has(host) ? {} : { enableDnsRebindingProtection: true, allowedHosts }),
-      onsessionclosed: (sessionId: string) => {
-        logger.info("session terminated by client", { sessionId });
-        active = undefined;
-      },
-    });
-    await server.connect(transport);
-    return transport;
-  };
+  const handler = createMcpHandler(factory, {
+    legacy: "stateless",
+    onerror: (error) => logger.error("MCP request failed", { error: error.message }),
+  });
+  const nodeHandler = toNodeHandler(handler, {
+    onerror: (error) => logger.error("HTTP adapter failed", { error: error.message }),
+  });
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (closing) {
@@ -156,11 +120,17 @@ export async function startHttpTransport({
       jsonRpcError(res, 404, -32601, `Unknown endpoint. MCP is served at ${MCP_ENDPOINT}.`);
       return;
     }
-    // `active` is replaced, never awaited twice concurrently on a stale value: reads and
-    // the assignment below both happen synchronously on the event loop turn.
-    active ??= arm();
-    const transport = await active;
-    await transport.handleRequest(req, res);
+    const hostResult = validateHostHeader(req.headers.host, LOOPBACK_REQUEST_HOSTS);
+    if (!hostResult.ok) {
+      jsonRpcError(res, 403, -32000, hostResult.message);
+      return;
+    }
+    const originResult = validateOriginHeader(req.headers.origin, LOOPBACK_REQUEST_HOSTS);
+    if (!originResult.ok) {
+      jsonRpcError(res, 403, -32000, originResult.message);
+      return;
+    }
+    await nodeHandler(req, res);
   };
 
   httpServer.on("request", (req, res) => {
@@ -178,9 +148,7 @@ export async function startHttpTransport({
     port,
     close: async (): Promise<void> => {
       closing = true;
-      const transport = active;
-      active = undefined;
-      if (transport) await (await transport).close().catch(() => undefined);
+      await handler.close().catch(() => undefined);
       // Idle keep-alive sockets and any open SSE stream would otherwise hold `close`
       // open until the client happens to disconnect.
       httpServer.closeAllConnections();

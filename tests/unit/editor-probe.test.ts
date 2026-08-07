@@ -14,7 +14,7 @@ import {
   type EditorStateResult,
   type EditorWidgetsResult,
 } from "../../src/obsidian/editor-probe.js";
-import { elementMetricsSource } from "../../src/browser/element-screenshot.js";
+import { elementMetricsSource, visibleElementClip } from "../../src/browser/element-screenshot.js";
 
 /**
  * The probe sources run in the renderer, where mistakes surface as EVAL_FAILED
@@ -377,5 +377,24 @@ describe("elementMetricsSource", () => {
       window: {},
     });
     expect(metrics).toBeNull();
+  });
+});
+
+describe("visibleElementClip", () => {
+  const metrics = {
+    rect: { x: -10, y: 20, width: 100, height: 200 },
+    devicePixelRatio: 2,
+    viewport: { innerWidth: 80, innerHeight: 100 },
+    display: { display: "block", visibility: "visible" },
+  };
+
+  it("clips an element to the visible viewport without scrolling it", () => {
+    expect(visibleElementClip(metrics)).toEqual({ x: 0, y: 20, width: 80, height: 80 });
+  });
+
+  it("rejects a box that is completely outside the viewport", () => {
+    expect(
+      visibleElementClip({ ...metrics, rect: { x: 100, y: 20, width: 10, height: 10 } }),
+    ).toBeUndefined();
   });
 });

@@ -18,7 +18,7 @@ const logLevelSchema = z.enum(["debug", "info", "log", "warn", "error"]);
 const sourceSchema = z.enum(["console", "pageerror", "exception", "network", "marker"]);
 
 export function registerTelemetryTools(ctx: ServerContext): void {
-  const { registry, router, config, telemetry, capture } = ctx;
+  const { registry, router, telemetry, capture } = ctx;
 
   registry.add({
     name: "obsidian_logs",
@@ -133,12 +133,13 @@ export function registerTelemetryTools(ctx: ServerContext): void {
     name: "obsidian_logs_clear",
     toolset: "telemetry",
     description:
-      "Clear the in-memory telemetry ring buffer and reset the cursor to zero for a clean-slate " +
-      "run. Does not clear Obsidian's own devtools console. Use before a focused test pass.",
+      "Clear retained telemetry records while preserving the monotonic cursor. Also clears the " +
+      "optional durable record file. Does not clear Obsidian's own devtools console.",
     annotations: { destructiveHint: true },
     inputSchema: {},
     handler: async () => {
       const before = telemetry.cursor;
+      const clearedRecords = telemetry.size;
       telemetry.clear();
       const text = appendTelemetrySummary(
         `Cleared telemetry buffer (was at cursor ${before}).`,
@@ -146,7 +147,13 @@ export function registerTelemetryTools(ctx: ServerContext): void {
       );
       return {
         text,
-        json: { cleared: true, previousCursor: before, cursor: telemetry.cursor },
+        json: {
+          cleared: true,
+          clearedRecords,
+          records: [],
+          previousCursor: before,
+          cursor: telemetry.cursor,
+        },
       };
     },
   });
@@ -156,25 +163,20 @@ export function registerTelemetryTools(ctx: ServerContext): void {
     toolset: "telemetry",
     description:
       "Report whether live telemetry capture is armed, how many records are buffered, how many were " +
-      "dropped by the ring buffer, whether network capture is on, and which Obsidian windows are " +
-      "subscribed. Use when obsidian_logs returns nothing unexpectedly.",
+      "dropped by the ring buffer, whether network capture is on, and how many authorized pages are " +
+      "subscribed. The response omits window titles and vault names.",
     annotations: { readOnlyHint: true },
     inputSchema: {},
     handler: async () => {
       const availability = await router.refreshAvailability();
-      let pages: { title: string; vaultName?: string; kind: string }[] = [];
+      let pagesSubscribed = 0;
       let armed = capture.isArmed;
 
       if (availability.playwright) {
         try {
-          const windows = await router.playwright.windows();
-          pages = windows.map((w) => ({
-            title: w.title,
-            kind: w.kind,
-            ...(w.vaultName !== undefined ? { vaultName: w.vaultName } : {}),
-          }));
-          const armResult = await capture.tryArm();
-          armed = armResult;
+          const armResult = await capture.arm();
+          armed = armResult.armed;
+          pagesSubscribed = armResult.pages;
         } catch (e) {
           if (e instanceof UobError && e.code === "CDP_PORT_CLOSED") {
             armed = false;
@@ -184,6 +186,10 @@ export function registerTelemetryTools(ctx: ServerContext): void {
         }
       }
 
+      const counts = telemetry.recordCounts();
+      const persistence = telemetry.persistenceSummary();
+      const subscriptions = Array.from({ length: pagesSubscribed }, () => ({ authorized: true }));
+
       const lines = [
         `CDP available: ${availability.playwright ? "yes" : "no"}`,
         `Capture armed: ${armed ? "yes" : "no"}`,
@@ -191,7 +197,8 @@ export function registerTelemetryTools(ctx: ServerContext): void {
         `Dropped (evicted): ${telemetry.dropped}`,
         `Current cursor: ${telemetry.cursor}`,
         `Network capture: ${capture.isNetworkEnabled ? "on" : "off"}`,
-        `Windows seen: ${pages.length}`,
+        `Authorized pages subscribed: ${pagesSubscribed}`,
+        `Durable persistence: ${persistence.enabled ? "on" : "off"}`,
       ];
 
       if (!availability.playwright) {
@@ -202,13 +209,15 @@ export function registerTelemetryTools(ctx: ServerContext): void {
         text: lines.join("\n"),
         json: {
           cdpAvailable: availability.playwright,
-          cdpUrl: config.cdpUrl,
           armed,
           networkCapture: capture.isNetworkEnabled,
+          pagesSubscribed,
+          subscriptions,
           buffered: telemetry.size,
           dropped: telemetry.dropped,
           cursor: telemetry.cursor,
-          windows: pages,
+          counts,
+          persistence,
         },
       };
     },

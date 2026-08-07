@@ -11,7 +11,7 @@
  * other agent's work.
  */
 
-import { access, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import {
   cliIsolationFor,
@@ -19,6 +19,7 @@ import {
   defaultObsidianUserDataDir,
   registryLockPath,
   sessionPaths,
+  trashDir,
   type CliIsolation,
 } from "../config.js";
 import { launchObsidian, quitObsidian, readDevToolsPortFile } from "../connection/launch.js";
@@ -29,11 +30,15 @@ import {
   readPidStartTime,
   type ProcessScope,
 } from "../connection/health.js";
-import { readGlobalConfig, removeManagedVault } from "../connection/vaults.js";
 import { UobError } from "../util/errors.js";
 import { withFileLock } from "../util/filelock.js";
 import type { Logger } from "../util/logger.js";
-import { seedSessionProfile, trustDisposableVault } from "./bootstrap.js";
+import {
+  SESSION_IDENTITY_PLUGIN_ID,
+  seedSessionProfile,
+  trustDisposableVault,
+  verifyDisposableVaultReadiness,
+} from "./bootstrap.js";
 import { linkPlugin, unlinkPluginIfPresent } from "./plugin-link.js";
 import { mintSessionKey } from "./key.js";
 import {
@@ -47,8 +52,7 @@ import {
 
 export interface CreateSessionOptions {
   label?: string;
-  vaultPath?: string;
-  adoptVault?: string;
+  agentHandle?: string;
   pluginSourceDir?: string;
   pluginId?: string;
   cdpPort?: number;
@@ -62,6 +66,121 @@ export interface CreateSessionOptions {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isIncompleteLaunch(error: unknown): error is UobError {
+  return (
+    error instanceof UobError &&
+    (error.code === "TIMEOUT" || error.code === "OBSIDIAN_LAUNCH_FAILED")
+  );
+}
+
+interface ReadinessContext {
+  key: string;
+  vaultId?: string;
+  plugin?: NonNullable<SessionDescriptor["plugin"]>;
+  identityFailure: string;
+  identityRemediation: string;
+  pluginFailure: (pluginId: string) => string;
+  pluginRemediation: string;
+  fixedBy: "obsidian_workspace_create" | "obsidian_workspace_restart";
+  degradedWarning: string;
+  onPluginUpdate?: (plugin: NonNullable<SessionDescriptor["plugin"]>) => void;
+}
+
+async function verifySessionReadiness(
+  cdpUrl: string,
+  context: ReadinessContext,
+  logger?: Logger,
+): Promise<Pick<SessionDescriptor, "plugin" | "visualIdentity">> {
+  const warnings: string[] = [];
+  try {
+    if (context.vaultId !== undefined) {
+      await trustDisposableVault(cdpUrl, context.vaultId);
+    }
+  } catch (error) {
+    warnings.push(
+      `Could not grant plugin trust: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  let probe;
+  try {
+    probe = await verifyDisposableVaultReadiness(cdpUrl, context.key, context.plugin?.id);
+    if (!probe.identityLoaded) warnings.push("Identity plugin is not loaded.");
+    if (!probe.identityVisible) warnings.push("Session banner is not visible.");
+    if (!probe.titleIdentified) warnings.push("Window title is not identified.");
+    if (!probe.desktopIdentified)
+      warnings.push("Desktop icon or application identity is degraded.");
+  } catch (error) {
+    warnings.push(
+      `Could not verify visual identity: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  if (
+    probe === undefined ||
+    !probe.identityLoaded ||
+    !probe.identityVisible ||
+    !probe.titleIdentified ||
+    !probe.desktopIdentified
+  ) {
+    throw new UobError("APP_UNAVAILABLE", context.identityFailure, {
+      remediation: context.identityRemediation,
+      fixedBy: context.fixedBy,
+      details: { session: context.key, readiness: probe ?? null, warnings },
+    });
+  }
+
+  let plugin = context.plugin;
+  if (plugin !== undefined) {
+    const requested = probe?.requestedPlugin;
+    plugin = { ...plugin, preEnabled: requested?.enabled === true };
+    context.onPluginUpdate?.(plugin);
+    if (requested?.exists !== true || requested.enabled !== true || requested.loaded !== true) {
+      throw new UobError("APP_UNAVAILABLE", context.pluginFailure(plugin.id), {
+        remediation: context.pluginRemediation,
+        fixedBy: context.fixedBy,
+        details: { session: context.key, pluginId: plugin.id, readiness: requested ?? null },
+      });
+    }
+  }
+
+  const visualIdentity: SessionDescriptor["visualIdentity"] = {
+    state: warnings.length === 0 ? "ready" : "degraded",
+    warnings,
+  };
+  if (warnings.length > 0) {
+    logger?.warn(context.degradedWarning, {
+      session: context.key,
+      warnings,
+    });
+  }
+  return { ...(plugin !== undefined ? { plugin } : {}), visualIdentity };
+}
+
+async function verifyRestartReadiness(
+  descriptor: SessionDescriptor,
+  cdpUrl: string,
+  logger?: Logger,
+): Promise<Pick<SessionDescriptor, "plugin" | "visualIdentity">> {
+  return verifySessionReadiness(
+    cdpUrl,
+    {
+      key: descriptor.key,
+      ...(descriptor.vault !== undefined ? { vaultId: descriptor.vault.id } : {}),
+      ...(descriptor.plugin !== undefined ? { plugin: descriptor.plugin } : {}),
+      identityFailure: `Session ${descriptor.key} could not prove its private-profile visual identity after restart.`,
+      identityRemediation:
+        "Review the launch logs and desktop integration, then restart the workspace.",
+      pluginFailure: (pluginId) =>
+        `Plugin "${pluginId}" did not become installed, enabled, and loaded after restart.`,
+      pluginRemediation: "Review the plugin manifest and launch logs, then restart the workspace.",
+      fixedBy: "obsidian_workspace_restart",
+      degradedWarning: "private session visual identity is degraded after restart",
+    },
+    logger,
+  );
+}
 
 /** Process scope for a session, so callers cannot accidentally build a wider one. */
 export function scopeOf(descriptor: SessionDescriptor): ProcessScope {
@@ -102,8 +221,6 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
   try {
     seeded = await seedSessionProfile({
       key,
-      ...(opts.vaultPath !== undefined ? { vaultPath: opts.vaultPath } : {}),
-      ...(opts.adoptVault !== undefined ? { vaultPath: opts.adoptVault, adopt: true } : {}),
       now,
       env,
     });
@@ -121,16 +238,19 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
         sourceDir: linked.sourceDir,
         linkPath: linked.linkPath,
         artifacts: linked.artifacts,
-        preEnabled: opts.adoptVault === undefined,
+        preEnabled: true,
       };
-      if (opts.adoptVault === undefined) {
-        await writeFile(
-          `${seeded.vault.path}/.obsidian/community-plugins.json`,
-          `${JSON.stringify([linked.pluginId], null, 2)}\n`,
-          "utf8",
-        );
-      }
+      await writeFile(
+        `${seeded.vault.path}/.obsidian/community-plugins.json`,
+        `${JSON.stringify([SESSION_IDENTITY_PLUGIN_ID, linked.pluginId], null, 2)}\n`,
+        "utf8",
+      );
     }
+
+    const [rootIdentity, vaultIdentity] = await Promise.all([
+      stat(paths.root),
+      stat(seeded.vault.path),
+    ]);
 
     const spawnedAt = new Date();
     provisional = {
@@ -148,6 +268,15 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
         ...(opts.branch !== undefined ? { branch: opts.branch } : {}),
         label,
       },
+      ...(opts.agentHandle !== undefined ? { agentHandle: opts.agentHandle } : {}),
+      ownership: {
+        rootPath: await realpath(paths.root),
+        vaultPath: await realpath(seeded.vault.path),
+        rootDevice: rootIdentity.dev,
+        rootInode: rootIdentity.ino,
+        vaultDevice: vaultIdentity.dev,
+        vaultInode: vaultIdentity.ino,
+      },
       instance: {
         userDataDir: paths.userDataDir,
         runtimeDir: paths.runtimeDir,
@@ -156,7 +285,6 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
       },
       vault: seeded.vault,
       ...(plugin !== undefined ? { plugin } : {}),
-      owner: { pid: process.pid, startedAt: now.toISOString() },
     };
     await writeDescriptor(provisional, env);
 
@@ -171,21 +299,32 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
     });
-    if (plugin?.preEnabled === true) {
-      try {
-        await trustDisposableVault(launched.cdpUrl, seeded.vault.id);
-      } catch (error) {
-        plugin = { ...plugin, preEnabled: false };
-        provisional = { ...provisional, plugin };
-        opts.logger?.warn("could not grant plugin trust in disposable session", {
-          session: key,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+    const verified = await verifySessionReadiness(
+      launched.cdpUrl,
+      {
+        key,
+        vaultId: seeded.vault.id,
+        ...(plugin !== undefined ? { plugin } : {}),
+        identityFailure: `Session ${key} could not prove its private-profile visual identity.`,
+        identityRemediation:
+          "Review the launch logs and desktop integration, then create a new workspace.",
+        pluginFailure: (pluginId) =>
+          `Plugin "${pluginId}" did not become installed, enabled, and loaded.`,
+        pluginRemediation:
+          "Review the plugin manifest and launch logs, then create a new workspace after fixing the plugin.",
+        fixedBy: "obsidian_workspace_create",
+        degradedWarning: "private session visual identity is degraded",
+        onPluginUpdate: (updated) => {
+          plugin = updated;
+          if (provisional !== undefined) provisional = { ...provisional, plugin: updated };
+        },
+      },
+      opts.logger,
+    );
 
     const descriptor: SessionDescriptor = {
       ...provisional,
+      ...verified,
       readiness: { phase: "ready", readyAt: new Date().toISOString() },
       instance: {
         ...provisional.instance,
@@ -199,10 +338,10 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
     await writeDescriptor(descriptor, env);
     return descriptor;
   } catch (e) {
-    if (provisional !== undefined && e instanceof UobError && e.code === "TIMEOUT") {
+    if (provisional !== undefined && isIncompleteLaunch(e)) {
       const pids = await findObsidianPids(scopeOf(provisional));
       const pid = pids[0];
-      if (pid !== undefined) {
+      if (e.code === "TIMEOUT" && pid !== undefined) {
         const pidStartTime = await readPidStartTime(pid);
         const starting: SessionDescriptor = {
           ...provisional,
@@ -218,13 +357,22 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
       }
       const failed: SessionDescriptor = {
         ...provisional,
-        readiness: { phase: "failed", failedAt: new Date().toISOString(), reason: e.message },
+        readiness: {
+          phase: "failed",
+          failedAt: new Date().toISOString(),
+          reason: e.message,
+        },
       };
       await writeDescriptor(failed, env);
       throw new UobError("SESSION_NOT_RUNNING", `Session ${key} failed to start.`, {
-        remediation: "Inspect it with obsidian_list_sessions, then restart or close the session.",
-        fixedBy: "obsidian_list_sessions",
-        details: { session: key, diagnostics: await sessionDiagnostics(failed) },
+        remediation:
+          "Review the launch details, then retry obsidian_workspace_create. Knapper retains the failed scratch descriptor for diagnosis.",
+        fixedBy: "obsidian_workspace_create",
+        details: {
+          session: key,
+          launchError: e.toJSON(),
+          diagnostics: await sessionDiagnostics(failed),
+        },
         cause: e,
       });
     }
@@ -237,6 +385,14 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
     if (provisional === undefined) {
       await rm(paths.root, { recursive: true, force: true }).catch(() => undefined);
     } else {
+      const stopped = await quitObsidian(scopeOf(provisional), opts.timeoutMs ?? 15_000).catch(
+        () => false,
+      );
+      if (!stopped) {
+        opts.logger?.warn("failed session creation left an instance that could not be stopped", {
+          session: provisional.key,
+        });
+      }
       await writeDescriptor(
         {
           ...provisional,
@@ -264,6 +420,13 @@ export async function waitSession(
     throw new UobError("SESSION_NOT_RUNNING", `Session ${key} failed to start.`, {
       remediation: "Restart the session or close it and create a new one.",
       details: { session: key, reason: descriptor.readiness.reason },
+    });
+  }
+  if (descriptor.readiness.phase === "stopped") {
+    throw new UobError("SESSION_NOT_RUNNING", `Session ${key} is stopped.`, {
+      remediation: "Restart the session before you use it.",
+      fixedBy: "obsidian_workspace_restart",
+      details: { session: key },
     });
   }
 
@@ -321,8 +484,9 @@ export async function waitSession(
   }
 
   throw new UobError("TIMEOUT", `Session ${key} is still starting.`, {
-    remediation: "Call obsidian_wait_session again, or restart the session if startup is stuck.",
-    fixedBy: "obsidian_wait_session",
+    remediation:
+      "Retry obsidian_workspace_create after checking the launch diagnostics. Knapper cleans up the failed workspace before it returns the error.",
+    fixedBy: "obsidian_workspace_create",
     details: await sessionDiagnostics(descriptor),
   });
 }
@@ -355,6 +519,10 @@ export async function sessionDiagnostics(
     userDataDir: descriptor.instance.userDataDir,
     runtimeDir: descriptor.instance.runtimeDir,
     vaultPath: descriptor.vault?.path,
+    visualIdentity: descriptor.visualIdentity ?? {
+      state: "degraded",
+      warnings: ["Not recorded."],
+    },
     elapsedMs:
       descriptor.readiness.phase === "starting"
         ? Date.now() - Date.parse(descriptor.readiness.spawnedAt)
@@ -365,6 +533,74 @@ export async function sessionDiagnostics(
 export interface RestartSessionResult {
   descriptor: SessionDescriptor;
   quit: boolean;
+}
+
+export type StopSessionState = "notRunning" | "quitSucceeded" | "quitFailed";
+
+export interface StopSessionResult {
+  key: string;
+  state: StopSessionState;
+  quit: boolean;
+}
+
+export interface StopSessionOptions {
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+}
+
+export async function stopSession(
+  key: string,
+  opts: StopSessionOptions = {},
+): Promise<StopSessionResult> {
+  return withFileLock(registryLockPath(opts.env ?? process.env), () =>
+    stopSessionUnlocked(key, opts),
+  );
+}
+
+/** Stop without taking the registry lock, for callers that already hold it. */
+export async function stopSessionUnlocked(
+  key: string,
+  opts: StopSessionOptions = {},
+): Promise<StopSessionResult> {
+  const env = opts.env ?? process.env;
+  const descriptor = await requireDescriptor(key, env);
+  const running = (await findObsidianPids(scopeOf(descriptor))).length > 0;
+  if (!running) {
+    await markSessionStopped(descriptor, env);
+    return { key, state: "notRunning", quit: false };
+  }
+
+  const quit = await quitObsidian(scopeOf(descriptor), opts.timeoutMs ?? 15_000);
+  if (!quit) return { key, state: "quitFailed", quit: false };
+
+  await markSessionStopped(descriptor, env);
+  return { key, state: "quitSucceeded", quit: true };
+}
+
+async function markSessionStopped(
+  descriptor: SessionDescriptor,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  const stoppedAt = new Date().toISOString();
+  await writeDescriptor(
+    {
+      ...descriptor,
+      heartbeatAt: stoppedAt,
+      readiness: { phase: "stopped", stoppedAt },
+      instance: {
+        ...descriptor.instance,
+        cdpPort: undefined,
+        cdpUrl: undefined,
+        browserId: undefined,
+        pid: undefined,
+        pidStartTime: undefined,
+      },
+      ...(descriptor.owner === undefined
+        ? {}
+        : { owner: { ...descriptor.owner, exitedAt: stoppedAt } }),
+    },
+    env,
+  );
 }
 
 /**
@@ -379,15 +615,32 @@ export async function restartSession(
   opts: { timeoutMs?: number; logger?: Logger; env?: NodeJS.ProcessEnv } = {},
 ): Promise<RestartSessionResult> {
   const env = opts.env ?? process.env;
+  return withFileLock(registryLockPath(env), () => restartSessionUnlocked(key, opts));
+}
+
+async function restartSessionUnlocked(
+  key: string,
+  opts: { timeoutMs?: number; logger?: Logger; env?: NodeJS.ProcessEnv },
+): Promise<RestartSessionResult> {
+  const env = opts.env ?? process.env;
   const descriptor = await requireDescriptor(key, env);
   const scope = scopeOf(descriptor);
-
-  const quit = await quitObsidian(scope, opts.timeoutMs ?? 15_000);
+  const stop = await stopSessionUnlocked(key, opts);
+  if (stop.state === "quitFailed") {
+    throw new UobError("TIMEOUT", `Session ${key} did not stop.`, {
+      remediation: "Retry the restart after the scoped Obsidian instance stops.",
+      details: { session: key, userDataDir: descriptor.instance.userDataDir },
+    });
+  }
 
   const starting: SessionDescriptor = {
     ...descriptor,
     heartbeatAt: new Date().toISOString(),
-    readiness: { phase: "starting", spawnedAt: new Date().toISOString(), requestedPort: 0 },
+    readiness: {
+      phase: "starting",
+      spawnedAt: new Date().toISOString(),
+      requestedPort: 0,
+    },
     instance: {
       ...descriptor.instance,
       cdpPort: undefined,
@@ -412,16 +665,20 @@ export async function restartSession(
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
     });
   } catch (error) {
-    if (error instanceof UobError && error.code === "TIMEOUT") {
+    if (isIncompleteLaunch(error)) {
       const pids = await findObsidianPids(scope);
       const pid = pids[0];
-      if (pid !== undefined) {
+      if (error.code === "TIMEOUT" && pid !== undefined) {
         const pending = {
           ...starting,
-          instance: { ...starting.instance, pid, pidStartTime: await readPidStartTime(pid) },
+          instance: {
+            ...starting.instance,
+            pid,
+            pidStartTime: await readPidStartTime(pid),
+          },
         };
         await writeDescriptor(pending, env);
-        return { descriptor: pending, quit };
+        return { descriptor: pending, quit: stop.quit };
       }
       await writeDescriptor(
         {
@@ -434,41 +691,62 @@ export async function restartSession(
         },
         env,
       );
+      const failed = await requireDescriptor(key, env);
+      throw new UobError("SESSION_NOT_RUNNING", `Session ${key} failed to restart.`, {
+        remediation: "Review the launch details, then restart or close the session.",
+        fixedBy: "obsidian_workspace_restart",
+        details: {
+          session: key,
+          launchError: error.toJSON(),
+          diagnostics: await sessionDiagnostics(failed),
+        },
+        cause: error,
+      });
     }
     throw error;
   }
 
-  const next: SessionDescriptor = {
-    ...descriptor,
-    heartbeatAt: new Date().toISOString(),
-    readiness: { phase: "ready", readyAt: new Date().toISOString() },
-    instance: {
-      ...descriptor.instance,
-      cdpPort: launched.port,
-      cdpUrl: launched.cdpUrl,
-      ...(launched.browserId !== undefined ? { browserId: launched.browserId } : {}),
-      ...(launched.pid !== undefined ? { pid: launched.pid } : {}),
-      ...(launched.pidStartTime !== undefined ? { pidStartTime: launched.pidStartTime } : {}),
-    },
-  };
-  await writeDescriptor(next, env);
-  return { descriptor: next, quit };
+  try {
+    const verified = await verifyRestartReadiness(descriptor, launched.cdpUrl, opts.logger);
+    const next: SessionDescriptor = {
+      ...descriptor,
+      ...verified,
+      heartbeatAt: new Date().toISOString(),
+      readiness: { phase: "ready", readyAt: new Date().toISOString() },
+      instance: {
+        ...starting.instance,
+        cdpPort: launched.port,
+        cdpUrl: launched.cdpUrl,
+        ...(launched.browserId !== undefined ? { browserId: launched.browserId } : {}),
+        ...(launched.pid !== undefined ? { pid: launched.pid } : {}),
+        ...(launched.pidStartTime !== undefined ? { pidStartTime: launched.pidStartTime } : {}),
+      },
+    };
+    await writeDescriptor(next, env);
+    return { descriptor: next, quit: stop.quit };
+  } catch (error) {
+    const failed: SessionDescriptor = {
+      ...descriptor,
+      heartbeatAt: new Date().toISOString(),
+      readiness: {
+        phase: "failed",
+        failedAt: new Date().toISOString(),
+        reason: error instanceof Error ? error.message : String(error),
+      },
+      instance: {
+        ...starting.instance,
+        cdpPort: launched.port,
+        cdpUrl: launched.cdpUrl,
+        ...(launched.pid !== undefined ? { pid: launched.pid } : {}),
+        ...(launched.pidStartTime !== undefined ? { pidStartTime: launched.pidStartTime } : {}),
+      },
+    };
+    await writeDescriptor(failed, env);
+    throw error;
+  }
 }
 
-export interface CloseSessionOptions {
-  deleteVault?: boolean;
-  /**
-   * Refuse to delete a vault that lives outside the session's own directory.
-   *
-   * Set by the reaper, which deletes with no agent in the loop. A vault inside the
-   * session root was unambiguously made by `seedSessionProfile` for this session
-   * and is disposable; one the caller pointed elsewhere is a directory a human
-   * chose, and reclaiming a stale profile is never a reason to delete it. An agent
-   * calling `obsidian_close_session` explicitly still gets the full behaviour.
-   */
-  onlyVaultInsideRoot?: boolean;
-  keepInstance?: boolean;
-  timeoutMs?: number;
+export interface DisposeSessionOptions {
   env?: NodeJS.ProcessEnv;
 }
 
@@ -479,125 +757,189 @@ export interface CloseSessionResult {
   vaultRemoved: boolean;
   vaultDeleted: boolean;
   rootDeleted: boolean;
+  quarantinedPath?: string;
   notes: string[];
 }
 
-export async function closeSession(
+export async function releaseSession(
   key: string,
-  opts: CloseSessionOptions = {},
+  opts: DisposeSessionOptions = {},
 ): Promise<CloseSessionResult> {
   return withFileLock(registryLockPath(opts.env ?? process.env), () =>
-    closeSessionUnlocked(key, opts),
+    releaseSessionUnlocked(key, opts),
   );
 }
 
-/** Close without taking the registry lock, for callers that already hold it. */
-export async function closeSessionUnlocked(
+/** Release without taking the registry lock, for callers that already hold it. */
+export async function releaseSessionUnlocked(
   key: string,
-  opts: CloseSessionOptions = {},
+  opts: DisposeSessionOptions = {},
 ): Promise<CloseSessionResult> {
   const env = opts.env ?? process.env;
   const descriptor = await requireDescriptor(key, env);
   const notes: string[] = [];
+  await refuseLiveCleanup(descriptor);
 
   const unlinkedPlugin =
     descriptor.plugin !== undefined && descriptor.vault !== undefined
       ? await unlinkPluginIfPresent(descriptor.vault.path, descriptor.plugin.id)
       : false;
 
-  const quit =
-    opts.keepInstance === true
-      ? false
-      : await quitObsidian(scopeOf(descriptor), opts.timeoutMs ?? 15_000);
-
-  const paths = sessionPaths(descriptor.key, env);
-  const vaultInsideRoot =
-    descriptor.vault !== undefined &&
-    resolve(descriptor.vault.path).startsWith(`${resolve(paths.root)}/`);
-
-  let vaultRemoved = false;
-  let vaultDeleted = false;
-  if (descriptor.vault !== undefined && opts.deleteVault === true) {
-    if (opts.onlyVaultInsideRoot === true && !vaultInsideRoot) {
-      notes.push(
-        `Vault kept at ${descriptor.vault.path}: it lives outside the session directory, and ` +
-          "automatic cleanup only deletes a session's own scratch vault.",
-      );
-    } else {
-      // Route through the real removal path rather than an rm: it independently
-      // re-reads the marker and refuses an `adopted` grant, a forbidden root, or a
-      // directory containing another registered vault. The descriptor saying "this
-      // is mine" is not, on its own, permission to delete.
-      try {
-        const configPath = `${descriptor.instance.userDataDir}/obsidian.json`;
-        const registry = await readGlobalConfig(configPath);
-        const result = await removeManagedVault(
-          descriptor.vault.path,
-          registry?.vaults ?? [],
-          true,
-          configPath,
-        );
-        vaultRemoved = result.unregistered;
-        vaultDeleted = result.deletedDirectory;
-      } catch (e) {
-        notes.push(`Vault left on disk: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
-  }
-
-  const rootDeleted = await removeSessionRoot(descriptor, env, vaultDeleted, notes);
+  await removeSessionRuntime(descriptor, env, notes);
   await removeDescriptor(key, env);
 
-  return { key, quit, unlinkedPlugin, vaultRemoved, vaultDeleted, rootDeleted, notes };
+  return {
+    key,
+    quit: false,
+    unlinkedPlugin,
+    vaultRemoved: false,
+    vaultDeleted: false,
+    rootDeleted: false,
+    notes,
+  };
 }
 
-/**
- * Delete a session's own directory tree, without taking the vault with it.
- *
- * The subtlety worth its own function: a session's default vault lives *inside*
- * the session root, so an `rm -rf` of the root deletes the vault too — silently
- * overriding both `deleteVault: false` and `removeManagedVault`'s refusal of an
- * adopted grant, which is precisely the safety rule that must not be reachable
- * around. The disposable parts are therefore removed by name, and the root itself
- * only once nothing worth keeping remains inside it.
- *
- * Also refuses when the profile is somehow the user's real one. That should be
- * impossible, since `createSession` only ever writes paths under the session root,
- * but this is the one path that deletes with no agent in the loop and a descriptor
- * from an older or buggier build is exactly what would arrive here.
- */
-async function removeSessionRoot(
+export async function quarantineSession(
+  key: string,
+  opts: DisposeSessionOptions = {},
+): Promise<CloseSessionResult> {
+  return withFileLock(registryLockPath(opts.env ?? process.env), () =>
+    quarantineSessionUnlocked(key, opts),
+  );
+}
+
+/** Quarantine without taking the registry lock, for callers that already hold it. */
+export async function quarantineSessionUnlocked(
+  key: string,
+  opts: DisposeSessionOptions = {},
+): Promise<CloseSessionResult> {
+  const env = opts.env ?? process.env;
+  const descriptor = await requireDescriptor(key, env);
+  await refuseLiveCleanup(descriptor);
+  const quarantinedPath = await quarantineOwnedSession(descriptor, env);
+  return {
+    key,
+    quit: false,
+    unlinkedPlugin: false,
+    vaultRemoved: false,
+    vaultDeleted: false,
+    rootDeleted: true,
+    quarantinedPath,
+    notes: [
+      `Moved the complete scratch workspace to ${quarantinedPath}. Move it back before another workspace reuses the key to restore it.`,
+    ],
+  };
+}
+
+async function refuseLiveCleanup(descriptor: SessionDescriptor): Promise<void> {
+  if ((await findObsidianPids(scopeOf(descriptor))).length === 0) return;
+  throw new UobError("INVALID_ARGUMENT", `Session ${descriptor.key} is still running.`, {
+    remediation: "Stop the workspace, then retry this operation.",
+    fixedBy: "obsidian_workspace_stop",
+    details: {
+      session: descriptor.key,
+      userDataDir: descriptor.instance.userDataDir,
+    },
+  });
+}
+
+/** Compatibility wrapper for internal callers that still perform both phases. */
+export async function closeSession(
+  key: string,
+  opts: {
+    deleteVault?: boolean;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+  } = {},
+): Promise<CloseSessionResult> {
+  const stop = await stopSession(key, opts);
+  if (stop.state === "quitFailed") {
+    throw new UobError("TIMEOUT", `Session ${key} did not stop.`, {
+      remediation:
+        "Close the scoped Obsidian instance, then retry. Knapper did not unlink or remove anything.",
+      details: { session: key },
+    });
+  }
+  return opts.deleteVault === true ? quarantineSession(key, opts) : releaseSession(key, opts);
+}
+
+async function quarantineOwnedSession(
   descriptor: SessionDescriptor,
   env: NodeJS.ProcessEnv,
-  vaultWasDeleted: boolean,
+): Promise<string> {
+  const paths = sessionPaths(descriptor.key, env);
+  const ownership = descriptor.ownership;
+  if (
+    ownership === undefined ||
+    descriptor.vault === undefined ||
+    descriptor.vault.grant !== "created" ||
+    resolve(descriptor.vault.path) !== resolve(paths.vaultDir) ||
+    resolve(descriptor.instance.userDataDir) !== resolve(paths.userDataDir) ||
+    resolve(descriptor.instance.userDataDir) === resolve(defaultObsidianUserDataDir())
+  ) {
+    throw new UobError("VAULT_NOT_MANAGED", "Knapper refused to quarantine this workspace.", {
+      remediation:
+        "Keep the workspace and inspect its descriptor. Only an exact Knapper scratch layout can be quarantined.",
+      details: { session: descriptor.key },
+    });
+  }
+
+  const [rootLink, vaultLink, rootPath, vaultPath, rootIdentity, vaultIdentity] = await Promise.all(
+    [
+      lstat(paths.root),
+      lstat(paths.vaultDir),
+      realpath(paths.root),
+      realpath(paths.vaultDir),
+      stat(paths.root),
+      stat(paths.vaultDir),
+    ],
+  );
+  if (
+    rootLink.isSymbolicLink() ||
+    vaultLink.isSymbolicLink() ||
+    rootPath !== ownership.rootPath ||
+    vaultPath !== ownership.vaultPath ||
+    rootIdentity.dev !== ownership.rootDevice ||
+    rootIdentity.ino !== ownership.rootInode ||
+    vaultIdentity.dev !== ownership.vaultDevice ||
+    vaultIdentity.ino !== ownership.vaultInode
+  ) {
+    throw new UobError("VAULT_NOT_MANAGED", "The scratch workspace identity changed.", {
+      remediation:
+        "Keep the workspace and inspect it manually. Knapper will not follow a replacement path or symlink during cleanup.",
+      details: { session: descriptor.key },
+    });
+  }
+
+  const destinationRoot = trashDir(env);
+  await mkdir(destinationRoot, { recursive: true, mode: 0o700 });
+  const destination = `${destinationRoot}/${descriptor.key}-${Date.now()}-${process.pid}`;
+  await rename(paths.root, destination);
+  return destination;
+}
+
+/** Remove runtime data while retaining the scratch vault and its parent. */
+async function removeSessionRuntime(
+  descriptor: SessionDescriptor,
+  env: NodeJS.ProcessEnv,
   notes: string[],
-): Promise<boolean> {
+): Promise<void> {
   if (resolve(descriptor.instance.userDataDir) === resolve(defaultObsidianUserDataDir())) {
-    notes.push("Refused to delete the session directory: it points at your own Obsidian profile.");
-    return false;
+    notes.push("Refused to remove runtime data because it points at your Obsidian profile.");
+    return;
   }
 
   const paths = sessionPaths(descriptor.key, env);
+  if (resolve(descriptor.instance.userDataDir) !== resolve(paths.userDataDir)) {
+    notes.push("Refused to remove runtime data because the session layout does not match.");
+    return;
+  }
   for (const path of [paths.userDataDir, paths.outputDir, paths.runtimeDir, paths.lock]) {
     await rm(path, { recursive: true, force: true }).catch(() => undefined);
   }
-
-  const vaultPath = descriptor.vault?.path;
-  const vaultSurvives =
-    !vaultWasDeleted &&
-    vaultPath !== undefined &&
-    resolve(vaultPath).startsWith(`${resolve(paths.root)}/`);
-
-  if (vaultSurvives) {
-    // Keep the root purely as the vault's container. The descriptor is removed by
-    // the caller, so what is left is an ordinary directory of notes rather than a
-    // half-dismantled session.
-    notes.push(`Vault kept at ${vaultPath}; its parent directory was left in place.`);
-    return false;
+  if (descriptor.vault !== undefined) {
+    notes.push(`Vault kept at ${descriptor.vault.path}; its parent directory was left in place.`);
   }
-
-  await rm(paths.root, { recursive: true, force: true });
-  return true;
 }
 
 export type SessionState = "live" | "orphaned" | "stale";
@@ -612,6 +954,37 @@ export interface SessionStatus {
 
 /** 30 minutes with no live process before an abandoned session is reapable. */
 export const STALE_AFTER_MS = 30 * 60 * 1000;
+
+/** Whether the MCP process recorded as this session's owner still exists. */
+export async function sessionOwnerAlive(descriptor: SessionDescriptor): Promise<boolean> {
+  const owner = descriptor.owner;
+  if (owner === undefined || owner.exitedAt !== undefined) return false;
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+  }
+  if (owner.pidStartTime === undefined || process.platform !== "linux") return true;
+  return (await readPidStartTime(owner.pid)) === owner.pidStartTime;
+}
+
+export function sessionCleanupEligibleAt(
+  descriptor: SessionDescriptor,
+  idleTimeoutMs: number,
+): string | undefined {
+  const heartbeat = Date.parse(descriptor.heartbeatAt);
+  if (!Number.isFinite(heartbeat)) return undefined;
+  return new Date(heartbeat + idleTimeoutMs).toISOString();
+}
+
+export function sessionCleanupExpired(
+  descriptor: SessionDescriptor,
+  now: Date,
+  idleTimeoutMs: number,
+): boolean {
+  const eligibleAt = sessionCleanupEligibleAt(descriptor, idleTimeoutMs);
+  return eligibleAt !== undefined && Date.parse(eligibleAt) <= now.getTime();
+}
 
 export async function sessionState(
   descriptor: SessionDescriptor,
@@ -652,8 +1025,8 @@ async function requireDescriptor(key: string, env: NodeJS.ProcessEnv): Promise<S
   const descriptor = await readDescriptor(key, env);
   if (descriptor === undefined) {
     throw new UobError("SESSION_NOT_FOUND", `No knapper session named "${key}".`, {
-      remediation: "List live sessions with obsidian_list_sessions.",
-      fixedBy: "obsidian_list_sessions",
+      remediation: "List durable workspace handles with obsidian_workspace_list.",
+      fixedBy: "obsidian_workspace_list",
       details: { session: key },
     });
   }

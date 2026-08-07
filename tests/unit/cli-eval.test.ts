@@ -4,6 +4,7 @@ import {
   classifyCliOutput,
   classifyEvalOutput,
   cliValue,
+  encodeEvalSource,
 } from "../../src/connection/cli/exec.js";
 
 /**
@@ -131,6 +132,21 @@ describe("classifyEvalOutput", () => {
 });
 
 describe("argument grammar", () => {
+  it("runs a one-line statement body with an explicit return", async () => {
+    const encoded = encodeEvalSource("const value = 41; return value + 1;");
+    await expect(Function(`return (${encoded})`)()).resolves.toBe(42);
+  });
+
+  it("preserves a one-line bare expression result", async () => {
+    const encoded = encodeEvalSource("40 + 2");
+    await expect(Function(`return (${encoded})`)()).resolves.toBe(42);
+  });
+
+  it("supports top-level await", async () => {
+    const encoded = encodeEvalSource("await Promise.resolve(42)");
+    await expect(Function(`return (${encoded})`)()).resolves.toBe(42);
+  });
+
   it("places vault= first, ahead of the command name", () => {
     expect(buildArgs(["note:open", "path=A.md"], "v")).toEqual([
       "vault=v",

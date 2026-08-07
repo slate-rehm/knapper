@@ -13,7 +13,7 @@ import {
   type Capability,
   type Layer,
 } from "../capabilities.js";
-import type { Config } from "../config.js";
+import { sessionPaths, type Config } from "../config.js";
 import type { Logger } from "../util/logger.js";
 import {
   capabilityUnavailable,
@@ -40,25 +40,25 @@ export interface LayerAvailability {
 }
 
 export class CapabilityRouter {
-  readonly cli: ObsidianCli;
-  readonly playwright: PlaywrightSession;
+  cli!: ObsidianCli;
+  playwright!: PlaywrightSession;
   /**
    * The vault fence. Owned here because the router is the one place both transports
    * pass through, so a single instance keeps their caches — and therefore their
    * answers — consistent within a call.
    */
-  readonly fence: VaultFence;
+  fence!: VaultFence;
   /**
    * Scoped focus emulation for input tools. Owned here so the native tools and the
    * @playwright/mcp proxy share one refcount per page — they drive the same window,
    * and two independent counters would let one revert the other's hold.
    */
-  readonly focus: FocusEmulator;
+  focus!: FocusEmulator;
   /**
    * Owned here rather than by the server so the existing shutdown path —
    * `cli.ts` calls only `router.dispose()` — stops its timer.
    */
-  readonly supervisor: ConnectionSupervisor;
+  supervisor!: ConnectionSupervisor;
 
   private availability: LayerAvailability = {
     playwright: false,
@@ -81,46 +81,75 @@ export class CapabilityRouter {
     private readonly config: Config,
     private readonly logger: Logger,
   ) {
+    this.buildTarget();
+  }
+
+  private buildTarget(): void {
     this.fence = new VaultFence({
-      ...(config.vault !== undefined ? { defaultVault: config.vault } : {}),
-      configPath: config.obsidianConfigPath,
-      logger: logger.child("fence"),
+      ...(this.config.vault !== undefined ? { defaultVault: this.config.vault } : {}),
+      configPath: this.config.obsidianConfigPath,
+      ...(this.config.sessionId !== undefined
+        ? {
+            sessionKey: this.config.sessionId,
+            sessionVaultPath: sessionPaths(this.config.sessionId).vaultDir,
+          }
+        : {}),
+      logger: this.logger.child("fence"),
     });
     this.cli = new ObsidianCli({
-      obsidianBin: config.obsidianBin,
-      timeoutMs: config.cliTimeoutMs,
+      obsidianBin: this.config.obsidianBin,
+      timeoutMs: this.config.cliTimeoutMs,
       // Both only set under a session; together they make every CLI invocation a
       // forwarding client of *this* instance rather than of whichever Obsidian
       // currently owns the shared socket.
-      ...(config.runtimeDir !== undefined ? { runtimeDir: config.runtimeDir } : {}),
-      ...(config.sessionId !== undefined ? { userDataDir: config.userDataDir } : {}),
+      ...(this.config.runtimeDir !== undefined ? { runtimeDir: this.config.runtimeDir } : {}),
+      ...(this.config.sessionId !== undefined ? { userDataDir: this.config.userDataDir } : {}),
     });
     this.playwright = new PlaywrightSession({
-      cdpUrl: config.cdpUrl,
+      cdpUrl: this.config.cdpUrl,
       resolveVault: (requested) => this.fence.resolve(requested),
       isVaultAuthorized: async (name) => (await this.fence.isAuthorized(name)) !== undefined,
-      ...(config.targetMatch !== undefined ? { targetMatch: config.targetMatch } : {}),
-      logger: logger.child("cdp"),
+      ...(this.config.targetMatch !== undefined ? { targetMatch: this.config.targetMatch } : {}),
+      logger: this.logger.child("cdp"),
     });
-    this.focus = new FocusEmulator(this.playwright, logger.child("focus"));
+    this.focus = new FocusEmulator(this.playwright, this.logger.child("focus"));
     this.supervisor = new ConnectionSupervisor({
       session: this.playwright,
-      logger: logger.child("supervisor"),
-      reconnectMs: config.reconnectMs,
-      // Proves to the reaper that this session is still attended. A live Obsidian
-      // process already prevents reaping; this covers the window where the app has
-      // died but the agent is about to restart it.
-      ...(config.sessionId !== undefined
-        ? {
-            onHeartbeat: () => {
-              const key = config.sessionId as string;
-              void import("../session/descriptor.js").then((m) =>
-                m.touchHeartbeat(key, new Date()),
-              );
-            },
-          }
-        : {}),
+      logger: this.logger.child("supervisor"),
+      reconnectMs: this.config.reconnectMs,
+      // Proves to the reaper that this session still has a connected MCP owner,
+      // including the window where Obsidian has died and the agent will restart it.
+      onHeartbeat: () => {
+        const key = this.config.sessionId;
+        if (key !== undefined) {
+          void import("../session/descriptor.js")
+            .then((module) => module.touchHeartbeat(key, new Date()))
+            .catch((error: unknown) => {
+              this.logger.debug("session heartbeat failed", {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        }
+      },
     });
+  }
+
+  /** Rebuild every target-specific transport after the shared config changes. */
+  async rebind(): Promise<void> {
+    if (this.disposed) throw new Error("Cannot rebind a disposed capability router.");
+    this.supervisor.stop();
+    await this.focus.dispose().catch(() => undefined);
+    await this.playwright.close().catch(() => undefined);
+    if (this.disposed) throw new Error("Cannot rebind a disposed capability router.");
+    this.debuggerHolder = undefined;
+    this.availability = { playwright: false, cli: false, cliCdp: false, local: true };
+    this.availabilityCheckedAt = 0;
+    this.cliFlagEnabled = false;
+    this.processRunning = false;
+    this.cliDegradedUntil = 0;
+    this.lastCliTimeoutAt = undefined;
+    this.buildTarget();
+    this.supervisor.start();
   }
 
   /**
@@ -283,19 +312,26 @@ export class CapabilityRouter {
       this.claimDebugger("playwright");
       return { value: await this.playwright.evaluate<T>(code, vault.name), layer };
     }
-    // The CLI returns strings, so ask the page to stringify before it crosses over.
-    // Use wrapExpression so IIFEs and bare expressions keep their return values —
-    // a naive `{ ${code} }` body discards an IIFE result and yields `(no output)`.
-    const { parseCliJson, wrapExpression } = await import("../util/serialize.js");
-    const stdout = await this.nativeCliCall(() =>
-      this.cli.evaluate(`JSON.stringify((() => { ${wrapExpression(code)} })())`, vault.name),
-    );
-    const parsed = parseCliJson<T>(stdout);
-    if (parsed === undefined) {
-      const cleaned = stdout.trim().replace(/^=>\s*/, "");
+    // Obsidian's CLI already serializes object and array results as JSON. Wrapping
+    // a long, multiline IIFE in JSON.stringify makes its evaluator return
+    // `(no output)` on current Obsidian releases, even though the same IIFE returns
+    // the correct object by itself.
+    const stdout = await this.nativeCliCall(() => this.cli.evaluate(code, vault.name));
+    const cleaned = stdout.trim().replace(/^=>\s*/, "");
+    if (stdout.trim().startsWith("=>") && !/^[[{]/.test(cleaned)) {
       if (cleaned === "" || cleaned === "(no output)") {
         return { value: undefined as T, layer };
       }
+      return { value: cleaned as T, layer };
+    }
+    const { parseCliJson } = await import("../util/serialize.js");
+    const parsed = parseCliJson<T>(stdout);
+    if (parsed === undefined) {
+      if (cleaned === "" || cleaned === "(no output)") {
+        return { value: undefined as T, layer };
+      }
+      // The CLI renders a returned string without JSON quotes. A JSON-oriented
+      // caller can still legitimately request one, so preserve that scalar.
       throw new UobError(
         "EVAL_FAILED",
         "Expected JSON from the Obsidian CLI but could not parse it.",

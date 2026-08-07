@@ -10,6 +10,21 @@
  * lose history.
  */
 
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
+
 export type LogLevel = "debug" | "info" | "log" | "warn" | "error";
 
 export type RecordSource = "console" | "pageerror" | "exception" | "network" | "marker";
@@ -56,6 +71,24 @@ export interface QueryResult {
   dropped: number;
 }
 
+export interface TelemetryStoreOptions {
+  /** Optional append-only JSONL path for records that must survive process restarts. */
+  jsonlPath?: string;
+}
+
+export interface TelemetryPersistenceSummary {
+  enabled: boolean;
+  loaded: number;
+  loadErrors: number;
+  writeErrors: number;
+}
+
+export interface TelemetryRecordCounts {
+  total: number;
+  byLevel: Record<LogLevel, number>;
+  bySource: Record<RecordSource, number>;
+}
+
 const SEVERITY: Record<LogLevel, number> = {
   debug: 10,
   log: 20,
@@ -70,6 +103,8 @@ const SEVERITY: Record<LogLevel, number> = {
  */
 const PLUGIN_PATH_FRAME = /[/\\]plugins[/\\]([^/\\]+)[/\\]/;
 const PLUGIN_SOURCE_FRAME = /plugin:([^:/\s]+):/gi;
+const MAX_JSONL_BYTES = 16 * 1024 * 1024;
+const FSYNC_EVERY_RECORDS = 32;
 
 export function attributePlugin(...texts: (string | undefined)[]): string | undefined {
   for (const text of texts) {
@@ -87,8 +122,27 @@ export class TelemetryStore {
   private readonly buffer: TelemetryRecord[] = [];
   private seq = 0;
   private droppedCount = 0;
+  private readonly jsonlPath?: string;
+  private loadedCount = 0;
+  private loadErrorCount = 0;
+  private writeErrorCount = 0;
+  private persistenceFd?: number;
+  private persistenceBytes = 0;
+  private recordsSinceSync = 0;
+  private recordsSinceCompaction = 0;
+  private readonly pendingLines: string[] = [];
+  private pendingFlush?: NodeJS.Immediate;
 
-  constructor(private readonly capacity: number = 2000) {}
+  constructor(
+    private readonly capacity: number = 2000,
+    options: TelemetryStoreOptions = {},
+  ) {
+    this.jsonlPath = options.jsonlPath;
+    if (this.jsonlPath !== undefined) {
+      const needsCompaction = this.loadJsonl(this.jsonlPath);
+      if (needsCompaction) this.replacePersistenceWithBuffer();
+    }
+  }
 
   get size(): number {
     return this.buffer.length;
@@ -123,6 +177,7 @@ export class TelemetryStore {
       this.buffer.shift();
       this.droppedCount++;
     }
+    this.persistLine(entry);
     return entry;
   }
 
@@ -179,13 +234,14 @@ export class TelemetryStore {
   }
 
   /** Counts by level, for the compact summary appended to mutating tool results. */
-  summary(since?: number): { errors: number; warnings: number; total: number } {
+  summary(since?: number, plugin?: string): { errors: number; warnings: number; total: number } {
     let errors = 0;
     let warnings = 0;
     let total = 0;
     for (const r of this.buffer) {
       if (since !== undefined && r.seq <= since) continue;
       if (r.source === "marker") continue;
+      if (plugin !== undefined && r.plugin !== plugin) continue;
       total++;
       if (r.level === "error") errors++;
       else if (r.level === "warn") warnings++;
@@ -193,11 +249,293 @@ export class TelemetryStore {
     return { errors, warnings, total };
   }
 
+  /** Privacy-safe record counts for status output. */
+  recordCounts(): TelemetryRecordCounts {
+    const byLevel: Record<LogLevel, number> = {
+      debug: 0,
+      info: 0,
+      log: 0,
+      warn: 0,
+      error: 0,
+    };
+    const bySource: Record<RecordSource, number> = {
+      console: 0,
+      pageerror: 0,
+      exception: 0,
+      network: 0,
+      marker: 0,
+    };
+    for (const record of this.buffer) {
+      byLevel[record.level]++;
+      bySource[record.source]++;
+    }
+    return { total: this.buffer.length, byLevel, bySource };
+  }
+
+  /** Persistence health without exposing the configured filesystem path. */
+  persistenceSummary(): TelemetryPersistenceSummary {
+    return {
+      enabled: this.jsonlPath !== undefined,
+      loaded: this.loadedCount,
+      loadErrors: this.loadErrorCount,
+      writeErrors: this.writeErrorCount,
+    };
+  }
+
   clear(): void {
     this.buffer.length = 0;
     this.droppedCount = 0;
-    this.seq = 0;
+    this.replacePersistenceWithCursor();
   }
+
+  /** Flush and release the durable file before a workspace archive moves it. */
+  closePersistence(): void {
+    this.flushPending();
+    if (this.persistenceFd === undefined) return;
+    try {
+      fsyncSync(this.persistenceFd);
+    } catch {
+      this.writeErrorCount++;
+    }
+    try {
+      closeSync(this.persistenceFd);
+    } catch {
+      this.writeErrorCount++;
+    }
+    this.persistenceFd = undefined;
+    this.recordsSinceSync = 0;
+  }
+
+  private loadJsonl(path: string): boolean {
+    if (!existsSync(path)) return false;
+    let text: string;
+    let truncatedHead = false;
+    try {
+      const fd = openSync(path, "r");
+      try {
+        const size = fstatSync(fd).size;
+        this.persistenceBytes = size;
+        const start = Math.max(0, size - MAX_JSONL_BYTES);
+        const buffer = Buffer.alloc(size - start);
+        let bytesRead = 0;
+        while (bytesRead < buffer.length) {
+          const count = readSync(
+            fd,
+            buffer,
+            bytesRead,
+            buffer.length - bytesRead,
+            start + bytesRead,
+          );
+          if (count <= 0) break;
+          bytesRead += count;
+        }
+        text = buffer.subarray(0, bytesRead).toString("utf8");
+        if (start > 0) {
+          truncatedHead = true;
+          const firstNewline = text.indexOf("\n");
+          text = firstNewline === -1 ? "" : text.slice(firstNewline + 1);
+        }
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      this.loadErrorCount++;
+      return false;
+    }
+
+    for (const line of text.split("\n")) {
+      if (line.trim() === "") continue;
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        this.loadErrorCount++;
+        continue;
+      }
+
+      if (isCursorCheckpoint(value)) {
+        if (value.seq >= this.seq) this.seq = value.seq;
+        else this.loadErrorCount++;
+        continue;
+      }
+      if (!isTelemetryRecord(value) || value.seq <= this.seq) {
+        this.loadErrorCount++;
+        continue;
+      }
+
+      this.seq = value.seq;
+      this.buffer.push(value);
+      this.loadedCount++;
+      while (this.buffer.length > this.capacity) {
+        this.buffer.shift();
+        this.droppedCount++;
+      }
+    }
+    return truncatedHead || this.droppedCount > 0;
+  }
+
+  private persistLine(value: TelemetryRecord | CursorCheckpoint): void {
+    if (this.jsonlPath === undefined) return;
+    this.pendingLines.push(`${JSON.stringify(value)}\n`);
+    if (this.pendingFlush === undefined) {
+      this.pendingFlush = setImmediate(() => {
+        this.pendingFlush = undefined;
+        this.flushPending();
+      });
+      this.pendingFlush.unref();
+    }
+  }
+
+  /** Batch renderer bursts so a console event never performs disk I/O inline. */
+  private flushPending(): void {
+    if (this.pendingFlush !== undefined) {
+      clearImmediate(this.pendingFlush);
+      this.pendingFlush = undefined;
+    }
+    if (this.jsonlPath === undefined || this.pendingLines.length === 0) return;
+    const lines = this.pendingLines.splice(0);
+    try {
+      const content = lines.join("");
+      const fd = this.openPersistence();
+      writeSync(fd, content, undefined, "utf8");
+      this.persistenceBytes += Buffer.byteLength(content);
+      this.recordsSinceSync += lines.length;
+      this.recordsSinceCompaction += lines.length;
+      if (this.recordsSinceSync >= FSYNC_EVERY_RECORDS) {
+        fsyncSync(fd);
+        this.recordsSinceSync = 0;
+      }
+      if (
+        this.persistenceBytes > MAX_JSONL_BYTES ||
+        this.recordsSinceCompaction >= Math.max(100, this.capacity)
+      ) {
+        this.replacePersistenceWithBuffer();
+      }
+    } catch {
+      this.pendingLines.unshift(...lines);
+      this.writeErrorCount++;
+    }
+  }
+
+  private openPersistence(): number {
+    if (this.persistenceFd !== undefined) return this.persistenceFd;
+    if (this.jsonlPath === undefined) throw new Error("Telemetry persistence is disabled.");
+    mkdirSync(dirname(this.jsonlPath), { recursive: true, mode: 0o700 });
+    this.persistenceFd = openSync(this.jsonlPath, "a", 0o600);
+    return this.persistenceFd;
+  }
+
+  private replacePersistenceWithBuffer(): void {
+    const lines: string[] = [];
+    let bytes = 0;
+    for (let index = this.buffer.length - 1; index >= 0; index--) {
+      const line = `${JSON.stringify(this.buffer[index])}\n`;
+      const lineBytes = Buffer.byteLength(line);
+      if (lines.length > 0 && bytes + lineBytes > MAX_JSONL_BYTES) break;
+      lines.push(line);
+      bytes += lineBytes;
+    }
+    lines.reverse();
+    const content =
+      lines.length > 0 ? lines.join("") : `${JSON.stringify({ type: "cursor", seq: this.seq })}\n`;
+    this.replacePersistence(content);
+  }
+
+  private replacePersistenceWithCursor(): void {
+    if (this.jsonlPath === undefined) return;
+    this.replacePersistence(`${JSON.stringify({ type: "cursor", seq: this.seq })}\n`);
+  }
+
+  private replacePersistence(content: string): void {
+    if (this.jsonlPath === undefined) return;
+    const temporary = `${this.jsonlPath}.${process.pid}.${randomUUID()}.tmp`;
+    let fd: number | undefined;
+    let replaced = false;
+    try {
+      this.closePersistence();
+      mkdirSync(dirname(this.jsonlPath), { recursive: true, mode: 0o700 });
+      fd = openSync(temporary, "wx", 0o600);
+      try {
+        writeSync(fd, content, undefined, "utf8");
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+        fd = undefined;
+      }
+      renameSync(temporary, this.jsonlPath);
+      replaced = true;
+    } catch {
+      this.writeErrorCount++;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          this.writeErrorCount++;
+        }
+      }
+      try {
+        rmSync(temporary, { force: true });
+      } catch {
+        this.writeErrorCount++;
+      }
+    }
+    if (replaced) {
+      this.persistenceBytes = Buffer.byteLength(content);
+      this.recordsSinceSync = 0;
+      this.recordsSinceCompaction = 0;
+    }
+  }
+}
+
+interface CursorCheckpoint {
+  type: "cursor";
+  seq: number;
+}
+
+const LOG_LEVELS = new Set<LogLevel>(["debug", "info", "log", "warn", "error"]);
+const RECORD_SOURCES = new Set<RecordSource>([
+  "console",
+  "pageerror",
+  "exception",
+  "network",
+  "marker",
+]);
+
+function isCursorCheckpoint(value: unknown): value is CursorCheckpoint {
+  if (!isObject(value)) return false;
+  return value.type === "cursor" && isSequence(value.seq);
+}
+
+function isTelemetryRecord(value: unknown): value is TelemetryRecord {
+  if (!isObject(value)) return false;
+  return (
+    isSequence(value.seq) &&
+    typeof value.timestamp === "number" &&
+    Number.isFinite(value.timestamp) &&
+    typeof value.source === "string" &&
+    RECORD_SOURCES.has(value.source as RecordSource) &&
+    typeof value.level === "string" &&
+    LOG_LEVELS.has(value.level as LogLevel) &&
+    typeof value.text === "string" &&
+    optionalString(value.stack) &&
+    optionalString(value.plugin) &&
+    optionalString(value.label) &&
+    optionalString(value.url) &&
+    (value.meta === undefined || isObject(value.meta))
+  );
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
 }
 
 /** Render records as compact lines for a text tool response. */

@@ -25,6 +25,18 @@ const fileRef = {
   ...vaultOpt,
 };
 
+function listOutcome(kind: "themes" | "snippets", stdout: string) {
+  const trimmed = stdout.trim();
+  const values = (trimmed === "" || trimmed === "(no output)" ? "" : trimmed)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  return {
+    text: values.join("\n") || `(no ${kind})`,
+    json: { count: values.length, [kind]: values },
+  };
+}
+
 export function registerAuthoringTools(ctx: ServerContext): void {
   const { registry, router, config } = ctx;
 
@@ -48,7 +60,7 @@ export function registerAuthoringTools(ctx: ServerContext): void {
         args: tokens,
         vault: vaultName(args, config),
       });
-      return cliOutcome(stdout);
+      return listOutcome("themes", stdout);
     },
   });
 
@@ -88,7 +100,7 @@ export function registerAuthoringTools(ctx: ServerContext): void {
       ...vaultOpt,
     },
     // Overwrites the user's chosen appearance with no undo.
-    annotations: { destructiveHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
     handler: async (args) => {
       const { stdout } = await runCli(router, {
         command: "theme:set",
@@ -113,7 +125,7 @@ export function registerAuthoringTools(ctx: ServerContext): void {
         command: "snippets",
         vault: vaultName(args, config),
       });
-      return cliOutcome(stdout);
+      return listOutcome("snippets", stdout);
     },
   });
 

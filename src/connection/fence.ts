@@ -10,14 +10,17 @@
  *  - `PlaywrightSession.page()` used to fall back to "first main window" when no
  *    window matched, so a pin at a scratch vault could drive a real one.
  *
- * Authorization is a `.knapper-managed` marker inside the vault directory, written
- * by exactly two things: `obsidian_create_vault` (disposable, `created`) and the
- * out-of-band `knapper authorize` command (`adopted`). No tool can grant it, which
- * is the property the whole design rests on — see `src/authorize.ts`.
+ * Existing-vault authorization is an external record under `KNAP_HOME`, created
+ * only by the out-of-band `knapper authorize` command. A private workspace scratch
+ * vault is authorized by its exact verified session layout. No MCP tool and no file
+ * inside a vault can grant authorization. See `src/authorize.ts`.
  */
 
+import { lstat, realpath, stat } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import { obsidianConfigPath } from "../config.js";
+import { readDescriptor } from "../session/descriptor.js";
+import { sessionPaths } from "../config.js";
 import type { Logger } from "../util/logger.js";
 import { vaultNotAuthorized, vaultNotFound, vaultTargetAmbiguous } from "../util/errors.js";
 import {
@@ -50,6 +53,12 @@ export interface VaultFenceOptions {
   defaultVault?: string;
   logger: Logger;
   configPath?: string;
+  /** Environment that selects Knapper's external authorization registry. */
+  env?: NodeJS.ProcessEnv;
+  /** Exact private-session scratch vault, authorized by its verified layout. */
+  sessionVaultPath?: string;
+  /** Session descriptor that owns `sessionVaultPath`. */
+  sessionKey?: string;
 }
 
 /**
@@ -85,10 +94,48 @@ export class VaultFence {
 
   private async grantFor(vaultPath: string): Promise<MarkerGrant | undefined> {
     const key = resolvePath(vaultPath);
+    if (
+      this.opts.sessionKey !== undefined &&
+      this.opts.sessionVaultPath !== undefined &&
+      key === resolvePath(this.opts.sessionVaultPath)
+    ) {
+      const env = this.opts.env ?? process.env;
+      const descriptor = await readDescriptor(this.opts.sessionKey, env);
+      const ownership = descriptor?.ownership;
+      const expected = sessionPaths(this.opts.sessionKey, env).vaultDir;
+      if (
+        descriptor?.vault?.grant === "created" &&
+        typeof descriptor.vault.path === "string" &&
+        descriptor.vault.path !== "" &&
+        ownership !== undefined &&
+        key === resolvePath(expected) &&
+        resolvePath(descriptor.vault.path) === key
+      ) {
+        try {
+          const [link, canonical, identity] = await Promise.all([
+            lstat(key),
+            realpath(key),
+            stat(key),
+          ]);
+          if (
+            link.isDirectory() &&
+            !link.isSymbolicLink() &&
+            canonical === ownership.vaultPath &&
+            identity.dev === ownership.vaultDevice &&
+            identity.ino === ownership.vaultInode
+          ) {
+            return "created";
+          }
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
+    }
     const cached = this.markerCache.get(key);
     if (cached && Date.now() - cached.at < MARKER_TTL_MS) return cached.grant;
 
-    const marker = await readManagedMarker(key);
+    const marker = await readManagedMarker(key, this.opts.env ?? process.env);
     if (!marker) {
       // Deliberately not cached — see MARKER_TTL_MS.
       this.markerCache.delete(key);

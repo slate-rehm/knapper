@@ -62,6 +62,8 @@ export interface Config {
   outputDir: string;
   /** Timeout for a single Obsidian CLI invocation, in ms. */
   cliTimeoutMs: number;
+  /** Idle grace for default-profile ownership and disconnected sessions. */
+  idleTimeoutMs: number;
   /** Transport preference for renderer commands that both CLI and CDP can serve. */
   commandTransport: CommandTransport;
   /** Session key when this server is bound to one, else undefined. */
@@ -179,6 +181,21 @@ export function sessionsDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(knapperHome(env), "sessions");
 }
 
+/** Durable explicit agent handles used by stateless MCP clients. */
+export function agentsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(knapperHome(env), "agents");
+}
+
+/** Explicit workspace-handle records. The records never contain vault content. */
+export function workspacesDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(knapperHome(env), "workspaces");
+}
+
+/** Recoverable session roots awaiting an explicit purge. */
+export function trashDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(knapperHome(env), "trash");
+}
+
 export function sessionRoot(key: string, env: NodeJS.ProcessEnv = process.env): string {
   return join(sessionsDir(env), key);
 }
@@ -186,6 +203,16 @@ export function sessionRoot(key: string, env: NodeJS.ProcessEnv = process.env): 
 /** Lock guarding session create/close/reap across knapper processes. */
 export function registryLockPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(knapperHome(env), "registry.lock");
+}
+
+/** Short coordination lock for atomic default-profile lease updates. */
+export function defaultProfileLeaseLockPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(knapperHome(env), "default-profile-lease.lock");
+}
+
+/** Ownership record for the installation's default Obsidian profile. */
+export function defaultProfileLeasePath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(knapperHome(env), "default-profile-lease.json");
 }
 
 /** Per-session directory layout. The only place these names are spelled. */
@@ -211,7 +238,7 @@ export function sessionPaths(key: string, env: NodeJS.ProcessEnv = process.env):
     // Named for the session, not "vault", because Obsidian derives a vault's NAME
     // from its directory basename. A fixed name would make every session's vault
     // identically named: legal, since each session has its own registry, but it
-    // renders `obsidian_list_sessions`, every window title, and `targetMatch`
+    // renders workspace diagnostics, every window title, and `targetMatch`
     // unable to tell two sessions apart.
     vaultDir: join(root, key),
   };
@@ -311,9 +338,9 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
   const rawTransport = overrides.transport ?? env.MCP_TRANSPORT ?? "stdio";
   const transport: TransportKind = isTransportKind(rawTransport) ? rawTransport : "stdio";
 
-  // Unbound is the default and must stay byte-identical to the pre-session
-  // behaviour: the user's own profile, no runtime dir, screenshots under cwd.
-  const sessionId = overrides.sessionId ?? emptyToUndefined(env.KNAP_SESSION);
+  // The server starts unbound. Workspace tools can bind an internal isolated
+  // instance later, but transport configuration never selects one implicitly.
+  const sessionId = overrides.sessionId;
   const userDataDir = overrides.userDataDir ?? defaultObsidianUserDataDir();
   const runtimeDir = overrides.runtimeDir;
 
@@ -343,6 +370,7 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
       env.SCREENSHOT_DIR ??
       join(process.cwd(), ".knapper"),
     cliTimeoutMs: overrides.cliTimeoutMs ?? numberFrom(env.KNAP_CLI_TIMEOUT_MS, 15_000),
+    idleTimeoutMs: Math.max(30_000, numberFrom(env.KNAP_IDLE_TIMEOUT_MS, 24 * 60 * 60_000)),
     commandTransport: commandTransportFrom(
       overrides.commandTransport ?? env.KNAP_COMMAND_TRANSPORT,
     ),
@@ -352,82 +380,4 @@ export function loadConfig(overrides: ConfigOverrides = {}, env = process.env): 
     ...(runtimeDir !== undefined ? { runtimeDir } : {}),
     cliIsolation: cliIsolationFor(runtimeDir),
   };
-}
-
-function emptyToUndefined(raw: string | undefined): string | undefined {
-  return raw === undefined || raw === "" ? undefined : raw;
-}
-
-/**
- * Resolve config for a session key, falling back to `loadConfig` when unbound.
- *
- * Precedence is explicit flag > env var > descriptor > default, so `--cdp-url`
- * still wins for debugging a session's instance by hand.
- *
- * A `KNAP_SESSION` naming a descriptor that is not there is a hard error, never a
- * silent fallback to the user's real Obsidian. That is the fence's philosophy one
- * layer up: a request to target something specific must fail loudly rather than
- * quietly land somewhere else.
- */
-export async function loadSessionConfig(
-  overrides: ConfigOverrides = {},
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<Config> {
-  const key = overrides.sessionId ?? emptyToUndefined(env.KNAP_SESSION);
-  if (key === undefined) return loadConfig(overrides, env);
-
-  const { readDescriptor } = await import("./session/descriptor.js");
-  const { assertSessionKey } = await import("./session/key.js");
-  const { UobError } = await import("./util/errors.js");
-
-  assertSessionKey(key);
-  const descriptor = await readDescriptor(key, env);
-  if (descriptor === undefined) {
-    throw new UobError("SESSION_NOT_FOUND", `No knapper session named "${key}".`, {
-      remediation:
-        "KNAP_SESSION points at a session that no longer exists — it was closed, reaped, or never " +
-        "created. Create one with obsidian_create_session, or unset KNAP_SESSION to use the " +
-        "installation's own Obsidian.",
-      fixedBy: "obsidian_create_session",
-      details: { session: key },
-    });
-  }
-  if (
-    descriptor.readiness.phase !== "ready" &&
-    overrides.cdpUrl === undefined &&
-    env.OBSIDIAN_CDP_URL === undefined
-  ) {
-    throw new UobError(
-      "SESSION_NOT_RUNNING",
-      `Session "${key}" is ${descriptor.readiness.phase}.`,
-      {
-        remediation:
-          descriptor.readiness.phase === "starting"
-            ? "Call obsidian_wait_session before binding the MCP server to this session."
-            : "Restart the session or create a new one.",
-        fixedBy:
-          descriptor.readiness.phase === "starting"
-            ? "obsidian_wait_session"
-            : "obsidian_restart_session",
-        details: { session: key, phase: descriptor.readiness.phase },
-      },
-    );
-  }
-
-  return loadConfig(
-    {
-      ...overrides,
-      sessionId: key,
-      userDataDir: overrides.userDataDir ?? descriptor.instance.userDataDir,
-      ...(descriptor.instance.runtimeDir !== undefined
-        ? { runtimeDir: overrides.runtimeDir ?? descriptor.instance.runtimeDir }
-        : {}),
-      cdpUrl: overrides.cdpUrl ?? env.OBSIDIAN_CDP_URL ?? descriptor.instance.cdpUrl,
-      outputDir: overrides.outputDir ?? env.KNAP_SCREENSHOT_DIR ?? descriptor.instance.outputDir,
-      ...(descriptor.vault !== undefined
-        ? { vault: overrides.vault ?? env.OBSIDIAN_VAULT ?? descriptor.vault.name }
-        : {}),
-    },
-    env,
-  );
 }

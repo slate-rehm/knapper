@@ -14,8 +14,8 @@
  * is absent — an unannotated tool is assumed to touch the UI.
  */
 
-import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ZodRawShape } from "zod";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/server";
+import { z, type ZodRawShape } from "zod";
 import type { Capability } from "../capabilities.js";
 import type { Toolset } from "../toolsets.js";
 import type { Logger } from "../util/logger.js";
@@ -23,8 +23,18 @@ import type { TelemetryStore } from "../telemetry/store.js";
 import { appendTelemetrySummary } from "../telemetry/helpers.js";
 import { toUobError, UobError } from "../util/errors.js";
 import { CallLock, type LockMode } from "../util/concurrency.js";
-import { renderResult } from "../util/serialize.js";
+import { renderResult, safeStringify } from "../util/serialize.js";
 import { jsonSchemaToZodShape } from "../browser/json-schema.js";
+import type { DefaultProfileLease } from "../session/default-profile-lease.js";
+import { errorEnvelope, requestId, toolAuditEvent } from "../audit/event.js";
+import { JsonlAuditWriter } from "../audit/writer.js";
+import type {
+  AuditCallContext,
+  AuditErrorEnvelope,
+  AuditSink,
+  ToolRegistryHooks,
+  ToolRequestContext,
+} from "../audit/types.js";
 
 /** What a tool handler may return; the registry normalizes it to MCP content. */
 export type ToolOutcome =
@@ -57,7 +67,17 @@ export interface ToolDefinition<S extends ZodRawShape = ZodRawShape> {
   inputSchema?: S;
   /** JSON Schema for proxied tools (converted to Zod at registration). */
   jsonInputSchema?: Record<string, unknown>;
+  /** Zod output shape for tools defined in this repo. */
+  outputSchema?: ZodRawShape;
+  /** JSON Schema for proxied tools (converted to Zod at registration). */
+  jsonOutputSchema?: Record<string, unknown>;
   annotations?: ToolAnnotations;
+  /** This tool never reads or drives the installation's default Obsidian profile. */
+  profileIndependent?: boolean | ((args: Record<string, unknown>) => boolean);
+  /** This control-plane tool does not require or bind a workspace handle. */
+  workspaceIndependent?: boolean;
+  /** A workspace-control tool must hold the same exclusive lease as operational tools. */
+  requiresWorkspaceLease?: boolean;
   /** Keep this control-plane tool enabled even when its toolset is disabled. */
   alwaysEnabled?: boolean;
   /**
@@ -74,8 +94,23 @@ type McpContent =
 
 export interface McpToolResult {
   content: McpContent[];
+  structuredContent?: unknown;
   isError?: boolean;
   [key: string]: unknown;
+}
+
+function structuredContent(value: unknown): Record<string, unknown> {
+  const rendered = safeStringify(value, 0);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rendered) as unknown;
+  } catch {
+    parsed = rendered;
+  }
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>;
+  }
+  return { result: parsed };
 }
 
 function normalize(outcome: ToolOutcome): McpToolResult {
@@ -84,7 +119,10 @@ function normalize(outcome: ToolOutcome): McpToolResult {
   }
 
   if (typeof outcome === "string") {
-    return { content: [{ type: "text", text: outcome }] };
+    return {
+      content: [{ type: "text", text: outcome }],
+      structuredContent: { result: outcome },
+    };
   }
 
   const content: McpContent[] = [];
@@ -95,11 +133,10 @@ function normalize(outcome: ToolOutcome): McpToolResult {
     content.push({ type: "text", text });
   }
 
-  // Structured payload is appended as fenced JSON so agents get machine-readable
-  // data without needing a second call, while still reading naturally as text.
   if (json !== undefined) {
-    const rendered = renderResult(json);
-    content.push({ type: "text", text: `\`\`\`json\n${rendered.text}\n\`\`\`` });
+    if (text === undefined || text === "") {
+      content.push({ type: "text", text: renderResult(json).text });
+    }
   }
 
   if ("images" in outcome && outcome.images) {
@@ -113,15 +150,17 @@ function normalize(outcome: ToolOutcome): McpToolResult {
   }
 
   const isError = "isError" in outcome ? outcome.isError : undefined;
-  return isError ? { content, isError: true } : { content };
+  return {
+    content,
+    structuredContent: json !== undefined ? structuredContent(json) : { result: text ?? null },
+    ...(isError ? { isError: true } : {}),
+  };
 }
 
 function errorResult(err: UobError): McpToolResult {
   return {
-    content: [
-      { type: "text", text: err.toText() },
-      { type: "text", text: `\`\`\`json\n${JSON.stringify(err.toJSON(), null, 2)}\n\`\`\`` },
-    ],
+    content: [{ type: "text", text: err.toText() }],
+    structuredContent: structuredContent(err.toJSON()),
     isError: true,
   };
 }
@@ -136,13 +175,18 @@ function withTelemetrySuffix(
   }
   if ("mcp" in outcome) return outcome;
   if (outcome.text === undefined) return outcome;
-  return { ...outcome, text: appendTelemetrySummary(outcome.text, store, sinceSeq) };
+  return {
+    ...outcome,
+    text: appendTelemetrySummary(outcome.text, store, sinceSeq),
+  };
 }
 
 export class ToolRegistry {
   private readonly definitions = new Map<string, ToolDefinition>();
   private readonly handles = new Map<string, RegisteredTool>();
   private readonly lock: CallLock;
+  private readonly audit: AuditSink | false;
+  private auditWritePending = false;
 
   constructor(
     enabledToolsets: Set<Toolset>,
@@ -157,12 +201,33 @@ export class ToolRegistry {
      */
     maxConcurrency: number,
     private readonly telemetry?: TelemetryStore,
+    private readonly profileLease?: DefaultProfileLease,
+    private readonly sessionBound: () => boolean = () => false,
+    private readonly hooks: ToolRegistryHooks = {},
   ) {
     this.enabledToolsets = new Set(enabledToolsets);
     this.lock = new CallLock({ maxShared: maxConcurrency });
+    this.audit = hooks.audit === undefined ? new JsonlAuditWriter() : hooks.audit;
   }
 
   private readonly enabledToolsets: Set<Toolset>;
+
+  /** Keep tool completion independent of audit storage and cap the pending queue at one event. */
+  private queueAudit(event: ReturnType<typeof toolAuditEvent>): void {
+    if (this.audit === false || this.auditWritePending) return;
+    this.auditWritePending = true;
+    void this.audit
+      .write(event)
+      .catch((auditFailure: unknown) => {
+        this.logger.warn("audit write failed", {
+          tool: event.tool,
+          error: auditFailure instanceof Error ? auditFailure.name : "UnknownAuditError",
+        });
+      })
+      .finally(() => {
+        this.auditWritePending = false;
+      });
+  }
 
   /** Retain every definition so its toolset can be enabled at runtime. */
   add<S extends ZodRawShape>(def: ToolDefinition<S>): void {
@@ -214,6 +279,66 @@ export class ToolRegistry {
     return this.enabledToolsets.has(toolset);
   }
 
+  /** Search all retained definitions without changing the enabled surface. */
+  catalog(options: {
+    query?: string;
+    toolset?: Toolset;
+    enabled?: boolean;
+    cursor?: string;
+    limit?: number;
+    detail?: "summary" | "full";
+  }): {
+    items: Array<{
+      name: string;
+      toolset: Toolset;
+      enabled: boolean;
+      description?: string;
+      capability?: Capability | null;
+      annotations?: ToolAnnotations;
+    }>;
+    total: number;
+    nextCursor?: string;
+  } {
+    const query = options.query?.trim().toLowerCase() ?? "";
+    const offset = options.cursor === undefined ? 0 : Number(options.cursor);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new UobError("INVALID_ARGUMENT", "The catalog cursor is invalid.", {
+        remediation: "Use the nextCursor value from the previous obsidian_tool_catalog result.",
+      });
+    }
+
+    const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
+    const definitions = [...this.definitions.values()]
+      .filter((def) => options.toolset === undefined || def.toolset === options.toolset)
+      .filter(
+        (def) => options.enabled === undefined || this.isDefinitionEnabled(def) === options.enabled,
+      )
+      .filter((def) => {
+        if (query === "") return true;
+        return `${def.name}\n${def.toolset}\n${def.description}`.toLowerCase().includes(query);
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    const items = definitions.slice(offset, offset + limit).map((def) => ({
+      name: def.name,
+      toolset: def.toolset,
+      enabled: this.isDefinitionEnabled(def),
+      ...(options.detail === "full"
+        ? {
+            description: def.description,
+            capability: def.capability ?? null,
+            annotations: { readOnlyHint: false, ...def.annotations },
+          }
+        : {}),
+    }));
+    const nextOffset = offset + items.length;
+    return {
+      items,
+      total: definitions.length,
+      ...(nextOffset < definitions.length ? { nextCursor: String(nextOffset) } : {}),
+    };
+  }
+
   /** Enable or disable one toolset through the SDK registration handles. */
   setToolsetEnabled(toolset: Toolset, enabled: boolean): string[] {
     if (enabled) this.enabledToolsets.add(toolset);
@@ -252,16 +377,53 @@ export class ToolRegistry {
   bind(server: McpServer): void {
     for (const def of this.definitions.values()) {
       const config: Record<string, unknown> = { description: def.description };
-      if (def.jsonInputSchema) config.inputSchema = jsonSchemaToZodShape(def.jsonInputSchema);
-      else if (def.inputSchema) config.inputSchema = def.inputSchema;
-      if (def.annotations) config.annotations = def.annotations;
+      const shape = def.jsonInputSchema
+        ? jsonSchemaToZodShape(def.jsonInputSchema)
+        : (def.inputSchema ?? {});
+      config.inputSchema =
+        def.workspaceIndependent === true
+          ? shape
+          : {
+              ...shape,
+              workspaceHandle: z
+                .string()
+                .describe("Explicit workspace handle returned by an obsidian_workspace_* tool."),
+            };
+      if (def.jsonOutputSchema) {
+        config.outputSchema = jsonSchemaToZodShape(def.jsonOutputSchema);
+      } else if (def.outputSchema) {
+        config.outputSchema = def.outputSchema;
+      } else if (def.jsonInputSchema === undefined) {
+        // Native tools always return structuredContent. A permissive base schema
+        // gives hosts the MCP contract even when a tool's more specific schema has
+        // not been declared yet.
+        config.outputSchema = z.looseObject({});
+      }
+      config.annotations = { readOnlyHint: false, ...def.annotations };
 
       const handle = server.registerTool(
         def.name,
         config as never,
-        (async (args: Record<string, unknown>) => {
+        (async (
+          args: Record<string, unknown>,
+          requestContext?: ToolRequestContext,
+        ): Promise<McpToolResult> => {
           const started = Date.now();
-          const mode: LockMode = def.annotations?.readOnlyHint === true ? "shared" : "exclusive";
+          const timestamp = new Date(started).toISOString();
+          const callRequestId = requestId(requestContext);
+          const callArgs = args ?? {};
+          let queueMs = 0;
+          let admitted = false;
+          let auditContext: AuditCallContext | undefined;
+          let auditOutcome: "success" | "error" = "success";
+          let auditError: AuditErrorEnvelope | undefined;
+          // Workspace binding mutates the shared router, capture, telemetry
+          // delegate, and configuration. Keep the exclusive grant through the
+          // complete handler so a second workspace cannot rebind mid-call.
+          const mode: LockMode =
+            def.workspaceIndependent === true && def.annotations?.readOnlyHint === true
+              ? "shared"
+              : "exclusive";
           try {
             return await this.lock.run(mode, def.name, async () => {
               // Read the telemetry cursor after admission, not before: a call that
@@ -269,7 +431,19 @@ export class ToolRegistry {
               // by the calls it was queued behind.
               const sinceSeq = this.telemetry?.cursor ?? 0;
               const ranAt = Date.now();
-              let outcome = await def.handler(args ?? {});
+              admitted = true;
+              queueMs = ranAt - started;
+              await this.hooks.beforeInvoke?.(def, callArgs, requestContext);
+              auditContext = await this.hooks.contextProvider?.(callArgs, requestContext);
+              const invoke = (): Promise<ToolOutcome> => def.handler(callArgs);
+              const profileIndependent =
+                typeof def.profileIndependent === "function"
+                  ? def.profileIndependent(callArgs)
+                  : def.profileIndependent === true;
+              let outcome =
+                profileIndependent || this.sessionBound() || !this.profileLease
+                  ? await invoke()
+                  : await this.profileLease.run(def.name, invoke);
               if (
                 this.telemetry &&
                 def.annotations?.readOnlyHint !== true &&
@@ -282,16 +456,44 @@ export class ToolRegistry {
                 ms: Date.now() - ranAt,
                 queuedMs: ranAt - started,
               });
-              return normalize(outcome);
+              const result = normalize(outcome);
+              if (result.isError === true) {
+                auditOutcome = "error";
+                auditError = {
+                  type: "ToolResultError",
+                  code: "TOOL_ERROR",
+                  message: "The tool call failed.",
+                  retriable: false,
+                };
+              }
+              return result;
             });
           } catch (e) {
             const err = toUobError(e);
+            auditOutcome = "error";
+            auditError = errorEnvelope(err);
             this.logger.warn("tool failed", {
               tool: def.name,
               code: err.code,
               ms: Date.now() - started,
             });
             return errorResult(err);
+          } finally {
+            if (this.audit !== false) {
+              this.queueAudit(
+                toolAuditEvent({
+                  timestamp,
+                  requestId: callRequestId,
+                  tool: def.name,
+                  durationMs: Date.now() - started,
+                  queueMs: admitted ? queueMs : Date.now() - started,
+                  outcome: auditOutcome,
+                  args: callArgs,
+                  ...(auditContext ? { context: auditContext } : {}),
+                  ...(auditError ? { error: auditError } : {}),
+                }),
+              );
+            }
           }
         }) as never,
       );

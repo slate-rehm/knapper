@@ -5,7 +5,14 @@ description: Build, link, reload, and verify Obsidian plugins against a live des
 
 # Obsidian plugin development loop
 
-This skill assumes **knapper** is connected and Obsidian is running. If anything fails with connection errors, switch to the **obsidian-instance-setup** skill first (`obsidian_doctor` → remediation → `obsidian_launch`).
+Enable `core`, `workspace`, `telemetry`, and `plugin-dev` with
+`obsidian_toolsets_update`. To preview the update, first call it with `dryRun: true`.
+Then, repeat the call without `dryRun`. The workspace setup below returns a
+`workspaceHandle`. Pass this handle to each operational tool.
+
+For plugin work, create an isolated workspace with `pluginSourceDir` and
+`pluginId`. If `visualIdentity.state` is `degraded`, read `visualIdentity.warnings`
+array. This warning does not disable the private-session routing.
 
 ## Mental model
 
@@ -18,12 +25,13 @@ Obsidian plugin work is a tight loop:
 
 The composite tool `obsidian_dev_cycle` runs steps 3–4 in one call after you have built locally.
 
-## One-time vault setup
+## One-time workspace setup
 
-For a dedicated dev vault:
+For a dedicated development workspace:
 
-1. `obsidian_setup_vault` — creates or prepares a scratch vault with community plugins enabled and restrictions off (when you need that).
-2. `obsidian_link_plugin` — symlinks a loadable plugin directory into the vault.
+1. Call `obsidian_agent_open`.
+2. Call `obsidian_workspace_create` with the loadable plugin directory and ID.
+3. Check `obsidian_plugin_health` before you modify plugin state.
 
 ### `obsidian_link_plugin`
 
@@ -39,7 +47,7 @@ After linking, enable the plugin once in Obsidian if it is not already enabled (
 Call after every code change you want to validate:
 
 ```text
-obsidian_dev_cycle(pluginId="my-plugin", openPath="Notes/Smoke.md", waitMs=1500)
+obsidian_dev_cycle(workspaceHandle=<workspaceHandle>, pluginId="my-plugin", openPath="Notes/Smoke.md", waitMs=1500)
 ```
 
 What it does:
@@ -48,7 +56,11 @@ What it does:
 2. Reloads the plugin via CLI (`obsidian_plugin_reload` behavior).
 3. Optionally opens a note.
 4. Waits for the UI to settle.
-5. Captures a screenshot and returns **console output since the mark**, with errors attributed to your plugin when stack frames allow.
+5. Optionally saves a screenshot under the configured output root.
+6. Returns console output since the mark and attributes applicable errors to the plugin.
+
+Screenshot results contain `path`, `mimeType`, `size`, and `inline: false`. They do
+not contain inline base64 data.
 
 **Side effects:** reload wipes in-memory plugin state; treat this as intentional during dev.
 
@@ -103,13 +115,13 @@ window.myPluginProbe = async () => ({ settings: this.settings, widgetCount: this
 Run it through `obsidian_eval`:
 
 ```text
-obsidian_eval code=JSON.stringify(await window.myPluginProbe())
+obsidian_eval workspaceHandle=<workspaceHandle> code=JSON.stringify(await window.myPluginProbe())
 ```
 
 Keep the call on one line. The Playwright transport awaits the promise for you. Also mirror the result to the console as an overflow channel — a large payload then stays readable through `obsidian_logs`:
 
 ```text
-obsidian_eval code=(async () => { const r = await window.myPluginProbe(); console.log("probe:", JSON.stringify(r)); return JSON.stringify(r); })()
+obsidian_eval workspaceHandle=<workspaceHandle> code=(async () => { const r = await window.myPluginProbe(); console.log("probe:", JSON.stringify(r)); return JSON.stringify(r); })()
 ```
 
 For editor-rendering plugins, pair the probe with the editor toolset:
@@ -122,15 +134,20 @@ For editor-rendering plugins, pair the probe with the editor toolset:
 
 `obsidian_reset_state` disables the plugin, resets `data.json` to `{}`, re-enables, and returns the previous settings JSON so you can restore them. Destructive — use only on dev vaults.
 
+Do not call `obsidian_create_vault` for an isolated workspace. The tool refuses a
+session-bound request. Use the scratch vault from `obsidian_workspace_create`.
+
 ## Checklist for a new plugin repo
 
-1. `obsidian_doctor` — fix CLI/CDP/argv issues.
-2. `obsidian_launch` — cold start with `--remote-debugging-port`.
-3. `obsidian_setup_vault` or use an existing dev vault.
-4. `obsidian_link_plugin` from your loadable build directory.
-5. `obsidian_plugin_enable` if needed.
-6. Iterate: **build → `obsidian_dev_cycle`**.
-7. Use `obsidian_exercise_command` for command-centric features.
+1. `obsidian_agent_open` — create the attribution handle.
+2. `obsidian_workspace_create` — create scratch space and link the loadable build.
+3. `obsidian_plugin_health` — confirm present, enabled, and loaded state.
+4. `obsidian_plugin_enable` if needed.
+5. Iterate: **build → `obsidian_dev_cycle`**.
+6. Use `obsidian_exercise_command` for command-centric features.
+7. Call `obsidian_workspace_stop` after testing.
+8. Call `obsidian_workspace_destroy` to move the scratch root to recoverable trash.
+9. Close the agent handle.
 
 ## Related skills
 

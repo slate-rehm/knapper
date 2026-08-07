@@ -17,6 +17,7 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { wrapExpression } from "../../util/serialize.js";
+import { resolveDesktopEnvironment } from "../desktop-env.js";
 import {
   CLI_DISABLED_MARKER,
   VAULT_NOT_FOUND_MARKER,
@@ -49,6 +50,16 @@ export interface CliResult {
   stderr: string;
 }
 
+export interface CliDependencies {
+  execFile: typeof execFile;
+  desktopEnvironment(): Promise<NodeJS.ProcessEnv>;
+}
+
+const defaultCliDependencies: CliDependencies = {
+  execFile,
+  desktopEnvironment: async () => (await resolveDesktopEnvironment()).env,
+};
+
 /**
  * Environment for a spawned Obsidian process.
  *
@@ -68,8 +79,11 @@ export interface CliResult {
  * has a second, non-obvious effect that must be compensated for here — see
  * `waylandDisplayFor`.
  */
-export function childEnv(runtimeDir?: string): NodeJS.ProcessEnv {
-  const { ELECTRON_RUN_AS_NODE: _stripped, ...rest } = process.env;
+export function childEnv(
+  runtimeDir?: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const { ELECTRON_RUN_AS_NODE: _stripped, ...rest } = baseEnv;
   if (runtimeDir === undefined) return rest;
 
   const env: NodeJS.ProcessEnv = { ...rest, XDG_RUNTIME_DIR: runtimeDir };
@@ -161,8 +175,7 @@ export function cliValue(value: string): string {
  * Every multi-line eval failed this way.
  *
  * Base64 sidesteps the grammar: the payload becomes one line of `[A-Za-z0-9+/=]`
- * with nothing left for the escaper to touch. Single-line code is passed through
- * untouched so the common case stays readable in logs.
+ * with nothing left for the escaper to touch.
  *
  * The payload runs as a `new Function` body, not through `eval`, because this
  * tool's contract is "a bare expression, or a statement body with an explicit
@@ -171,9 +184,11 @@ export function cliValue(value: string): string {
  * The body still sees globals, which is where `app` lives.
  */
 export function encodeEvalSource(code: string): string {
-  if (!/[\n\r]/.test(code)) return code;
   const b64 = Buffer.from(wrapExpression(code), "utf8").toString("base64");
-  return `new Function(atob(${JSON.stringify(b64)}))()`;
+  // The CLI evaluator parses the supplied source as an ordinary script. Compile
+  // the caller body with AsyncFunction so top-level await behaves like the
+  // Playwright evaluator. Obsidian's CLI awaits the returned promise.
+  return `new (Object.getPrototypeOf(async function(){}).constructor)(new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(b64)}), (c) => c.charCodeAt(0))))()`;
 }
 
 export interface ClassifyCliOptions {
@@ -315,7 +330,15 @@ export function classifyEvalOutput(stdout: string, code: string): UobError | und
 }
 
 export class ObsidianCli {
-  constructor(private readonly opts: CliOptions) {}
+  private readonly dependencies: CliDependencies;
+  private desktopEnvironment?: Promise<NodeJS.ProcessEnv>;
+
+  constructor(
+    private readonly opts: CliOptions,
+    dependencies: Partial<CliDependencies> = {},
+  ) {
+    this.dependencies = { ...defaultCliDependencies, ...dependencies };
+  }
 
   get binary(): string {
     return this.opts.obsidianBin;
@@ -357,16 +380,25 @@ export class ObsidianCli {
     return stdout;
   }
 
-  private exec(args: string[], timeoutMs: number, label: string): Promise<CliResult> {
+  private async exec(args: string[], timeoutMs: number, label: string): Promise<CliResult> {
     const argv =
       this.opts.userDataDir !== undefined
         ? [`--user-data-dir=${this.opts.userDataDir}`, ...args]
         : args;
+    this.desktopEnvironment ??= this.dependencies.desktopEnvironment().catch((error: unknown) => {
+      this.desktopEnvironment = undefined;
+      throw error;
+    });
+    const desktopEnvironment = await this.desktopEnvironment;
     return new Promise((resolve, reject) => {
-      execFile(
+      this.dependencies.execFile(
         this.opts.obsidianBin,
         argv,
-        { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, env: childEnv(this.opts.runtimeDir) },
+        {
+          timeout: timeoutMs,
+          maxBuffer: 32 * 1024 * 1024,
+          env: childEnv(this.opts.runtimeDir, desktopEnvironment),
+        },
         (error, stdout, stderr) => {
           if (!error) {
             resolve({ stdout, stderr });

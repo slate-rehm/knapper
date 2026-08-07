@@ -1,13 +1,10 @@
 /**
  * The session descriptor: what a session *is*, on disk.
  *
- * This is the source of truth, and it is deliberately a separate file from a
- * vault's `.knapper-managed` marker. The two answer different questions and are
- * read on different paths: the descriptor answers "what is this session", the
- * marker answers "may I touch this vault". Folding session state into the marker
- * would put a heartbeat write on the file every fence decision consults, where a
- * torn write is a fence outage rather than a session outage. A session may also
- * own zero or several vaults, while the marker is per-vault.
+ * This is the source of truth for one private scratch session. It is separate from
+ * the external authorization registry for existing vaults. A descriptor answers
+ * "what is this session". The external registry answers "may I touch this existing
+ * vault". Knapper never derives either answer from a file inside a vault.
  *
  * Writes are tmp + rename so a concurrent reader never sees a half-written file.
  */
@@ -16,11 +13,17 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { sessionPaths, sessionsDir } from "../config.js";
 import { assertSessionKey } from "./key.js";
 
-export const SESSION_SCHEMA_VERSION = 2;
+export const SESSION_SCHEMA_VERSION = 4;
 
 export type SessionReadiness =
-  | { phase: "starting"; spawnedAt: string; requestedPort: number; lastProbeAt?: string }
+  | {
+      phase: "starting";
+      spawnedAt: string;
+      requestedPort: number;
+      lastProbeAt?: string;
+    }
   | { phase: "ready"; readyAt: string }
+  | { phase: "stopped"; stoppedAt: string }
   | { phase: "failed"; failedAt: string; reason: string };
 
 export interface SessionDescriptor {
@@ -33,8 +36,22 @@ export interface SessionDescriptor {
    */
   heartbeatAt: string;
   readiness: SessionReadiness;
-  /** Provenance for humans and `obsidian_list_sessions`. Never used for routing. */
+  /** Provenance for diagnostics. Never used for routing. */
   origin: { cwd: string; branch?: string; label?: string };
+  /** Explicit stateless-MCP attribution. The session key remains an internal id. */
+  agentHandle?: string;
+  /**
+   * Filesystem identity recorded at creation. Cleanup must match every field and
+   * the derived session path before it can quarantine the scratch directory.
+   */
+  ownership?: {
+    rootPath: string;
+    vaultPath: string;
+    rootDevice: number;
+    rootInode: number;
+    vaultDevice: number;
+    vaultInode: number;
+  };
   instance: {
     userDataDir: string;
     /** Undefined outside Linux, where per-session CLI routing is impossible. */
@@ -61,7 +78,12 @@ export interface SessionDescriptor {
    * The vault this session drives. Only ever a `created` grant: an adopted vault
    * belongs to the user and closing a session must not offer to delete it.
    */
-  vault?: { id: string; name: string; path: string; grant: "created" | "adopted" };
+  vault?: {
+    id: string;
+    name: string;
+    path: string;
+    grant: "created" | "adopted";
+  };
   plugin?: {
     id: string;
     sourceDir: string;
@@ -69,8 +91,15 @@ export interface SessionDescriptor {
     artifacts?: { manifest: true; main: true; styles: boolean };
     preEnabled?: boolean;
   };
-  /** The knapper process that provisioned this. Diagnostics only. */
-  owner?: { pid: number; startedAt: string; exitedAt?: string };
+  /** Visible private-profile boundary. Failures warn but do not destroy the workspace. */
+  visualIdentity?: { state: "ready" | "degraded"; warnings: string[] };
+  /** The connected knapper process that is actively bound to this session. */
+  owner?: {
+    pid: number;
+    pidStartTime?: number;
+    startedAt: string;
+    exitedAt?: string;
+  };
 }
 
 export function descriptorPath(key: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -102,9 +131,8 @@ export async function readDescriptor(
     ) {
       return undefined;
     }
-    // Version 1 descriptors only existed after CDP became reachable. Treat them
-    // as ready during the one-release compatibility window.
-    if (parsed.readiness === undefined && parsed.schema < SESSION_SCHEMA_VERSION) {
+    // Version 1 and 2 descriptors only existed after CDP became reachable.
+    if (parsed.readiness === undefined && parsed.schema < 3) {
       return {
         ...parsed,
         schema: SESSION_SCHEMA_VERSION,
@@ -112,7 +140,9 @@ export async function readDescriptor(
       };
     }
     if (parsed.readiness === undefined) return undefined;
-    return parsed;
+    return parsed.schema === SESSION_SCHEMA_VERSION
+      ? parsed
+      : { ...parsed, schema: SESSION_SCHEMA_VERSION };
   } catch {
     return undefined;
   }
@@ -156,7 +186,7 @@ export async function listDescriptors(
   const out: SessionDescriptor[] = [];
   for (const entry of entries) {
     // A directory that is not a well-formed key is not ours; skip rather than
-    // throw, so one piece of debris cannot break `obsidian_list_sessions`.
+    // throw, so one piece of debris cannot break workspace discovery.
     if (!/^[a-z0-9][a-z0-9-]{0,20}-[0-9a-f]{8}$/.test(entry)) continue;
     const descriptor = await readDescriptor(entry, env);
     if (descriptor !== undefined) out.push(descriptor);
@@ -178,9 +208,14 @@ export async function touchHeartbeat(
 ): Promise<void> {
   if (now.getTime() - lastHeartbeatAt < HEARTBEAT_DEBOUNCE_MS) return;
   lastHeartbeatAt = now.getTime();
-  await patchDescriptor(key, (d) => ({ ...d, heartbeatAt: now.toISOString() }), env).catch(
-    () => undefined,
-  );
+  await patchDescriptor(
+    key,
+    (d) =>
+      d.owner?.pid === process.pid && d.owner.exitedAt === undefined
+        ? { ...d, heartbeatAt: now.toISOString() }
+        : d,
+    env,
+  ).catch(() => undefined);
 }
 
 /** Remove only the descriptor, leaving the profile and vault in place. */
