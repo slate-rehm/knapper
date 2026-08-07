@@ -74,15 +74,28 @@ function isIncompleteLaunch(error: unknown): error is UobError {
   );
 }
 
-async function verifyRestartReadiness(
-  descriptor: SessionDescriptor,
+interface ReadinessContext {
+  key: string;
+  vaultId?: string;
+  plugin?: NonNullable<SessionDescriptor["plugin"]>;
+  identityFailure: string;
+  identityRemediation: string;
+  pluginFailure: (pluginId: string) => string;
+  pluginRemediation: string;
+  fixedBy: "obsidian_workspace_create" | "obsidian_workspace_restart";
+  degradedWarning: string;
+  onPluginUpdate?: (plugin: NonNullable<SessionDescriptor["plugin"]>) => void;
+}
+
+async function verifySessionReadiness(
   cdpUrl: string,
+  context: ReadinessContext,
   logger?: Logger,
 ): Promise<Pick<SessionDescriptor, "plugin" | "visualIdentity">> {
   const warnings: string[] = [];
   try {
-    if (descriptor.vault !== undefined) {
-      await trustDisposableVault(cdpUrl, descriptor.vault.id);
+    if (context.vaultId !== undefined) {
+      await trustDisposableVault(cdpUrl, context.vaultId);
     }
   } catch (error) {
     warnings.push(
@@ -92,7 +105,7 @@ async function verifyRestartReadiness(
 
   let probe;
   try {
-    probe = await verifyDisposableVaultReadiness(cdpUrl, descriptor.key, descriptor.plugin?.id);
+    probe = await verifyDisposableVaultReadiness(cdpUrl, context.key, context.plugin?.id);
     if (!probe.identityLoaded) warnings.push("Identity plugin is not loaded.");
     if (!probe.identityVisible) warnings.push("Session banner is not visible.");
     if (!probe.titleIdentified) warnings.push("Window title is not identified.");
@@ -111,31 +124,24 @@ async function verifyRestartReadiness(
     !probe.titleIdentified ||
     !probe.desktopIdentified
   ) {
-    throw new UobError(
-      "APP_UNAVAILABLE",
-      `Session ${descriptor.key} could not prove its private-profile visual identity after restart.`,
-      {
-        remediation: "Review the launch logs and desktop integration, then restart the workspace.",
-        fixedBy: "obsidian_workspace_restart",
-        details: { session: descriptor.key, readiness: probe ?? null, warnings },
-      },
-    );
+    throw new UobError("APP_UNAVAILABLE", context.identityFailure, {
+      remediation: context.identityRemediation,
+      fixedBy: context.fixedBy,
+      details: { session: context.key, readiness: probe ?? null, warnings },
+    });
   }
 
-  let plugin = descriptor.plugin;
+  let plugin = context.plugin;
   if (plugin !== undefined) {
     const requested = probe?.requestedPlugin;
     plugin = { ...plugin, preEnabled: requested?.enabled === true };
+    context.onPluginUpdate?.(plugin);
     if (requested?.exists !== true || requested.enabled !== true || requested.loaded !== true) {
-      throw new UobError(
-        "APP_UNAVAILABLE",
-        `Plugin "${plugin.id}" did not become installed, enabled, and loaded after restart.`,
-        {
-          remediation: "Review the plugin manifest and launch logs, then restart the workspace.",
-          fixedBy: "obsidian_workspace_restart",
-          details: { session: descriptor.key, pluginId: plugin.id, readiness: requested ?? null },
-        },
-      );
+      throw new UobError("APP_UNAVAILABLE", context.pluginFailure(plugin.id), {
+        remediation: context.pluginRemediation,
+        fixedBy: context.fixedBy,
+        details: { session: context.key, pluginId: plugin.id, readiness: requested ?? null },
+      });
     }
   }
 
@@ -144,12 +150,36 @@ async function verifyRestartReadiness(
     warnings,
   };
   if (warnings.length > 0) {
-    logger?.warn("private session visual identity is degraded after restart", {
-      session: descriptor.key,
+    logger?.warn(context.degradedWarning, {
+      session: context.key,
       warnings,
     });
   }
   return { ...(plugin !== undefined ? { plugin } : {}), visualIdentity };
+}
+
+async function verifyRestartReadiness(
+  descriptor: SessionDescriptor,
+  cdpUrl: string,
+  logger?: Logger,
+): Promise<Pick<SessionDescriptor, "plugin" | "visualIdentity">> {
+  return verifySessionReadiness(
+    cdpUrl,
+    {
+      key: descriptor.key,
+      ...(descriptor.vault !== undefined ? { vaultId: descriptor.vault.id } : {}),
+      ...(descriptor.plugin !== undefined ? { plugin: descriptor.plugin } : {}),
+      identityFailure: `Session ${descriptor.key} could not prove its private-profile visual identity after restart.`,
+      identityRemediation:
+        "Review the launch logs and desktop integration, then restart the workspace.",
+      pluginFailure: (pluginId) =>
+        `Plugin "${pluginId}" did not become installed, enabled, and loaded after restart.`,
+      pluginRemediation: "Review the plugin manifest and launch logs, then restart the workspace.",
+      fixedBy: "obsidian_workspace_restart",
+      degradedWarning: "private session visual identity is degraded after restart",
+    },
+    logger,
+  );
 }
 
 /** Process scope for a session, so callers cannot accidentally build a wider one. */
@@ -269,84 +299,32 @@ async function createSessionUnlocked(opts: CreateSessionOptions): Promise<Sessio
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.logger !== undefined ? { logger: opts.logger } : {}),
     });
-    const identityWarnings: string[] = [];
-    try {
-      await trustDisposableVault(launched.cdpUrl, seeded.vault.id);
-    } catch (error) {
-      identityWarnings.push(
-        `Could not grant plugin trust: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    let readinessProbe;
-    try {
-      readinessProbe = await verifyDisposableVaultReadiness(launched.cdpUrl, key, plugin?.id);
-      if (!readinessProbe.identityLoaded) identityWarnings.push("Identity plugin is not loaded.");
-      if (!readinessProbe.identityVisible) identityWarnings.push("Session banner is not visible.");
-      if (!readinessProbe.titleIdentified) identityWarnings.push("Window title is not identified.");
-      if (!readinessProbe.desktopIdentified)
-        identityWarnings.push("Desktop icon or application identity is degraded.");
-    } catch (error) {
-      identityWarnings.push(
-        `Could not verify visual identity: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
-    if (
-      readinessProbe === undefined ||
-      !readinessProbe.identityLoaded ||
-      !readinessProbe.identityVisible ||
-      !readinessProbe.titleIdentified ||
-      !readinessProbe.desktopIdentified
-    ) {
-      throw new UobError(
-        "APP_UNAVAILABLE",
-        `Session ${key} could not prove its private-profile visual identity.`,
-        {
-          remediation:
-            "Review the launch logs and desktop integration, then create a new workspace.",
-          fixedBy: "obsidian_workspace_create",
-          details: { session: key, readiness: readinessProbe ?? null, warnings: identityWarnings },
+    const verified = await verifySessionReadiness(
+      launched.cdpUrl,
+      {
+        key,
+        vaultId: seeded.vault.id,
+        ...(plugin !== undefined ? { plugin } : {}),
+        identityFailure: `Session ${key} could not prove its private-profile visual identity.`,
+        identityRemediation:
+          "Review the launch logs and desktop integration, then create a new workspace.",
+        pluginFailure: (pluginId) =>
+          `Plugin "${pluginId}" did not become installed, enabled, and loaded.`,
+        pluginRemediation:
+          "Review the plugin manifest and launch logs, then create a new workspace after fixing the plugin.",
+        fixedBy: "obsidian_workspace_create",
+        degradedWarning: "private session visual identity is degraded",
+        onPluginUpdate: (updated) => {
+          plugin = updated;
+          if (provisional !== undefined) provisional = { ...provisional, plugin: updated };
         },
-      );
-    }
-
-    if (plugin !== undefined) {
-      const requested = readinessProbe?.requestedPlugin;
-      plugin = { ...plugin, preEnabled: requested?.enabled === true };
-      provisional = { ...provisional, plugin };
-      if (requested?.exists !== true || requested.enabled !== true || requested.loaded !== true) {
-        throw new UobError(
-          "APP_UNAVAILABLE",
-          `Plugin "${plugin.id}" did not become installed, enabled, and loaded.`,
-          {
-            remediation:
-              "Review the plugin manifest and launch logs, then create a new workspace after fixing the plugin.",
-            fixedBy: "obsidian_workspace_create",
-            details: {
-              session: key,
-              pluginId: plugin.id,
-              readiness: requested ?? null,
-            },
-          },
-        );
-      }
-    }
-
-    const visualIdentity: SessionDescriptor["visualIdentity"] = {
-      state: identityWarnings.length === 0 ? "ready" : "degraded",
-      warnings: identityWarnings,
-    };
-    if (identityWarnings.length > 0) {
-      opts.logger?.warn("private session visual identity is degraded", {
-        session: key,
-        warnings: identityWarnings,
-      });
-    }
+      },
+      opts.logger,
+    );
 
     const descriptor: SessionDescriptor = {
       ...provisional,
-      visualIdentity,
+      ...verified,
       readiness: { phase: "ready", readyAt: new Date().toISOString() },
       instance: {
         ...provisional.instance,
