@@ -18,8 +18,11 @@ import {
   mkdirSync,
   openSync,
   readSync,
+  renameSync,
+  rmSync,
   writeSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 
 export type LogLevel = "debug" | "info" | "log" | "warn" | "error";
@@ -390,8 +393,8 @@ export class TelemetryStore {
       this.pendingFlush = undefined;
     }
     if (this.jsonlPath === undefined || this.pendingLines.length === 0) return;
+    const lines = this.pendingLines.splice(0);
     try {
-      const lines = this.pendingLines.splice(0);
       const content = lines.join("");
       const fd = this.openPersistence();
       writeSync(fd, content, undefined, "utf8");
@@ -409,6 +412,7 @@ export class TelemetryStore {
         this.replacePersistenceWithBuffer();
       }
     } catch {
+      this.pendingLines.unshift(...lines);
       this.writeErrorCount++;
     }
   }
@@ -444,22 +448,43 @@ export class TelemetryStore {
 
   private replacePersistence(content: string): void {
     if (this.jsonlPath === undefined) return;
+    const temporary = `${this.jsonlPath}.${process.pid}.${randomUUID()}.tmp`;
+    let fd: number | undefined;
+    let replaced = false;
     try {
       this.closePersistence();
       mkdirSync(dirname(this.jsonlPath), { recursive: true, mode: 0o700 });
-      const fd = openSync(this.jsonlPath, "w", 0o600);
+      fd = openSync(temporary, "wx", 0o600);
       try {
         writeSync(fd, content, undefined, "utf8");
         fsyncSync(fd);
       } finally {
         closeSync(fd);
+        fd = undefined;
       }
+      renameSync(temporary, this.jsonlPath);
+      replaced = true;
     } catch {
       this.writeErrorCount++;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          this.writeErrorCount++;
+        }
+      }
+      try {
+        rmSync(temporary, { force: true });
+      } catch {
+        this.writeErrorCount++;
+      }
     }
-    this.persistenceBytes = Buffer.byteLength(content);
-    this.recordsSinceSync = 0;
-    this.recordsSinceCompaction = 0;
+    if (replaced) {
+      this.persistenceBytes = Buffer.byteLength(content);
+      this.recordsSinceSync = 0;
+      this.recordsSinceCompaction = 0;
+    }
   }
 }
 

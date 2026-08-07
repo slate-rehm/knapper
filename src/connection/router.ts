@@ -316,17 +316,22 @@ export class CapabilityRouter {
     // a long, multiline IIFE in JSON.stringify makes its evaluator return
     // `(no output)` on current Obsidian releases, even though the same IIFE returns
     // the correct object by itself.
-    const { parseCliJson } = await import("../util/serialize.js");
     const stdout = await this.nativeCliCall(() => this.cli.evaluate(code, vault.name));
+    const cleaned = stdout.trim().replace(/^=>\s*/, "");
+    if (stdout.trim().startsWith("=>") && !/^[[{]/.test(cleaned)) {
+      if (cleaned === "" || cleaned === "(no output)") {
+        return { value: undefined as T, layer };
+      }
+      return { value: cleaned as T, layer };
+    }
+    const { parseCliJson } = await import("../util/serialize.js");
     const parsed = parseCliJson<T>(stdout);
     if (parsed === undefined) {
-      const cleaned = stdout.trim().replace(/^=>\s*/, "");
       if (cleaned === "" || cleaned === "(no output)") {
         return { value: undefined as T, layer };
       }
       // The CLI renders a returned string without JSON quotes. A JSON-oriented
       // caller can still legitimately request one, so preserve that scalar.
-      if (stdout.trim().startsWith("=>")) return { value: cleaned as T, layer };
       throw new UobError(
         "EVAL_FAILED",
         "Expected JSON from the Obsidian CLI but could not parse it.",

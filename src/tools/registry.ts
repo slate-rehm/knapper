@@ -36,26 +36,6 @@ import type {
   ToolRequestContext,
 } from "../audit/types.js";
 
-const AUDIT_WRITE_TIMEOUT_MS = 250;
-
-async function writeAuditWithTimeout(write: Promise<void>): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
-      write,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("The audit write timed out.")),
-          AUDIT_WRITE_TIMEOUT_MS,
-        );
-        timer.unref();
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
 /** What a tool handler may return; the registry normalizes it to MCP content. */
 export type ToolOutcome =
   | string
@@ -206,6 +186,7 @@ export class ToolRegistry {
   private readonly handles = new Map<string, RegisteredTool>();
   private readonly lock: CallLock;
   private readonly audit: AuditSink | false;
+  private auditWritePending = false;
 
   constructor(
     enabledToolsets: Set<Toolset>,
@@ -230,6 +211,23 @@ export class ToolRegistry {
   }
 
   private readonly enabledToolsets: Set<Toolset>;
+
+  /** Keep tool completion independent of audit storage and cap the pending queue at one event. */
+  private queueAudit(event: ReturnType<typeof toolAuditEvent>): void {
+    if (this.audit === false || this.auditWritePending) return;
+    this.auditWritePending = true;
+    void this.audit
+      .write(event)
+      .catch((auditFailure: unknown) => {
+        this.logger.warn("audit write failed", {
+          tool: event.tool,
+          error: auditFailure instanceof Error ? auditFailure.name : "UnknownAuditError",
+        });
+      })
+      .finally(() => {
+        this.auditWritePending = false;
+      });
+  }
 
   /** Retain every definition so its toolset can be enabled at runtime. */
   add<S extends ZodRawShape>(def: ToolDefinition<S>): void {
@@ -482,28 +480,19 @@ export class ToolRegistry {
             return errorResult(err);
           } finally {
             if (this.audit !== false) {
-              try {
-                await writeAuditWithTimeout(
-                  this.audit.write(
-                    toolAuditEvent({
-                      timestamp,
-                      requestId: callRequestId,
-                      tool: def.name,
-                      durationMs: Date.now() - started,
-                      queueMs: admitted ? queueMs : Date.now() - started,
-                      outcome: auditOutcome,
-                      args: callArgs,
-                      ...(auditContext ? { context: auditContext } : {}),
-                      ...(auditError ? { error: auditError } : {}),
-                    }),
-                  ),
-                );
-              } catch (auditFailure) {
-                this.logger.warn("audit write failed", {
+              this.queueAudit(
+                toolAuditEvent({
+                  timestamp,
+                  requestId: callRequestId,
                   tool: def.name,
-                  error: auditFailure instanceof Error ? auditFailure.name : "UnknownAuditError",
-                });
-              }
+                  durationMs: Date.now() - started,
+                  queueMs: admitted ? queueMs : Date.now() - started,
+                  outcome: auditOutcome,
+                  args: callArgs,
+                  ...(auditContext ? { context: auditContext } : {}),
+                  ...(auditError ? { error: auditError } : {}),
+                }),
+              );
             }
           }
         }) as never,

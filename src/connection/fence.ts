@@ -105,6 +105,8 @@ export class VaultFence {
       const expected = sessionPaths(this.opts.sessionKey, env).vaultDir;
       if (
         descriptor?.vault?.grant === "created" &&
+        typeof descriptor.vault.path === "string" &&
+        descriptor.vault.path !== "" &&
         ownership !== undefined &&
         key === resolvePath(expected) &&
         resolvePath(descriptor.vault.path) === key

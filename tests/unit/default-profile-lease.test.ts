@@ -103,7 +103,7 @@ describe("DefaultProfileLease", () => {
     await local.release();
   });
 
-  it("does not let a malformed expiry block the profile", async () => {
+  it("fails closed when the lease record is malformed", async () => {
     const path = defaultProfileLeasePath(env);
     await mkdir(root, { recursive: true });
     await writeFile(
@@ -121,7 +121,8 @@ describe("DefaultProfileLease", () => {
     );
     const lease = new DefaultProfileLease({ idleTimeoutMs: 30_000, env });
 
-    await expect(lease.run("obsidian_status", async () => "ok")).resolves.toBe("ok");
-    await lease.release();
+    await expect(lease.run("obsidian_status", async () => "ok")).rejects.toMatchObject({
+      code: "DEFAULT_PROFILE_BUSY",
+    });
   });
 });

@@ -242,6 +242,33 @@ describe("ToolRegistry runtime toolsets", () => {
     expect(JSON.stringify(events[0])).not.toContain("private");
   });
 
+  it("does not block tools or build an audit queue behind a stalled write", async () => {
+    const handles = new Map<string, RegisteredTool>();
+    const callbacks = new Map<string, ToolCallback>();
+    const write = vi.fn(() => new Promise<void>(() => undefined));
+    const registry = new ToolRegistry(
+      new Set(["core"]),
+      createLogger("error"),
+      2,
+      undefined,
+      undefined,
+      undefined,
+      { audit: { write } },
+    );
+    registry.add({
+      name: "stalled_audit_example",
+      toolset: "core",
+      description: "Stalled audit example.",
+      handler: async () => "ok",
+    });
+    registry.bind(fakeServer(handles, callbacks));
+
+    await callbacks.get("stalled_audit_example")?.({});
+    await callbacks.get("stalled_audit_example")?.({});
+
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
   it("emits a redacted error envelope and native error details", async () => {
     const handles = new Map<string, RegisteredTool>();
     const callbacks = new Map<string, ToolCallback>();
