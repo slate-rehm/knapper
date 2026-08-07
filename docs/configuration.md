@@ -144,9 +144,10 @@ They store it in the retained or quarantined root.
 HTTP serves `/mcp` with the MCP 2026 stateless request model. It does not issue an
 `Mcp-Session-Id`. Each request can select a durable workspace handle.
 
-The HTTP server has no authentication. It accepts only `127.0.0.1` or `::1` as the
-bind host. It rejects `localhost`, wildcard addresses, and LAN addresses. Do not
-place it behind a public proxy.
+The HTTP server has no authentication. The listener accepts only `127.0.0.1` or
+`::1` as the bind host. It rejects `localhost`, wildcard addresses, and LAN
+addresses. Requests can use `localhost`, `127.0.0.1`, or `[::1]` in their `Host`
+and `Origin` headers. Do not place the server behind a public proxy.
 
 ## Vault authorization
 

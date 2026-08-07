@@ -327,9 +327,10 @@ Clients do not need to parse the display text.
 
 The default `stdio` transport is what MCP clients use. `--transport http` serves
 MCP at `/mcp` (for example `http://127.0.0.1:9223/mcp`). Each request is stateless.
-The server accepts only the exact loopback hosts `127.0.0.1` and `::1`. It has no
-authentication and cannot bind to a wildcard, LAN address, or `localhost`. Details are in
-[docs/configuration.md](docs/configuration.md).
+The listener can bind only to `127.0.0.1` or `::1`. It cannot bind to a wildcard,
+LAN address, or the `localhost` name. Requests can use `localhost`, `127.0.0.1`,
+or `[::1]` in their `Host` and `Origin` headers. The server has no authentication.
+Details are in [docs/configuration.md](docs/configuration.md).
 
 Cursor plugin `variables` and Claude `userConfig` do not unify across hosts — use plain env vars in each MCP config.
 

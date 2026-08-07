@@ -34,8 +34,8 @@ authorized.
 Every path that reads or writes vault content resolves a target vault first. It refuses an
 unauthorized target. Knapper stores grants in
 `KNAP_HOME/vault-authorizations.json`, outside the vault. Each grant binds the canonical path,
-device, inode, and directory birth time. The registry uses locked atomic writes with mode
-`0600`.
+device, inode, directory birth time, and a random directory identity token. The registry uses
+locked atomic writes with mode `0600`.
 
 | Grant     | Written by                                                    | Knapper may       |
 | --------- | ------------------------------------------------------------- | ----------------- |
@@ -45,10 +45,11 @@ device, inode, and directory birth time. The registry uses locked atomic writes 
 Legacy `.knapper-managed` files are inert. They do not grant access or deletion rights.
 Knapper never uses a vault authorization as permission to delete the vault directory.
 
-No MCP tool can grant access. `knapper authorize` refuses without an interactive TTY and makes
-you retype the vault name, so it cannot be completed from inside an automation run — an agent
-can spawn the binary but cannot answer the prompt. Withdraw with `knapper revoke <path>`, which
-takes effect immediately, without restarting the server.
+No MCP tool can authorize an existing user vault. `obsidian_create_vault` authorizes only the
+new Knapper-owned vault that it creates. `knapper authorize` refuses without an interactive TTY
+and makes you retype the vault name, so it cannot be completed from inside an automation run —
+an agent can spawn the binary but cannot answer the prompt. Withdraw with
+`knapper revoke <path>`, which takes effect immediately, without restarting the server.
 
 ```
 knapper authorizations              # what knapper may touch
