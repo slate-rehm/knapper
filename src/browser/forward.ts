@@ -2,7 +2,7 @@
  * Convert proxied @playwright/mcp tool results into registry outcomes.
  */
 
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/server";
 import type { McpToolResult, ToolOutcome } from "../tools/registry.js";
 
 /** Preserve upstream MCP content (snapshot links, images, YAML) without re-wrapping. */
@@ -17,6 +17,9 @@ export function passthroughMcpResult(result: CallToolResult): ToolOutcome {
   });
 
   const mcp: McpToolResult = { content };
+  if (result.structuredContent !== undefined) {
+    mcp.structuredContent = result.structuredContent;
+  }
   if (result.isError) mcp.isError = true;
   return { mcp };
 }

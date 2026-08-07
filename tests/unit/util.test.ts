@@ -11,7 +11,7 @@ import {
 } from "../../src/util/errors.js";
 import { checkUserFlags } from "../../src/connection/vaults.js";
 import { isObsidianCmdline } from "../../src/connection/health.js";
-import { buildArgs, cliValue } from "../../src/connection/cli/exec.js";
+import { buildArgs, childEnv, cliValue } from "../../src/connection/cli/exec.js";
 import { writeFile, mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -36,11 +36,19 @@ describe("truncateText", () => {
 
 describe("truncateList", () => {
   it("reports the true total when capping", () => {
-    expect(truncateList([1, 2, 3, 4, 5], 2)).toEqual({ items: [1, 2], truncated: true, total: 5 });
+    expect(truncateList([1, 2, 3, 4, 5], 2)).toEqual({
+      items: [1, 2],
+      truncated: true,
+      total: 5,
+    });
   });
 
   it("leaves a short list alone", () => {
-    expect(truncateList([1], 5)).toEqual({ items: [1], truncated: false, total: 1 });
+    expect(truncateList([1], 5)).toEqual({
+      items: [1],
+      truncated: false,
+      total: 1,
+    });
   });
 });
 
@@ -72,6 +80,36 @@ describe("safeStringify", () => {
     const out = safeStringify({ err: new Error("boom") });
     expect(out).toContain("boom");
     expect(out).toContain("stack");
+  });
+
+  it("keeps outer cycle detection after expanding an Error holder", () => {
+    const root: Record<string, unknown> = { err: new Error("boom") };
+    root.self = root;
+
+    const parsed = JSON.parse(safeStringify(root)) as Record<string, unknown>;
+
+    expect(parsed.err).toMatchObject({ name: "Error", message: "boom" });
+    expect(parsed.self).toBe("[Circular]");
+  });
+
+  it("serializes repeated references that are not ancestor cycles", () => {
+    const shared = { value: 42 };
+    const parsed = JSON.parse(safeStringify({ first: shared, second: shared })) as {
+      first: unknown;
+      second: unknown;
+    };
+    expect(parsed.first).toEqual({ value: 42 });
+    expect(parsed.second).toEqual({ value: 42 });
+  });
+
+  it("marks only the edge that returns to an ancestor", () => {
+    const child: Record<string, unknown> = { value: 42 };
+    const root = { child, sibling: child };
+    child.parent = root;
+
+    const parsed = JSON.parse(safeStringify(root)) as Record<string, unknown>;
+    expect(parsed.child).toEqual({ value: 42, parent: "[Circular]" });
+    expect(parsed.sibling).toEqual({ value: 42, parent: "[Circular]" });
   });
 });
 
@@ -125,7 +163,28 @@ describe("wrapExpression", () => {
   });
 });
 
+describe("safeStringify undefined handling", () => {
+  it("uses normal JSON rules for nested undefined values", async () => {
+    const { safeStringify } = await import("../../src/util/serialize.js");
+    expect(JSON.parse(safeStringify({ omitted: undefined, items: [undefined] }))).toEqual({
+      items: [null],
+    });
+  });
+});
+
 describe("CLI argument grammar", () => {
+  it("keeps recovered Wayland access while it redirects the CLI socket", () => {
+    const env = childEnv("/tmp/private-runtime", {
+      ELECTRON_RUN_AS_NODE: "1",
+      XDG_RUNTIME_DIR: "/run/user/1000",
+      WAYLAND_DISPLAY: "wayland-1",
+    });
+
+    expect(env.ELECTRON_RUN_AS_NODE).toBeUndefined();
+    expect(env.XDG_RUNTIME_DIR).toBe("/tmp/private-runtime");
+    expect(env.WAYLAND_DISPLAY).toBe("/run/user/1000/wayland-1");
+  });
+
   it("puts vault= first, before the command name", () => {
     expect(buildArgs(["note:open", "path=A.md"], "my-vault")).toEqual([
       "vault=my-vault",

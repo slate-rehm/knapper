@@ -1,18 +1,15 @@
 #!/usr/bin/env node
 
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio, type StdioServerHandle } from "@modelcontextprotocol/server/stdio";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import {
-  loadSessionConfig,
-  DEFAULT_CDP_URL,
-  defaultObsidianBin,
-  TRANSPORT_KINDS,
-} from "./config.js";
+import { loadConfig, DEFAULT_CDP_URL, defaultObsidianBin, TRANSPORT_KINDS } from "./config.js";
 import { createServer } from "./server.js";
 import { startHttpTransport, type HttpTransportHandle } from "./transport/http.js";
 import { TOOLSETS, DEFAULT_TOOLSETS } from "./toolsets.js";
 import { LOG_LEVELS } from "./util/logger.js";
+import { fileURLToPath } from "node:url";
+import { openCodeMcpConfig } from "./config-output.js";
 
 /**
  * Subcommands, with the server as the default command.
@@ -55,53 +52,26 @@ const argv = await yargs(hideBin(process.argv))
     const { runListAuthorizations, terminalIo } = await import("./authorize.js");
     process.exit(await runListAuthorizations(terminalIo()));
   })
-  .command("sessions", "List knapper's isolated Obsidian sessions", {}, async () => {
-    const { listSessions } = await import("./session/registry.js");
-    const sessions = await listSessions();
-    if (sessions.length === 0) {
-      console.log("No knapper sessions.");
-      process.exit(0);
-    }
-    for (const s of sessions) {
-      const d = s.descriptor;
-      console.log(
-        `${d.key}  [${s.state}]\n` +
-          `  vault ${d.vault?.name ?? "(none)"} → ${d.vault?.path ?? ""}\n` +
-          `  ${d.instance.cdpUrl}  pid ${d.instance.pid ?? "?"}  cli ${s.cliIsolation}\n` +
-          `  from ${d.origin.cwd}`,
-      );
-    }
-    process.exit(0);
-  })
   .command(
-    "sessions:reap",
-    "Remove abandoned sessions (reports without deleting unless --yes)",
+    "config <host>",
+    "Print a host configuration that uses this exact Knapper installation",
     (y) =>
-      y
-        .option("yes", { type: "boolean", describe: "Actually delete, rather than just report" })
-        .option("force", {
-          type: "boolean",
-          describe: "Also remove sessions whose app died recently, not just long-abandoned ones",
-        }),
-    async (a) => {
-      const { reapStaleSessions } = await import("./session/reap.js");
-      // Dry run is the default output shape: this deletes vaults, and a human
-      // typing a bare verb should see the plan before it happens.
-      const report = await reapStaleSessions({
-        dryRun: a.yes !== true,
-        force: a.force === true,
-        deleteVaults: true,
-      });
-      if (report.candidates.length === 0) {
-        console.log("Nothing to reap.");
-      }
-      for (const c of report.candidates) {
-        console.log(`${report.dryRun ? "would reap" : "reaped"} ${c.key} — ${c.reason}`);
-      }
-      for (const k of report.kept) console.log(`kept ${k.key} — ${k.reason}`);
-      if (report.dryRun && report.candidates.length > 0) {
-        console.log("\nRe-run with --yes to delete these.");
-      }
+      y.positional("host", {
+        type: "string",
+        choices: ["opencode"],
+        describe: "Host configuration format",
+      }),
+    async () => {
+      process.stdout.write(
+        `${JSON.stringify(
+          openCodeMcpConfig({
+            nodePath: process.execPath,
+            entryPath: fileURLToPath(import.meta.url),
+          }),
+          null,
+          2,
+        )}\n`,
+      );
       process.exit(0);
     },
   )
@@ -118,13 +88,9 @@ const argv = await yargs(hideBin(process.argv))
     type: "string",
     describe: "Target a specific vault by name",
   })
-  .option("session", {
-    type: "string",
-    describe: "Bind to a knapper session (same as the KNAP_SESSION env var)",
-  })
   .option("toolsets", {
     type: "string",
-    describe: `Comma-separated toolsets to enable, or "all". Available: ${TOOLSETS.join(", ")} (default: ${DEFAULT_TOOLSETS.join(",")})`,
+    describe: `Comma-separated toolsets to enable, or "all". Available: ${TOOLSETS.join(", ")} (default: ${DEFAULT_TOOLSETS.join(",") || "none"})`,
   })
   .option("log-level", {
     type: "string",
@@ -156,6 +122,7 @@ const argv = await yargs(hideBin(process.argv))
   .example("$0 --vault 'My Vault'", "Pin all operations to one vault")
   .example("$0 authorize ~/vaults/scratch", "Let knapper touch that vault")
   .example("$0 authorizations", "Show which vaults knapper may touch")
+  .example("$0 config opencode", "Print an OpenCode MCP configuration")
   .help()
   .version(false)
   .parseAsync();
@@ -163,11 +130,10 @@ const argv = await yargs(hideBin(process.argv))
 // A subcommand handler calls process.exit, so reaching here means the default
 // command: start the server.
 
-const config = await loadSessionConfig({
+const config = loadConfig({
   ...(argv["cdp-url"] !== undefined ? { cdpUrl: argv["cdp-url"] } : {}),
   ...(argv["obsidian-bin"] !== undefined ? { obsidianBin: argv["obsidian-bin"] } : {}),
   ...(argv.vault !== undefined ? { vault: argv.vault } : {}),
-  ...(argv.session !== undefined ? { sessionId: argv.session } : {}),
   ...(argv.toolsets !== undefined ? { toolsets: argv.toolsets } : {}),
   ...(argv["log-level"] !== undefined ? { logLevel: argv["log-level"] } : {}),
   ...(argv["output-dir"] !== undefined ? { outputDir: argv["output-dir"] } : {}),
@@ -177,9 +143,10 @@ const config = await loadSessionConfig({
   ...(argv.host !== undefined ? { httpHost: argv.host } : {}),
 });
 
-const { server, ctx } = await createServer(config);
+const { factory, ctx } = await createServer(config);
 
 let httpHandle: HttpTransportHandle | undefined;
+let stdioHandle: StdioServerHandle | undefined;
 
 let shuttingDown = false;
 const shutdown = async (reason: string): Promise<void> => {
@@ -191,16 +158,23 @@ const shutdown = async (reason: string): Promise<void> => {
   // reaper collects it later if nobody comes back for it.
   if (config.sessionId !== undefined) {
     const { patchDescriptor } = await import("./session/descriptor.js");
-    await patchDescriptor(config.sessionId, (d) => ({
-      ...d,
-      ...(d.owner !== undefined
-        ? { owner: { ...d.owner, exitedAt: new Date().toISOString() } }
-        : {}),
-    })).catch(() => undefined);
+    await patchDescriptor(config.sessionId, (d) =>
+      d.owner?.pid === process.pid
+        ? {
+            ...d,
+            heartbeatAt: new Date().toISOString(),
+            owner: { ...d.owner, exitedAt: new Date().toISOString() },
+          }
+        : d,
+    ).catch(() => undefined);
   }
   await httpHandle?.close().catch(() => undefined);
+  await stdioHandle?.close().catch(() => undefined);
+  ctx.stopJanitor();
   await ctx.browserProxy.close().catch(() => undefined);
   await ctx.router.dispose().catch(() => undefined);
+  await ctx.workspaceLeases.releaseAll().catch(() => undefined);
+  await ctx.profileLease.release().catch(() => undefined);
   process.exit(0);
 };
 
@@ -211,7 +185,11 @@ if (config.transport === "http") {
   // Deliberately no stdin hooks here: under http the client is not on the other end of
   // this process's stdin, and a detached or redirected stdin closing must not take a
   // server with live sessions down with it.
-  httpHandle = await startHttpTransport({ server, config, logger: ctx.logger });
+  httpHandle = await startHttpTransport({
+    factory,
+    config,
+    logger: ctx.logger,
+  });
   ctx.logger.info(`knapper listening on ${httpHandle.url}`, {
     toolsets: [...config.enabledToolsets],
     cdpUrl: config.cdpUrl,
@@ -222,9 +200,10 @@ if (config.transport === "http") {
   process.stdin.on("close", () => void shutdown("stdin closed"));
   process.stdin.on("end", () => void shutdown("stdin ended"));
 
-  const transport = new StdioServerTransport();
-  transport.onclose = () => void shutdown("transport closed");
-  await server.connect(transport);
+  stdioHandle = serveStdio(factory, {
+    legacy: "serve",
+    onerror: (error) => ctx.logger.error("stdio transport failed", { error: error.message }),
+  });
   ctx.logger.info("knapper ready", {
     toolsets: [...config.enabledToolsets],
     cdpUrl: config.cdpUrl,

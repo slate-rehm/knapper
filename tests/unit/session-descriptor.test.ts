@@ -80,7 +80,7 @@ describe("assertSessionKey", () => {
   ])("rejects %s (%s)", (bad) => {
     // Rejection rather than sanitization: a key that does not match is a bug or an
     // attack, and quietly repairing it would hide both.
-    expect(() => assertSessionKey(bad)).toThrow(/not a valid knapper session key/);
+    expect(() => assertSessionKey(bad)).toThrow(/not a valid internal workspace descriptor key/);
   });
 
   it("refuses a traversal key before it reaches the filesystem", async () => {
@@ -133,6 +133,15 @@ describe("mintSessionKey", () => {
 });
 
 describe("descriptor round-trip", () => {
+  it("upgrades a schema 3 descriptor for schema 4 compatibility", async () => {
+    const current = descriptor(mintSessionKey("legacy", env));
+    await writeDescriptor({ ...current, schema: 3 }, env);
+    expect(await readDescriptor(current.key, env)).toMatchObject({
+      schema: 4,
+      readiness: current.readiness,
+    });
+  });
+
   it("writes and reads back", async () => {
     const d = descriptor(mintSessionKey("demo", env));
     await writeDescriptor(d, env);

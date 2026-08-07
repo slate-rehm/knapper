@@ -10,9 +10,7 @@
  * Every mutation it makes is namespaced under E2E_DIR and removed on exit, so a
  * completed run leaves the scratch vault exactly as it found it.
  *
- * Prerequisites: Obsidian launched with --remote-debugging-port=9222, the CLI
- * toggle enabled, and the uob-test-vault scratch vault present.
- * The suite authorizes that vault for knapper itself (see authorize-test-vault.mjs).
+ * The suite launches a private Obsidian profile with a temporary CDP port.
  *
  *   node scripts/e2e.mjs           # full run
  *   VERBOSE=1 node scripts/e2e.mjs # stream server stderr
@@ -20,18 +18,40 @@
  */
 
 import { spawn } from "node:child_process";
-import { authorizeTestVault } from "./authorize-test-vault.mjs";
+import {
+  createDisposableWorkspace,
+  createLiveHome,
+  findFreePort,
+  removeLiveHome,
+} from "./lib/live-harness.mjs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { readFile, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const VAULT = "uob-test-vault";
-const VAULT_DIR = join(process.env.HOME, "Documents", "obsidian", VAULT);
-const PLUGIN = "uob-scratch";
+let VAULT;
+let VAULT_DIR;
+const PLUGIN = process.env.PLUGIN_ID;
 /** All notes this suite writes live here so cleanup is a single recursive delete. */
 const E2E_DIR = "E2E";
+const CONTROL_TOOLS = new Set([
+  "obsidian_agent_open",
+  "obsidian_agent_status",
+  "obsidian_agent_close",
+  "obsidian_workspace_create",
+  "obsidian_workspace_claim_default",
+  "obsidian_workspace_list",
+  "obsidian_workspace_status",
+  "obsidian_workspace_stop",
+  "obsidian_workspace_restart",
+  "obsidian_workspace_release",
+  "obsidian_workspace_destroy",
+  "obsidian_toolsets",
+  "obsidian_tool_catalog",
+]);
+let defaultAgentHandle;
+let defaultWorkspaceHandle;
 
 const onlyArg = process.argv.indexOf("--only");
 const ONLY = onlyArg === -1 ? undefined : process.argv[onlyArg + 1];
@@ -45,9 +65,10 @@ class McpClient {
   #nextId = 1;
   exited = false;
 
-  constructor(args = []) {
+  constructor(args = [], env = process.env) {
     this.#child = spawn("node", [join(root, "dist", "cli.js"), ...args], {
       stdio: ["pipe", "pipe", "pipe"],
+      env,
     });
     this.#child.stdout.on("data", (chunk) => this.#onData(chunk));
     this.#child.stderr.on("data", (chunk) => {
@@ -114,7 +135,11 @@ class McpClient {
   }
 
   async call(name, args = {}) {
-    const res = await this.send("tools/call", { name, arguments: args });
+    const input =
+      defaultWorkspaceHandle !== undefined && !CONTROL_TOOLS.has(name)
+        ? { ...args, workspaceHandle: defaultWorkspaceHandle }
+        : args;
+    const res = await this.send("tools/call", { name, arguments: input });
     if (res.error) throw new Error(`${name}: ${res.error.message}`);
     const content = res.result?.content ?? [];
     const text = content
@@ -124,6 +149,7 @@ class McpClient {
     return {
       text,
       images: content.filter((c) => c.type === "image"),
+      json: res.result?.structuredContent,
       isError: res.result?.isError === true,
     };
   }
@@ -216,41 +242,36 @@ async function waitFor(predicate, { timeoutMs = 8000, intervalMs = 200, what = "
   throw new Error(`timed out waiting for ${what}`);
 }
 
-async function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-    srv.on("error", reject);
-  });
-}
-
 // ------------------------------------------------------------------ preflight
 
-console.log(`scratch vault: ${await authorizeTestVault()}`);
 console.log("\n\x1b[1m=== Unified Obsidian MCP — comprehensive E2E ===\x1b[0m");
-
-const cdpUp = await fetch("http://127.0.0.1:9222/json/version")
-  .then((r) => r.ok)
-  .catch(() => false);
-if (!cdpUp) {
-  console.error(
-    "\nCDP is not reachable on 127.0.0.1:9222.\n" +
-      "Launch Obsidian first:  obsidian --remote-debugging-port=9222\n",
-  );
-  process.exit(2);
-}
-
-const client = new McpClient(["--toolsets", "all", "--vault", VAULT]);
+const liveHome = await createLiveHome("knapper-e2e-");
+const client = new McpClient(["--toolsets", "all"], liveHome.env);
 const init = await client.initialize();
+const isolated = await createDisposableWorkspace(client, root, {
+  home: liveHome.home,
+  agentLabel: "e2e",
+  label: "e2e-scratch",
+  ...(process.env.PLUGIN_SOURCE_DIR ? { pluginSourceDir: process.env.PLUGIN_SOURCE_DIR } : {}),
+  ...(process.env.PLUGIN_ID ? { pluginId: process.env.PLUGIN_ID } : {}),
+});
+defaultAgentHandle = isolated.agentHandle;
+defaultWorkspaceHandle = isolated.workspaceHandle;
+VAULT = isolated.session.vault?.name;
+VAULT_DIR = isolated.vaultPath;
+assert(typeof VAULT === "string", "isolated workspace has no vault identity");
 console.log(
   `server: ${init.result.serverInfo.name} v${init.result.serverInfo.version}  vault: ${VAULT}`,
 );
 
 // Start from a clean slate in case a previous run died mid-way.
 await rm(join(VAULT_DIR, E2E_DIR), { recursive: true, force: true });
+for (const [path, content] of [
+  ["Notes/Alpha.md", "# Alpha\n\nxylophone-marmalade #e2e\n\nSee [[Notes/Beta]].\n"],
+  ["Notes/Beta.md", "# Beta\n\n- [ ] An open task\n\nLinked from [[Notes/Alpha]].\n"],
+]) {
+  await client.ok("obsidian_create", { path, content, overwrite: true });
+}
 
 const listed = await client.send("tools/list");
 const tools = listed.result.tools;
@@ -305,7 +326,7 @@ if (suite("Tool surface & schema integrity")) {
     assert(leaked.length === 0, `exposed: ${leaked.join(", ")}`);
   });
 
-  await check("read-only tools are annotated as such", () => {
+  await check("read-only and filesystem-writing tools are annotated accurately", () => {
     // readOnlyHint is not decoration: the registry gives these a shared lock and
     // everything else an exclusive one, so a missing hint silently serializes.
     const shouldBeReadOnly = [
@@ -316,14 +337,20 @@ if (suite("Tool surface & schema integrity")) {
       "obsidian_snapshot",
       "obsidian_editor_state",
       "obsidian_editor_widgets",
-      "obsidian_element_screenshot",
       "browser_snapshot",
-      "browser_take_screenshot",
     ];
     const bad = shouldBeReadOnly.filter(
       (n) => tools.find((t) => t.name === n)?.annotations?.readOnlyHint !== true,
     );
     assert(bad.length === 0, `missing readOnlyHint: ${bad.join(", ")}`);
+    const filesystemWrites = ["obsidian_element_screenshot", "browser_take_screenshot"];
+    const mislabeled = filesystemWrites.filter(
+      (name) => tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint !== false,
+    );
+    assert(
+      mislabeled.length === 0,
+      `filesystem writes labeled read-only: ${mislabeled.join(", ")}`,
+    );
   });
 
   await check("destructive tools carry a destructive annotation", () => {
@@ -335,7 +362,6 @@ if (suite("Tool surface & schema integrity")) {
       "obsidian_rename",
       "obsidian_eval",
       "obsidian_cdp",
-      "browser_evaluate",
       "obsidian_link_plugin",
       "obsidian_reset_state",
       "obsidian_property_set",
@@ -350,7 +376,7 @@ if (suite("Tool surface & schema integrity")) {
   });
 
   await check("arbitrary-code tools are flagged open-world", () => {
-    const openWorld = ["obsidian_eval", "obsidian_cdp", "browser_evaluate"];
+    const openWorld = ["obsidian_eval", "obsidian_cdp"];
     const bad = openWorld.filter(
       (n) => tools.find((t) => t.name === n)?.annotations?.openWorldHint !== true,
     );
@@ -370,21 +396,13 @@ if (suite("Tool surface & schema integrity")) {
     }
   });
 
-  await check("runtime toolsets update tools/list and remain recoverable", async () => {
-    try {
-      await client.ok("obsidian_toolsets", { action: "disable", toolset: "editor" });
-      const disabled = await client.send("tools/list");
-      const disabledNames = new Set(disabled.result.tools.map((tool) => tool.name));
-      assert(!disabledNames.has("obsidian_editor_state"), "editor tool stayed listed");
-      assert(disabledNames.has("obsidian_toolsets"), "control tool disabled itself");
-    } finally {
-      await client.ok("obsidian_toolsets", { action: "enable", toolset: "editor" });
-    }
-    const enabled = await client.send("tools/list");
-    assert(
-      enabled.result.tools.some((tool) => tool.name === "obsidian_editor_state"),
-      "editor tool did not return",
-    );
+  await check("toolset inspection does not mutate the runtime surface", async () => {
+    const before = await client.send("tools/list");
+    const beforeSurface = JSON.stringify(before.result.tools);
+    const report = await client.ok("obsidian_toolsets");
+    const after = await client.send("tools/list");
+    assert(Array.isArray(report.json?.enabled), "toolset report omitted the enabled set");
+    assert(beforeSurface === JSON.stringify(after.result.tools), "tools/list changed at runtime");
   });
 }
 
@@ -392,11 +410,10 @@ if (suite("Tool surface & schema integrity")) {
 
 if (suite("Preconditions & health")) {
   await check("obsidian_doctor reports a healthy instance", async () => {
-    const { text, isError } = await client.call("obsidian_doctor");
+    const { json, isError } = await client.call("obsidian_doctor");
     assert(!isError, "doctor returned an error");
-    const corruption = /"argvCorruption":\s*(null|\{)/.exec(text);
-    assert(corruption, "no argvCorruption verdict");
-    assert(corruption[1] === "null", "argv corruption detected in user-flags.conf");
+    assert(json && "argvCorruption" in json, "no argvCorruption verdict");
+    assert(json.argvCorruption === null, "argv corruption detected in user-flags.conf");
   });
 
   await check("obsidian_status shows both transports live", async () => {
@@ -441,11 +458,12 @@ if (suite("Plan §11 acceptance demo (the documented agent workflow)")) {
       .slice(0, 40);
   });
 
-  await check("3. screenshot returns real image data", async () => {
-    const { images } = await client.ok("browser_take_screenshot");
-    assert(images.length > 0, "no image content");
-    assert(images[0].data && images[0].data.length > 1000, "image suspiciously small");
-    return `${images[0].mimeType}, ${Math.round(images[0].data.length / 1024)}KB`;
+  await check("3. screenshot returns a file artifact", async () => {
+    const { images, json } = await client.ok("browser_take_screenshot");
+    assert(images.length === 0, "screenshot must not return inline image content");
+    assert(Number(json?.size) > 1000, "image artifact is suspiciously small");
+    await stat(json.path);
+    return `${json.mimeType}, ${Math.round(json.size / 1024)}KB`;
   });
 
   await check("4. real keyboard input opens the command palette", async () => {
@@ -469,15 +487,22 @@ if (suite("Plan §11 acceptance demo (the documented agent workflow)")) {
     await client.ok("obsidian_command", { id: "app:go-back" });
   });
 
-  await check("6. reload a plugin", async () => {
-    await client.ok("obsidian_plugin_reload", { id: PLUGIN });
-    const { text } = await client.ok("obsidian_plugin_health", { pluginId: PLUGIN });
-    assert(/enabled|loaded/i.test(text), `plugin not healthy after reload: ${text.slice(0, 150)}`);
-  });
+  if (PLUGIN !== undefined) {
+    await check("6. reload a plugin", async () => {
+      await client.ok("obsidian_plugin_reload", { id: PLUGIN });
+      const { text } = await client.ok("obsidian_plugin_health", { pluginId: PLUGIN });
+      assert(
+        /enabled|loaded/i.test(text),
+        `plugin not healthy after reload: ${text.slice(0, 150)}`,
+      );
+    });
+  } else {
+    await check("6. reload a plugin", () => SKIP);
+  }
 
   await check("7. console is readable and clean of our own errors", async () => {
-    const { text } = await client.ok("obsidian_logs", { limit: 20 });
-    assert(/"cursor"/.test(text), "no cursor returned");
+    const { json } = await client.ok("obsidian_logs", { limit: 20 });
+    assert(Number.isFinite(json?.cursor), "no cursor returned");
   });
 
   await check("8. accessibility tree contains expected Obsidian labels", async () => {
@@ -717,22 +742,22 @@ if (suite("UI automation over CDP")) {
 if (suite("Editor toolset")) {
   const note = `${E2E_DIR}/editor.md`;
 
-  await check("editor tools ship in the default toolsets", async () => {
-    // No --toolsets flag: this asserts the editor toolset is default-ON.
-    const dflt = new McpClient(["--vault", VAULT]);
+  await check("the default surface stays slim", async () => {
+    const dflt = new McpClient([], liveHome.env);
     try {
       await dflt.initialize();
       const res = await dflt.send("tools/list");
       const have = new Set(res.result.tools.map((t) => t.name));
-      const wanted = [
-        "obsidian_editor_state",
-        "obsidian_editor_set",
-        "obsidian_editor_replace",
-        "obsidian_editor_widgets",
-        "obsidian_element_screenshot",
-      ];
-      const missing = wanted.filter((n) => !have.has(n));
+      const wanted = ["obsidian_status", "obsidian_workspace_create", "obsidian_toolsets_update"];
+      const missing = wanted.filter((name) => !have.has(name));
+      const leaked = ["obsidian_editor_state", "obsidian_create", "browser_snapshot"].filter(
+        (name) => have.has(name),
+      );
       assert(missing.length === 0, `missing from default surface: ${missing.join(", ")}`);
+      assert(
+        leaked.length === 0,
+        `optional tools leaked into default surface: ${leaked.join(", ")}`,
+      );
     } finally {
       dflt.close();
     }
@@ -745,35 +770,38 @@ if (suite("Editor toolset")) {
       overwrite: true,
     });
     await client.ok("obsidian_open", { path: note });
-    const { text } = await waitFor(
+    const state = await waitFor(
       async () => {
         const r = await client.ok("obsidian_editor_state", {});
         return /editor\.md/.test(r.text) ? r : false;
       },
       { what: "the note to become the active editor" },
     );
-    assert(/"docHash":\s*"fnv1a-/.test(text), `no docHash: ${text.slice(0, 200)}`);
     assert(
-      /"mode":\s*"(source|live-preview)"/.test(text),
-      `unexpected mode: ${text.slice(0, 200)}`,
+      (state.json?.docHash ?? "").startsWith("fnv1a-"),
+      `no docHash: ${state.text.slice(0, 200)}`,
     );
-    assert(/"docSlice"/.test(text), "no docSlice window");
+    assert(
+      ["source", "live-preview"].includes(state.json?.mode),
+      `unexpected mode: ${state.text.slice(0, 200)}`,
+    );
+    assert(Array.isArray(state.json?.docSlice?.lines), "no docSlice window");
   });
 
   await check("editor_set moves the cursor and reports back", async () => {
     await client.ok("obsidian_editor_set", { cursor: { line: 3, ch: 0 }, scrollIntoView: true });
-    const { text } = await client.ok("obsidian_editor_state", { windowLines: 4 });
-    assert(/"line":\s*3/.test(text), `cursor did not move: ${text.slice(0, 200)}`);
+    const { text, json } = await client.ok("obsidian_editor_state", { windowLines: 4 });
+    assert(json?.cursor?.line === 3, `cursor did not move: ${text.slice(0, 200)}`);
   });
 
   await check("editor_replace refuses a stale hash with a typed remediation", async () => {
-    const { text, isError } = await client.call("obsidian_editor_replace", {
+    const { text, json, isError } = await client.call("obsidian_editor_replace", {
       mode: "setValue",
       text: "clobbered",
       expectedDocHash: "fnv1a-00000000-0",
     });
     assert(isError, "a stale hash was accepted");
-    assert(/STALE_REF/.test(text), `wrong error code: ${text.slice(0, 200)}`);
+    assert(json?.code === "STALE_REF", `wrong error code: ${text.slice(0, 200)}`);
     assert(/obsidian_editor_state/.test(text), "remediation does not name the fixing tool");
     // The refusal must not have edited anything.
     const after = await client.ok("obsidian_editor_state", {});
@@ -782,7 +810,7 @@ if (suite("Editor toolset")) {
 
   await check("editor_replace applies with the current hash", async () => {
     const state = await client.ok("obsidian_editor_state", {});
-    const hash = /"docHash":\s*"([^"]+)"/.exec(state.text)?.[1];
+    const hash = state.json?.docHash;
     assert(hash, "no hash to authorize the edit");
     await client.ok("obsidian_editor_replace", {
       mode: "replaceRange",
@@ -791,24 +819,30 @@ if (suite("Editor toolset")) {
       expectedDocHash: hash,
     });
     const after = await client.ok("obsidian_editor_state", {});
-    assert(/delta-marker/.test(after.text), "the inserted text is not visible");
-    const newHash = /"docHash":\s*"([^"]+)"/.exec(after.text)?.[1];
+    assert(
+      after.json?.docSlice?.lines?.some((line) => line.includes("delta-marker")),
+      "the inserted text is not visible",
+    );
+    const newHash = after.json?.docHash;
     assert(newHash && newHash !== hash, "the doc hash did not change after an edit");
   });
 
   await check("editor_widgets answers with a bounded list", async () => {
-    const { text, isError } = await client.call("obsidian_editor_widgets", {});
+    const { text, json, isError } = await client.call("obsidian_editor_widgets", {});
     assert(!isError, `widgets errored: ${text.slice(0, 200)}`);
-    assert(/"returned":/.test(text), "no returned count");
-    assert(/"total":/.test(text), "no total count");
+    assert(Number.isFinite(json?.returned), "no returned count");
+    assert(Number.isFinite(json?.total), "no total count");
   });
 
   await check("editor_widgets accepts an arbitrary selector", async () => {
-    const { text, isError } = await client.call("obsidian_editor_widgets", {
+    const { text, json, isError } = await client.call("obsidian_editor_widgets", {
       selector: ".cm-line",
     });
     assert(!isError, `custom selector errored: ${text.slice(0, 200)}`);
-    assert(/"cssPath"/.test(text), "matches carry no cssPath");
+    assert(
+      json?.widgets?.every((widget) => typeof widget.cssPath === "string"),
+      "matches carry no cssPath",
+    );
   });
 
   await check("snapshot scope=editor targets the active editor", async () => {
@@ -817,15 +851,16 @@ if (suite("Editor toolset")) {
     assert(/\.cm-editor|markdown-reading-view/.test(text), "selector not reported");
   });
 
-  await check("element screenshot returns an image plus a metrics block", async () => {
-    const { text, images, isError } = await client.call("obsidian_element_screenshot", {
+  await check("element screenshot returns an artifact plus a metrics block", async () => {
+    const { text, images, json, isError } = await client.call("obsidian_element_screenshot", {
       target: ".workspace-leaf.mod-active .cm-editor",
     });
     assert(!isError, `element screenshot errored: ${text.slice(0, 200)}`);
-    assert(images.length > 0, "no image content");
-    assert(images[0].data.length > 1000, "image suspiciously small");
+    assert(images.length === 0, "element screenshot must not return inline image content");
+    assert(Number(json?.file?.size) > 1000, "image artifact is suspiciously small");
+    await stat(json.file.path);
     assert(/devicePixelRatio/.test(text), "no metrics block");
-    assert(/"rect"/.test(text), "no rect in metrics");
+    assert(json?.rect && Number.isFinite(json.rect.width), "no rect in metrics");
   });
 
   await check("element screenshot rejects a missing selector actionably", async () => {
@@ -848,7 +883,7 @@ if (suite("Telemetry")) {
   await check("console output is captured", async () => {
     const marker = `e2e-console-${Date.now()}`;
     const before = await client.ok("obsidian_logs", { limit: 1 });
-    const cursor = Number(/"cursor":\s*(\d+)/.exec(before.text)?.[1] ?? 0);
+    const cursor = Number(before.json?.cursor ?? 0);
     await client.ok("obsidian_eval", { code: `(console.log(${JSON.stringify(marker)}), 1)` });
     const found = await waitFor(
       async () => {
@@ -862,11 +897,11 @@ if (suite("Telemetry")) {
 
   await check("cursor tailing returns only new records, not a full replay", async () => {
     const before = await client.ok("obsidian_logs", { limit: 1 });
-    const cursor = Number(/"cursor":\s*(\d+)/.exec(before.text)?.[1] ?? 0);
+    const cursor = Number(before.json?.cursor ?? 0);
     await client.ok("obsidian_eval", { code: '(console.log("e2e-probe"), 1)' });
     await sleep(1200);
     const after = await client.ok("obsidian_logs", { since: cursor });
-    const matched = Number(/"matched":\s*(\d+)/.exec(after.text)?.[1] ?? -1);
+    const matched = Number(after.json?.matched ?? -1);
     assert(matched >= 0, "no matched count");
     assert(matched < 50, `looks like a full replay: ${matched} records`);
     return `${matched} new`;
@@ -895,7 +930,7 @@ if (suite("Telemetry")) {
 
   await check("a thrown page error is captured with its stack", async () => {
     const before = await client.ok("obsidian_logs", { limit: 1 });
-    const cursor = Number(/"cursor":\s*(\d+)/.exec(before.text)?.[1] ?? 0);
+    const cursor = Number(before.json?.cursor ?? 0);
     await client.call("obsidian_eval", {
       code: 'setTimeout(() => { throw new Error("e2e-async-boom"); }, 0)',
     });
@@ -912,8 +947,12 @@ if (suite("Telemetry")) {
 
 // ------------------------------------------------------------ suite: dev cycle
 
-if (suite("Plugin dev cycle")) {
-  await check("plugin_list sees the scratch plugin", async () => {
+if (
+  PLUGIN !== undefined &&
+  process.env.PLUGIN_SOURCE_DIR !== undefined &&
+  suite("Plugin dev cycle")
+) {
+  await check("plugin_list sees the test plugin", async () => {
     const { text } = await client.ok("obsidian_plugin_list");
     assert(new RegExp(PLUGIN).test(text), "scratch plugin not installed/enabled");
   });
@@ -1088,7 +1127,7 @@ if (suite("Stability: concurrency, transport, reconnect")) {
   });
 
   await check("http transport serves a real MCP handshake", async () => {
-    const port = await freePort();
+    const port = await findFreePort();
     const proc = spawn(
       "node",
       [
@@ -1155,7 +1194,7 @@ if (suite("Stability: concurrency, transport, reconnect")) {
   });
 
   await check("http transport refuses to start on a busy port instead of hanging", async () => {
-    const port = await freePort();
+    const port = await findFreePort();
     const blocker = createServer((_, res) => res.end("busy"));
     await new Promise((r) => blocker.listen(port, "127.0.0.1", r));
     const proc = spawn(
@@ -1238,12 +1277,26 @@ await check("scratch notes are removed from the vault", async () => {
   assert(!(await fileExists(E2E_DIR)), "E2E directory survived cleanup");
 });
 
-await check("the plugin is left enabled and healthy", async () => {
-  const { text } = await client.ok("obsidian_plugin_health", { pluginId: PLUGIN });
-  assert(/enabled|loaded/i.test(text), `plugin left unhealthy: ${text.slice(0, 150)}`);
+if (PLUGIN !== undefined) {
+  await check("the plugin is left enabled and healthy", async () => {
+    const { text } = await client.ok("obsidian_plugin_health", { pluginId: PLUGIN });
+    assert(/enabled|loaded/i.test(text), `plugin left unhealthy: ${text.slice(0, 150)}`);
+  });
+}
+
+await check("default workspace and agent handles close cleanly", async () => {
+  await client.ok("obsidian_workspace_stop", { workspaceHandle: defaultWorkspaceHandle });
+  const released = await client.ok("obsidian_workspace_release", {
+    workspaceHandle: defaultWorkspaceHandle,
+  });
+  assert(released.json?.released === true, "default workspace was not released");
+  defaultWorkspaceHandle = undefined;
+  const closed = await client.ok("obsidian_agent_close", { agentHandle: defaultAgentHandle });
+  assert(closed.json?.closed === true, "agent handle was not closed");
 });
 
 client.close();
+await removeLiveHome(liveHome.home);
 
 // ----------------------------------------------------------------------- report
 

@@ -9,7 +9,7 @@
 
 export const TOOLSETS = [
   "core",
-  "session",
+  "workspace",
   "ui",
   "telemetry",
   "plugin-dev",
@@ -21,26 +21,13 @@ export const TOOLSETS = [
 
 export type Toolset = (typeof TOOLSETS)[number];
 
-/**
- * The plugin-development surface. Vault CRUD is opt-in because other Obsidian MCP
- * servers already cover it well, and `devtools`/`authoring` are niche. `editor` is
- * default-on: plugin work is mostly editor work, and without it agents fall back
- * to raw obsidian_eval for every cursor read.
- */
-export const DEFAULT_TOOLSETS: readonly Toolset[] = [
-  "core",
-  "session",
-  "ui",
-  "telemetry",
-  "plugin-dev",
-  "editor",
-];
+/** Operational tools are opt-in. Control-plane tools use `alwaysEnabled`. */
+export const DEFAULT_TOOLSETS: readonly Toolset[] = [];
 
 export const TOOLSET_DESCRIPTIONS: Record<Toolset, string> = {
   core: "Status, doctor, launch, eval, CLI, and command-palette execution.",
-  session:
-    "Isolated Obsidian instances: create, list, restart, and close a private app, profile, and " +
-    "scratch vault so concurrent agents never contend.",
+  workspace:
+    "Explicit agent and workspace handles for isolated scratch instances or the default profile.",
   ui: "Browser automation over CDP (proxied from @playwright/mcp) plus Obsidian-scoped snapshots.",
   telemetry: "Console, error, and network capture with cursor-based tailing.",
   "plugin-dev": "Plugin reload, manifest and settings inspection, and dev-cycle composites.",
@@ -87,7 +74,7 @@ export function parseToolsets(spec: string | undefined): ToolsetParseResult {
     else unknown.push(token);
   }
 
-  // An all-garbage spec falls back to defaults rather than registering nothing.
+  // An all-garbage spec falls back to the empty operational surface.
   if (enabled.size === 0) return { enabled: new Set(DEFAULT_TOOLSETS), unknown };
 
   return { enabled, unknown };

@@ -30,10 +30,6 @@ const OBSIDIAN_PROXY_NOTES: Record<string, string> = {
     "Capture the Obsidian **web contents** (Playwright page screenshot), not the OS window chrome. " +
     "For the full native Electron window via `capturePage()`, use obsidian_screenshot instead. " +
     `Defaults to viewport/element shots — avoid fullPage against a real desktop window (device metrics override is risky). ${TARGET_HINT}`,
-  browser_evaluate: `Run JavaScript in the Obsidian renderer. Prefer obsidian_eval for vault APIs; use this when you need DOM access in the same turn as a snapshot ref.`,
-  browser_tabs:
-    "List or select pages in the single CDP BrowserContext (all Obsidian windows and popouts).",
-  browser_find: `Search the accessibility tree. ${VIRTUALIZED_TREE}`,
   browser_mouse_click_xy:
     "Click at viewport coordinates — use when canvas/graph views lack refs (vision capability).",
 };
@@ -49,12 +45,6 @@ function describeProxiedTool(tool: ProxiedTool): string {
   const base = tool.description ?? tool.name;
   const extra = OBSIDIAN_PROXY_NOTES[tool.name];
   if (extra) return extra;
-  if (tool.name.startsWith("browser_verify_")) {
-    return sentence(
-      base,
-      "Assertions run against the live Obsidian window; combine with browser_snapshot when debugging failures.",
-    );
-  }
   if (tool.name.startsWith("browser_mouse_")) {
     return sentence(
       base,
@@ -68,25 +58,7 @@ function describeProxiedTool(tool: ProxiedTool): string {
 }
 
 function annotationsFor(name: string) {
-  if (name === "browser_evaluate") {
-    return { destructiveHint: true, openWorldHint: true };
-  }
-  if (name.startsWith("browser_verify_")) {
-    return { readOnlyHint: true };
-  }
-  if (
-    name === "browser_snapshot" ||
-    name === "browser_console_messages" ||
-    name === "browser_tabs" ||
-    name === "browser_find" ||
-    name === "browser_generate_locator" ||
-    // Reads pixels; changes nothing. Without this it takes the registry's exclusive
-    // lock and serializes against every other call for no reason.
-    name === "browser_take_screenshot"
-  ) {
-    return { readOnlyHint: true };
-  }
-  return undefined;
+  return { readOnlyHint: name === "browser_snapshot" || name === "browser_wait_for" };
 }
 
 export async function registerBrowserTools(ctx: ServerContext): Promise<void> {
@@ -108,6 +80,7 @@ export async function registerBrowserTools(ctx: ServerContext): Promise<void> {
       capability: tool.name === "browser_snapshot" ? "ariaSnapshot" : "realInput",
       description: describeProxiedTool(tool),
       jsonInputSchema: tool.inputSchema,
+      ...(tool.outputSchema !== undefined ? { jsonOutputSchema: tool.outputSchema } : {}),
       ...(annotationsFor(tool.name) ? { annotations: annotationsFor(tool.name) } : {}),
       handler: async (args) => {
         const result = await browserProxy.callTool(tool.name, args);
@@ -184,6 +157,7 @@ export async function registerBrowserTools(ctx: ServerContext): Promise<void> {
     toolset: "ui",
     capability: "realInput",
     handlesOwnTelemetry: true,
+    annotations: { readOnlyHint: false, destructiveHint: true },
     description:
       "Press a real keyboard chord and report whether it actually did anything: workspace state " +
       "before/after plus console output since a telemetry mark. Use this to test that a hotkey " +

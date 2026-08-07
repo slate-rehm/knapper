@@ -10,9 +10,18 @@ import { z } from "zod";
 import type { ServerContext } from "../server.js";
 import { renderResult } from "../util/serialize.js";
 import { fetchTargets, classifyTargets } from "../connection/cdp/discover.js";
-import { TOOLSETS, TOOLSET_DESCRIPTIONS, isToolset } from "../toolsets.js";
+import { TOOLSETS, TOOLSET_DESCRIPTIONS } from "../toolsets.js";
 import { UobError } from "../util/errors.js";
 import { CAPABILITIES, CAPABILITY_PREFERENCE } from "../capabilities.js";
+import { readDescriptor } from "../session/descriptor.js";
+
+const toolsetNameSchema = z.enum(TOOLSETS);
+
+const toolsetStateOutputSchema = {
+  enabled: z.array(toolsetNameSchema),
+  disabled: z.array(toolsetNameSchema),
+  available: z.array(toolsetNameSchema),
+};
 
 export function registerCoreTools(ctx: ServerContext): void {
   const { registry, router, config } = ctx;
@@ -20,23 +29,51 @@ export function registerCoreTools(ctx: ServerContext): void {
   registry.add({
     name: "obsidian_status",
     toolset: "core",
+    alwaysEnabled: true,
+    workspaceIndependent: true,
     description:
       "Report which transports are reachable, which Obsidian windows are attached, and which " +
       "toolsets are enabled. Cheap and safe to call first in a session. For a full diagnosis with " +
       "remediation steps, use obsidian_doctor instead.",
     annotations: { readOnlyHint: true },
+    profileIndependent: true,
     inputSchema: {},
     handler: async () => {
       const availability = await router.refreshAvailability(true);
       const health = await router.health({ skipCliProbe: true });
       const vaultStatus = await router.fence.status();
       const authorized = vaultStatus.filter((v) => v.authorized);
+      const windows = availability.playwright
+        ? await router.playwright.windowSummaries().catch(() => [])
+        : [];
+      const defaultProfileLease = await ctx.profileLease.status();
+      const descriptor =
+        config.sessionId !== undefined ? await readDescriptor(config.sessionId) : undefined;
+      const profile =
+        config.sessionId === undefined
+          ? {
+              kind: "default" as const,
+              workspaceHandle: ctx.currentWorkspaceHandle ?? null,
+              sessionId: null,
+              userDataDir: null,
+              visualIdentity: null,
+            }
+          : {
+              kind: "private" as const,
+              workspaceHandle: ctx.currentWorkspaceHandle ?? null,
+              sessionId: config.sessionId,
+              userDataDir: config.userDataDir,
+              visualIdentity: descriptor?.visualIdentity ?? {
+                state: "degraded" as const,
+                warnings: ["Visual identity was not recorded."],
+              },
+            };
 
       const lines = [
         `Obsidian running: ${health.running ? "yes" : "no"}`,
         `CLI transport: ${availability.cli ? "enabled" : "disabled"}`,
-        `CDP transport: ${availability.playwright ? `attached (${config.cdpUrl})` : `unavailable (${config.cdpUrl})`}`,
-        `Windows attached: ${health.windows.length}`,
+        `CDP transport: ${availability.playwright ? "attached" : "unavailable"}`,
+        `Windows attached: ${windows.length}`,
         `Authorized vaults: ${
           authorized.length === 0
             ? "none — every vault-scoped tool will refuse"
@@ -44,6 +81,12 @@ export function registerCoreTools(ctx: ServerContext): void {
         }`,
         `Toolsets enabled: ${registry.toolsetState().enabled.join(", ")}`,
         `Toolsets disabled: ${registry.toolsetState().disabled.join(", ") || "none"}`,
+        `Default profile: ${defaultProfileLease.state}`,
+        `Profile identity: ${profile.kind}${profile.sessionId === null ? "" : ` (${profile.sessionId})`}`,
+        `Workspace: ${profile.workspaceHandle ?? "none"}`,
+        ...(profile.visualIdentity === null
+          ? []
+          : [`Visual identity: ${profile.visualIdentity.state}`]),
       ];
       const commandTransport = router.commandTransportStatus;
       lines.push(
@@ -68,14 +111,27 @@ export function registerCoreTools(ctx: ServerContext): void {
           transports: availability,
           commandTransport,
           debuggerHeldBy: router.currentDebuggerHolder ?? null,
-          windows: health.windows,
-          vaults: vaultStatus,
+          windows,
+          vaults: vaultStatus.map((vault) =>
+            vault.authorized
+              ? {
+                  name: vault.name,
+                  open: vault.open,
+                  authorized: true,
+                  grant: vault.grant,
+                }
+              : { open: vault.open, authorized: false },
+          ),
           toolsets: {
             ...registry.toolsetState(),
             available: Object.keys(TOOLSET_DESCRIPTIONS),
           },
-          tools: registry.byToolset(),
+          toolCounts: Object.fromEntries(
+            Object.entries(registry.byToolset()).map(([name, tools]) => [name, tools.length]),
+          ),
           problemCount: health.problems.length,
+          defaultProfileLease,
+          profile,
         },
       };
     },
@@ -85,6 +141,8 @@ export function registerCoreTools(ctx: ServerContext): void {
     name: "obsidian_capabilities",
     toolset: "core",
     alwaysEnabled: true,
+    profileIndependent: true,
+    workspaceIndependent: true,
     description:
       "Report every Knapper capability, the live transport that can serve it, and the fixing tool " +
       "when it is unavailable. Use this before choosing between obsidian_* and browser_* tools.",
@@ -119,42 +177,193 @@ export function registerCoreTools(ctx: ServerContext): void {
     name: "obsidian_toolsets",
     toolset: "core",
     alwaysEnabled: true,
+    profileIndependent: true,
+    workspaceIndependent: true,
     description:
-      "List, enable, or disable Knapper toolsets at runtime. Changes update tools/list immediately; " +
-      "this control tool remains available so disabled toolsets can be restored.",
-    annotations: { idempotentHint: true },
-    inputSchema: {
-      action: z.enum(["list", "enable", "disable"]).default("list").describe("Operation to run"),
-      toolset: z
-        .string()
-        .optional()
-        .describe(`Toolset name: ${TOOLSETS.join(", ")}`),
-    },
-    handler: async (args) => {
-      const action = args.action as "list" | "enable" | "disable";
-      const requested = args.toolset as string | undefined;
-      if (action !== "list" && (requested === undefined || !isToolset(requested))) {
-        throw new UobError(
-          "INVALID_ARGUMENT",
-          `Unknown or missing toolset: ${requested ?? "(none)"}.`,
-          {
-            remediation: `Choose one of: ${TOOLSETS.join(", ")}.`,
-            fixedBy: "obsidian_toolsets",
-          },
-        );
-      }
-      const changed =
-        action === "list"
-          ? []
-          : registry.setToolsetEnabled(requested as (typeof TOOLSETS)[number], action === "enable");
+      "Report the current operational toolsets. Use obsidian_toolsets_update to change them.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {},
+    outputSchema: toolsetStateOutputSchema,
+    handler: async () => {
       const state = registry.toolsetState();
       return {
         text: [
           `Enabled: ${state.enabled.join(", ") || "none"}`,
           `Disabled: ${state.disabled.join(", ") || "none"}`,
-          ...(changed.length > 0 ? [`Changed tools: ${changed.join(", ")}`] : []),
         ].join("\n"),
-        json: { action, toolset: requested ?? null, changed, ...state },
+        json: { ...state, available: TOOLSETS },
+      };
+    },
+  });
+
+  registry.add({
+    name: "obsidian_toolsets_update",
+    toolset: "core",
+    alwaysEnabled: true,
+    profileIndependent: true,
+    workspaceIndependent: true,
+    description:
+      "Enable or disable operational toolsets for this server process. Use dryRun to preview the change.",
+    annotations: { readOnlyHint: false, idempotentHint: true },
+    inputSchema: {
+      enable: z
+        .array(toolsetNameSchema)
+        .optional()
+        .describe("Toolsets to enable immediately through the MCP tool registration handles"),
+      disable: z
+        .array(toolsetNameSchema)
+        .optional()
+        .describe("Toolsets to disable immediately through the MCP tool registration handles"),
+      dryRun: z.boolean().optional().describe("Preview the resulting surface without changing it"),
+    },
+    outputSchema: {
+      dryRun: z.boolean(),
+      enabled: z.array(toolsetNameSchema),
+      disabled: z.array(toolsetNameSchema),
+      changed: z.object({
+        enabled: z.array(toolsetNameSchema),
+        disabled: z.array(toolsetNameSchema),
+        toolCount: z.number().int().nonnegative(),
+      }),
+    },
+    handler: async (args) => {
+      const enable = [...new Set((args.enable as (typeof TOOLSETS)[number][] | undefined) ?? [])];
+      const disable = [...new Set((args.disable as (typeof TOOLSETS)[number][] | undefined) ?? [])];
+      const overlap = enable.filter((toolset) => disable.includes(toolset));
+      if (overlap.length > 0) {
+        throw new UobError(
+          "INVALID_ARGUMENT",
+          `A toolset cannot be enabled and disabled in the same call: ${overlap.join(", ")}.`,
+          {
+            remediation: "Remove each duplicate toolset from either enable or disable.",
+          },
+        );
+      }
+
+      const before = registry.toolsetState();
+      const enabledBefore = new Set(before.enabled);
+      const changedEnabled = enable.filter((toolset) => !enabledBefore.has(toolset)).sort();
+      const changedDisabled = disable.filter((toolset) => enabledBefore.has(toolset)).sort();
+      const dryRun = args.dryRun === true;
+      let changedToolCount = 0;
+
+      if (dryRun) {
+        for (const toolset of [...changedEnabled, ...changedDisabled]) {
+          changedToolCount += (registry.groupAllByToolset()[toolset] ?? []).filter(
+            (name) => registry.get(name)?.alwaysEnabled !== true,
+          ).length;
+        }
+      } else {
+        for (const toolset of changedEnabled) {
+          changedToolCount += registry.setToolsetEnabled(toolset, true).length;
+        }
+        for (const toolset of changedDisabled) {
+          changedToolCount += registry.setToolsetEnabled(toolset, false).length;
+        }
+      }
+
+      const enabled = new Set(before.enabled);
+      for (const toolset of changedEnabled) enabled.add(toolset);
+      for (const toolset of changedDisabled) enabled.delete(toolset);
+      const state = dryRun
+        ? {
+            enabled: TOOLSETS.filter((toolset) => enabled.has(toolset)).sort(),
+            disabled: TOOLSETS.filter((toolset) => !enabled.has(toolset)).sort(),
+          }
+        : registry.toolsetState();
+      const prefix = dryRun ? "Dry run" : "Updated";
+      return {
+        text: [
+          `${prefix}: ${changedToolCount} tool registration(s) ${dryRun ? "would change" : "changed"}.`,
+          `Enabled toolsets: ${state.enabled.join(", ") || "none"}`,
+          `Disabled toolsets: ${state.disabled.join(", ") || "none"}`,
+        ].join("\n"),
+        json: {
+          dryRun,
+          ...state,
+          changed: {
+            enabled: changedEnabled,
+            disabled: changedDisabled,
+            toolCount: changedToolCount,
+          },
+        },
+      };
+    },
+  });
+
+  registry.add({
+    name: "obsidian_tool_catalog",
+    toolset: "core",
+    alwaysEnabled: true,
+    profileIndependent: true,
+    workspaceIndependent: true,
+    description:
+      "Search the Knapper tool catalog without enabling disabled tools. Results use cursor pagination.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      query: z
+        .string()
+        .optional()
+        .describe("Case-insensitive text to find in tool names, toolsets, or descriptions"),
+      toolset: toolsetNameSchema.optional().describe("Return tools from only this toolset"),
+      enabled: z.boolean().optional().describe("Filter by the current enabled state"),
+      cursor: z.string().optional().describe("Opaque nextCursor value from a previous result"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Maximum results to return, from 1 through 100. The default is 20."),
+      detail: z
+        .enum(["summary", "full"])
+        .optional()
+        .describe("Summary returns identity fields. Full also returns descriptions and metadata."),
+    },
+    outputSchema: {
+      items: z.array(
+        z.object({
+          name: z.string(),
+          toolset: toolsetNameSchema,
+          enabled: z.boolean(),
+          description: z.string().optional(),
+          capability: z.enum(CAPABILITIES).nullable().optional(),
+          annotations: z
+            .object({
+              readOnlyHint: z.boolean().optional(),
+              destructiveHint: z.boolean().optional(),
+              idempotentHint: z.boolean().optional(),
+              openWorldHint: z.boolean().optional(),
+            })
+            .optional(),
+        }),
+      ),
+      total: z.number().int().nonnegative(),
+      nextCursor: z.string().optional(),
+    },
+    handler: async (args) => {
+      const result = registry.catalog({
+        ...(typeof args.query === "string" ? { query: args.query } : {}),
+        ...(typeof args.toolset === "string"
+          ? { toolset: args.toolset as (typeof TOOLSETS)[number] }
+          : {}),
+        ...(typeof args.enabled === "boolean" ? { enabled: args.enabled } : {}),
+        ...(typeof args.cursor === "string" ? { cursor: args.cursor } : {}),
+        ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+        detail: args.detail === "full" ? "full" : "summary",
+      });
+      return {
+        text:
+          result.items.length === 0
+            ? "No tools matched the catalog filters."
+            : result.items
+                .map(
+                  (tool) =>
+                    `${tool.name} (${tool.toolset}, ${tool.enabled ? "enabled" : "disabled"})` +
+                    (tool.description === undefined ? "" : `\n  ${tool.description}`),
+                )
+                .join("\n"),
+        json: result,
       };
     },
   });
@@ -169,39 +378,19 @@ export function registerCoreTools(ctx: ServerContext): void {
     annotations: { readOnlyHint: true },
     inputSchema: {},
     handler: async () => {
-      const targets = await fetchTargets(config.cdpUrl).catch(() => {
+      const rows = await router.playwright.windowSummaries().catch(() => {
         throw new UobError("CDP_PORT_CLOSED", `No CDP endpoint at ${config.cdpUrl}.`, {
           remediation: "Launch Obsidian with --remote-debugging-port.",
           fixedBy: "obsidian_launch",
         });
       });
 
-      const classified = classifyTargets(targets);
-
-      // A window title is "<note> - <vault> - Obsidian <version>", so listing raw
-      // titles would hand back the open note of a vault the fence otherwise blocks.
-      // The vault name stays visible — that is what makes the refusal diagnosable —
-      // and the note name is dropped.
-      const rows = await Promise.all(
-        classified.map(async (t) => {
-          const ok =
-            t.vaultName !== undefined
-              ? (await router.fence.isAuthorized(t.vaultName)) !== undefined
-              : false;
-          return {
-            id: t.target.id,
-            kind: t.kind,
-            title: ok ? t.target.title : `(${t.vaultName ?? "unknown vault"} — not authorized)`,
-            url: t.target.url,
-            vaultName: t.vaultName ?? null,
-            noteName: ok ? (t.noteName ?? null) : null,
-            authorized: ok,
-          };
-        }),
-      );
-
       const text = rows
-        .map((t) => `[${t.kind}] ${t.title || "(untitled)"}\n  id=${t.id} url=${t.url}`)
+        .map((target) =>
+          target.authorized
+            ? `[${target.kind}] ${target.title ?? "(untitled)"}\n  id=${target.targetId}`
+            : `[${target.kind}] unauthorized window\n  id=${target.targetId}`,
+        )
         .join("\n");
 
       return {
@@ -235,13 +424,13 @@ export function registerCoreTools(ctx: ServerContext): void {
         if (vault === undefined || (await router.fence.isAuthorized(vault)) === undefined) {
           throw new UobError(
             "VAULT_NOT_AUTHORIZED",
-            `Refusing to pin to target ${targetId}: it shows ${vault ?? "no identifiable vault"}, which is not authorized.`,
+            `Refusing to pin to target ${targetId}: the window is not authorized.`,
             {
               remediation:
                 "Pin to a window showing an authorized vault. obsidian_list_targets marks which " +
                 "ones those are.",
               fixedBy: "obsidian_list_targets",
-              details: { targetId, vault: vault ?? null },
+              details: { targetId },
             },
           );
         }

@@ -11,20 +11,27 @@ import { DEFAULT_RESULT_CAP, truncateText, type Truncated } from "./truncate.js"
 
 /** JSON.stringify with cycle detection and non-JSON type handling. */
 export function safeStringify(value: unknown, indent = 2): string {
-  const seen = new WeakSet<object>();
+  const ancestors: object[] = [];
 
-  const replacer = (_key: string, val: unknown): unknown => {
+  const replacer = function (this: unknown, _key: string, val: unknown): unknown {
     if (typeof val === "bigint") return `${val.toString()}n`;
     if (typeof val === "function") return `[Function: ${val.name || "anonymous"}]`;
     if (typeof val === "symbol") return val.toString();
-    if (typeof val === "undefined") return "[undefined]";
+    // Match JSON semantics. Object properties disappear and array entries become
+    // null. renderResult handles a top-level undefined value before it gets here.
+    if (typeof val === "undefined") return undefined;
     if (typeof val === "number" && !Number.isFinite(val)) return String(val);
     if (val instanceof Error) {
       return { name: val.name, message: val.message, stack: val.stack };
     }
     if (typeof val === "object" && val !== null) {
-      if (seen.has(val)) return "[Circular]";
-      seen.add(val);
+      // JSON.stringify visits a value depth-first. Remove completed branches so
+      // a shared reference can appear normally while an ancestor still marks a
+      // true cycle.
+      const depth = ancestors.lastIndexOf(this as object);
+      if (depth >= 0) ancestors.length = depth + 1;
+      if (ancestors.includes(val)) return "[Circular]";
+      ancestors.push(val);
     }
     return val;
   };

@@ -8,7 +8,7 @@ import {
 } from "../../src/capabilities.js";
 
 describe("parseToolsets", () => {
-  it("falls back to the plugin-development default set", () => {
+  it("defaults to an empty operational toolset", () => {
     expect([...parseToolsets(undefined).enabled].sort()).toEqual([...DEFAULT_TOOLSETS].sort());
     expect([...parseToolsets("").enabled].sort()).toEqual([...DEFAULT_TOOLSETS].sort());
   });
@@ -28,7 +28,7 @@ describe("parseToolsets", () => {
     expect(unknown).toEqual(["nonsense"]);
   });
 
-  it("falls back to defaults when every name is invalid rather than registering nothing", () => {
+  it("keeps the operational surface empty when every name is invalid", () => {
     const { enabled, unknown } = parseToolsets("bogus,alsobogus");
     expect([...enabled].sort()).toEqual([...DEFAULT_TOOLSETS].sort());
     expect(unknown).toEqual(["bogus", "alsobogus"]);
@@ -53,7 +53,13 @@ describe("loadConfig", () => {
     expect(config.logLevel).toBe("info");
     expect(config.telemetryBuffer).toBe(2000);
     expect(config.telemetryNetwork).toBe(false);
+    expect(config.idleTimeoutMs).toBe(86_400_000);
     expect(config.vault).toBeUndefined();
+  });
+
+  it("reads and clamps the shared inactivity timeout", () => {
+    expect(loadConfig({}, { KNAP_IDLE_TIMEOUT_MS: "120000" }).idleTimeoutMs).toBe(120_000);
+    expect(loadConfig({}, { KNAP_IDLE_TIMEOUT_MS: "1000" }).idleTimeoutMs).toBe(30_000);
   });
 
   it("reads environment variables", () => {

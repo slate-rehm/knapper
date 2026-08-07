@@ -7,6 +7,7 @@ import type { CapabilityRouter } from "../connection/router.js";
 import type { TelemetryStore } from "../telemetry/store.js";
 import { formatRecords } from "../telemetry/store.js";
 import { vaultName } from "../obsidian/helpers.js";
+import { saveArtifact, type ArtifactFile } from "../util/artifacts.js";
 
 export function devCycleMarkerLabel(pluginId: string): string {
   return `dev-cycle:${pluginId}:${Date.now()}`;
@@ -53,14 +54,21 @@ export async function openNotePath(
 
 export async function captureScreenshot(
   router: CapabilityRouter,
+  outputDir: string,
   vault?: string,
-): Promise<{ data: string; mimeType: string } | undefined> {
+): Promise<ArtifactFile | undefined> {
   const availability = await router.refreshAvailability();
   if (!availability.playwright) return undefined;
   try {
     const page = await router.playwright.page(vault);
     const buffer = await page.screenshot({ type: "png" });
-    return { data: buffer.toString("base64"), mimeType: "image/png" };
+    return saveArtifact(
+      outputDir,
+      undefined,
+      `obsidian-dev-cycle-${Date.now()}.png`,
+      buffer,
+      "image/png",
+    );
   } catch {
     return undefined;
   }
@@ -68,8 +76,13 @@ export async function captureScreenshot(
 
 export interface PluginLogSlice {
   records: ReturnType<TelemetryStore["query"]>["records"];
+  /** Errors attributed to the selected plugin, or all errors without a plugin filter. */
   errors: number;
+  allErrors: number;
   warnings: number;
+  pluginErrors: number;
+  unattributedErrors: number;
+  otherPluginErrors: number;
 }
 
 export function logsSinceMark(
@@ -82,15 +95,34 @@ export function logsSinceMark(
     ...(pluginId !== undefined ? { plugin: pluginId } : {}),
     limit: 200,
   });
-  const all = store.query({ since: markSeq, limit: 500 });
-  let errors = 0;
-  let warnings = 0;
-  for (const r of all.records) {
-    if (r.source === "marker") continue;
-    if (r.level === "error") errors++;
-    else if (r.level === "warn") warnings++;
-  }
-  return { records: result.records, errors, warnings };
+  const allErrors = store.query({
+    since: markSeq,
+    level: "error",
+    limit: Number.MAX_SAFE_INTEGER,
+  });
+  const pluginErrors =
+    pluginId === undefined
+      ? allErrors.matched
+      : allErrors.records.filter((record) => record.plugin === pluginId).length;
+  const unattributedErrors = allErrors.records.filter(
+    (record) => record.plugin === undefined,
+  ).length;
+  const otherPluginErrors = Math.max(0, allErrors.matched - pluginErrors - unattributedErrors);
+  const warnings = store.query({
+    since: markSeq,
+    ...(pluginId !== undefined ? { plugin: pluginId } : {}),
+    level: "warn",
+    limit: 1,
+  }).matched;
+  return {
+    records: result.records,
+    errors: pluginErrors,
+    allErrors: allErrors.matched,
+    warnings,
+    pluginErrors,
+    unattributedErrors,
+    otherPluginErrors,
+  };
 }
 
 export function verdictText(

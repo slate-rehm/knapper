@@ -1,147 +1,101 @@
 ---
 name: obsidian-instance-setup
-description: Connect knapper to a live Obsidian desktop app: obsidian_doctor diagnosis, obsidian_launch with remote debugging, CLI enablement, vault registry, argv corruption, the Electron single-instance lock, and isolated sessions for concurrent agents. Use before plugin dev or UI automation when transports fail, or when another agent may be driving Obsidian.
+description: Connect Knapper to a live Obsidian app with explicit agent and workspace handles. Use for doctor diagnosis, isolated scratch workspaces, default-profile claims, launch, CLI enablement, registry safety, or concurrent agents.
 ---
 
 # Obsidian instance setup
 
-Unified Obsidian MCP uses **two complementary transports**:
+Use an isolated workspace for plugin development and experiments. Claim the default
+profile only when the user explicitly wants an existing vault.
 
-1. **Obsidian CLI** — global `"cli": true` in `obsidian.json` (Settings → General → Advanced → Command line interface). No app restart required. ~100+ commands via live `__completions`. Cannot run headless. When disabled, every CLI call prints `Command line interface is not enabled.` on stdout (exit 0).
-2. **Playwright over CDP** — requires cold start with `--remote-debugging-port`. Supplies real input, waiting, ARIA snapshots, and telemetry streams.
+## Select the target first
 
-Both can be active at once. Run **`obsidian_doctor`** first — it maps problems to fixes.
+1. Call `obsidian_agent_open` with a short label and purpose.
+2. Save the returned `agentHandle`.
+3. Call `obsidian_workspace_create` with that handle.
+4. Include `pluginSourceDir` and `pluginId` when you test a plugin.
+5. Save the returned `workspaceHandle`.
+6. Pass `workspaceHandle` to every operational tool.
 
-## Quick start sequence
-
-```text
-obsidian_doctor
-# apply each suggested fixedBy tool or manual step
-obsidian_launch
-obsidian_status
-```
-
-## Working alongside other agents: use a session
-
-If another agent might be driving Obsidian — a second worktree, a parallel task, even
-the same branch — do not share the user's instance. Create an isolated one:
+Example:
 
 ```text
-obsidian_create_session label=my-plugin pluginSourceDir=/abs/path/to/loadable-plugin
+obsidian_agent_open label=my-plugin purpose="test the current build"
+obsidian_workspace_create agentHandle=<agentHandle> label=my-plugin \
+  pluginSourceDir=/abs/path/to/dist pluginId=my-plugin
+obsidian_plugin_health workspaceHandle=<workspaceHandle> pluginId=my-plugin
 ```
 
-That provisions a private Obsidian: its own profile, CLI socket, debug port, and
-scratch vault, with the plugin already symlinked and community plugins enabled. It
-returns a **session key**. Put it in knapper's MCP `env` block as `KNAP_SESSION` and
-reconnect; every other tool then targets that instance and nothing else.
+The workspace handle is durable across MCP reconnects. It selects one exact
+Obsidian instance. It is not an authentication credential.
 
-If creation returns `phase=starting`, call `obsidian_wait_session` until CDP is
-ready. Knapper preserves the live slow-starting instance.
+## Concurrent agents
+
+Each agent must use a different isolated workspace. Knapper gives each workspace a
+private profile, CLI socket, CDP port, and scratch vault. Calls route from the
+explicit workspace handle, not from MCP transport state or `clientInfo`.
+
+Use these lifecycle tools:
 
 ```text
-obsidian_list_sessions      # who else is running, and which one you are bound to
-obsidian_restart_session    # cold-restart YOURS only; other agents are untouched
-obsidian_close_session deleteVault=true   # quit and clean up when done
+obsidian_workspace_list agentHandle=<agentHandle>
+obsidian_workspace_status workspaceHandle=<workspaceHandle>
+obsidian_workspace_restart workspaceHandle=<workspaceHandle>
+obsidian_workspace_release workspaceHandle=<workspaceHandle>
+obsidian_workspace_destroy workspaceHandle=<workspaceHandle>
+obsidian_agent_close agentHandle=<agentHandle>
 ```
 
-Why this matters: without a session, `obsidian_launch restart=true` quits _the_ app,
-and two agents issuing real input interleave against one window. With one, the
-concurrency lock in each server is sufficient, because no other server can reach your
-instance. Abandoned sessions are collected automatically the next time any agent
-creates one.
+`release` stops the app and retains the scratch vault. `destroy` moves a verified
+isolated root to recoverable Knapper trash. It does not hard-delete the root.
+Release or destroy all workspaces before you close the agent handle.
 
-**Linux only.** Obsidian derives its CLI socket path from `XDG_RUNTIME_DIR`, and only
-the Linux branch of that formula reads the environment; macOS keys it on the home
-directory and Windows on the username. `obsidian_doctor` reports the `CLI isolation`
-level, so check it rather than assuming.
+## Default profile
 
-## Four precondition states (do not lump together)
+Call `obsidian_workspace_claim_default` only for a user-approved default-profile
+task. Then pass that workspace handle to `obsidian_doctor`.
 
-| Code                   | Meaning                         | Typical fix                                                   |
-| ---------------------- | ------------------------------- | ------------------------------------------------------------- |
-| `OBSIDIAN_NOT_RUNNING` | No running instance             | `obsidian_launch`                                             |
-| `CLI_DISABLED`         | CLI toggle off                  | `obsidian_setup_cli` or Settings UI                           |
-| `CDP_PORT_CLOSED`      | Nothing listening on CDP URL    | Quit Obsidian fully, `obsidian_launch` with debug port        |
-| `ARGV_CORRUPTION`      | Bad tokens in `user-flags.conf` | Fix single-dash flags (e.g. `-disable-gpu` → `--disable-gpu`) |
+| State                  | Meaning                                  | Action                                    |
+| ---------------------- | ---------------------------------------- | ----------------------------------------- |
+| `OBSIDIAN_NOT_RUNNING` | Obsidian is stopped                      | Call `obsidian_launch`                    |
+| `CLI_DISABLED`         | Native CLI is disabled                   | Call `obsidian_setup_cli`                 |
+| `CDP_PORT_CLOSED`      | Browser automation cannot attach         | Cold-start with `obsidian_launch`         |
+| `ARGV_CORRUPTION`      | A wrapper passed a bad single-dash token | Correct `user-flags.conf`                 |
+| `DEFAULT_PROFILE_BUSY` | Another MCP process owns the profile     | Create an isolated workspace              |
+| `VAULT_NOT_AUTHORIZED` | The user did not grant vault access      | Stop unless the user requested that vault |
 
-Errors include **remediation** text and often a **`fixedBy`** tool name — follow them literally.
+The Obsidian CLI prints some failures to stdout with exit code 0. Trust the typed
+Knapper result, not the process exit code.
 
-### `CDP_PORT_CLOSED` and the single-instance lock
+## Vault safety
 
-Electron allows one instance **per user-data directory**. If Obsidian is already running **without** the debug flag, starting again with `--remote-debugging-port` **silently does nothing** — the second launch loses the lock and becomes a CLI client, dropping the flag.
+An isolated workspace always creates Knapper-owned scratch space. It cannot accept
+or adopt an existing vault path. Knapper stores ownership outside the vault. It
+checks the exact layout, real path, symlink state, device, and inode before cleanup.
 
-**Fix:** fully quit Obsidian (all windows), then cold start with the port. `obsidian_launch` encodes the right command for your OS.
+An Obsidian registry entry does not authorize access. Legacy `.knapper-managed`
+files are inert. Only the user can authorize an existing vault from an interactive
+terminal. Authorization never permits vault-directory deletion.
 
-**Or sidestep it:** `obsidian_create_session` launches against a private user-data
-directory, so it gets its own lock and its own debug port without quitting anything
-the user has open. That is the better move whenever you do not specifically need the
-user's own vault.
+Do not suggest authorization unless the user asked to work in that exact vault.
+Never redirect an existing-vault request into scratch space without telling the
+user.
 
-### `CLI_DISABLED`
+## Tool surface
 
-The CLI cannot enable itself. Use `obsidian_setup_cli` (writes global `cli: true` in `obsidian.json`) or the Settings toggle.
+The default surface includes `core`, `workspace`, `telemetry`, and `plugin-dev`.
+Toolsets are static for the server process. Use `obsidian_toolsets` to inspect the
+active set and `obsidian_tool_catalog` to discover optional tools. Restart Knapper
+with `KNAP_TOOLSETS` to add `ui`, `editor`, `vault`, `devtools`, or `authoring`.
 
-### `VAULT_NOT_FOUND`
+## Platform limits
 
-`OBSIDIAN_VAULT` or `vault=` names a vault not in the registry. Open/register the vault in Obsidian, or use `obsidian_setup_vault` for a dev scratch vault.
-
-## Provisioning tools
-
-| Tool                    | Purpose                                             |
-| ----------------------- | --------------------------------------------------- |
-| `obsidian_doctor`       | Full diagnosis + remediation                        |
-| `obsidian_launch`       | Start Obsidian with CDP port (and optional vault)   |
-| `obsidian_setup_cli`    | Enable global CLI flag                              |
-| `obsidian_setup_vault`  | Prepare dev vault (restrictions, community plugins) |
-| `obsidian_link_plugin`  | Symlink plugin build dir into vault                 |
-| `obsidian_wait_session` | Finish a session whose CDP endpoint started slowly  |
-| `obsidian_status`       | Cheap health snapshot (not a full doctor)           |
-
-## Configuration (env vars)
-
-Hosts disagree on plugin manifest variables, so configure via environment:
-
-- `OBSIDIAN_CDP_URL` (default `http://127.0.0.1:9222`)
-- `OBSIDIAN_BIN` — path to executable
-- `OBSIDIAN_VAULT` — default vault name for CLI
-
-See repository README for the full table (`KNAP_*` toolsets, telemetry, timeouts). Add `vault`, `devtools`, or `authoring` via `KNAP_TOOLSETS` when you need those opt-in surfaces (properties/tags/tasks live under **authoring**, not vault).
-
-## Linux distro wrappers
-
-`user-flags.conf` in Obsidian userData is read by some packages. Only `--`-prefixed flags are stripped from argv; a single-dash token becomes a bogus “command” and breaks **every** CLI invocation.
-
-## Multi-window
-
-Use `obsidian_list_targets` + `obsidian_attach` when more than one window or popout is open. One browser context; disambiguate with `app.vault.getName()` in eval.
-
-## Version drift caveat
-
-Obsidian checks for updates on startup and hourly. A downloaded `obsidian-<version>.asar` in userData can override the distro package — DOM and API behavior may not match the version shown in package managers. Re-run doctor/spike tests after upgrades.
+Isolated workspaces are verified on Linux. Linux uses a private `XDG_RUNTIME_DIR`
+for each CLI socket. macOS isolation is unverified. Windows cannot isolate the
+Obsidian CLI socket, so Knapper refuses isolated workspace creation.
 
 ## Related skills
 
-- **obsidian-plugin-dev** — after setup, link and reload plugins.
-- **obsidian-ui-automation** — requires CDP.
-- **obsidian-debugging** — telemetry after connection works.
-
-## VAULT_NOT_AUTHORIZED
-
-knapper refuses any vault the user has not authorized, so a fresh install reaches
-nothing. This is a fifth precondition state alongside the four transport ones, and
-unlike those, **no tool fixes it**.
-
-`obsidian_doctor` and `obsidian_status` list every registered vault with its
-authorization state, so start there.
-
-- Need throwaway space? `obsidian_create_vault` — it authorizes what it creates, and
-  is the right answer for almost every experiment.
-- Need a _specific existing_ vault? Only the user can grant that, by running
-  `knapper authorize <path>` in their own terminal. It requires an interactive TTY and
-  a retyped vault name, so you cannot run it yourself — spawning the binary will just
-  refuse.
-
-Do not volunteer the authorize command. An agent that answers every refusal with
-"run this to grant me access" trains users to authorize reflexively, which is the
-habit the fence exists to prevent. Surface it only when the user has asked to work in
-that vault.
+- Use **obsidian-plugin-dev** after the workspace is ready.
+- Use **obsidian-ui-automation** when the `ui` toolset is enabled.
+- Use **obsidian-debugging** for console and network telemetry.

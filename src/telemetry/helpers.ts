@@ -44,12 +44,17 @@ export function logsOutcome(
   result: QueryResult,
   extra: { armed: boolean; telemetryNote?: string } = { armed: true },
 ): { text: string; json: Record<string, unknown> } {
-  const lines = [formatRecords(result.records)];
+  const lines = [
+    formatRecords(result.records),
+    "",
+    `Records: ${result.records.length} returned, ${result.matched} matched. Cursor: ${result.cursor}. Dropped: ${result.dropped}.`,
+  ];
   if (extra.telemetryNote) lines.push("", extra.telemetryNote);
   return {
     text: lines.join("\n"),
     json: {
       records: result.records,
+      returned: result.records.length,
       cursor: result.cursor,
       matched: result.matched,
       dropped: result.dropped,
@@ -63,14 +68,20 @@ export function appendTelemetrySummary(
   text: string,
   store: TelemetryStore,
   sinceSeq?: number,
+  plugin?: string,
 ): string {
-  const s = store.summary(sinceSeq);
+  const s = store.summary(sinceSeq, plugin);
   if (s.total === 0) return text;
   const parts = [
     `${s.errors} error(s), ${s.warnings} warning(s) since this action (${s.total} log line(s)).`,
   ];
   if (s.errors > 0) {
-    const errs = store.query({ since: sinceSeq, minLevel: "error", limit: 5 });
+    const errs = store.query({
+      since: sinceSeq,
+      minLevel: "error",
+      ...(plugin !== undefined ? { plugin } : {}),
+      limit: 5,
+    });
     if (errs.records.length > 0) {
       parts.push("", "Recent errors:", formatRecords(errs.records));
     }

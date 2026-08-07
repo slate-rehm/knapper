@@ -8,7 +8,7 @@ import type { ToolOutcome } from "../tools/registry.js";
 import { escEvalString } from "../obsidian/helpers.js";
 import { rendererEval } from "./eval.js";
 
-interface PluginHealthInfo {
+export interface PluginHealthInfo {
   id: string;
   /** False when no registry knows this id at all — a typo, or never installed. */
   exists: boolean;
@@ -21,13 +21,26 @@ interface PluginHealthInfo {
   commands: string[];
 }
 
-export async function runPluginHealth(
+function commandIdsExpression(pluginId: string): string {
+  return `Object.keys(app.commands?.commands ?? {}).filter((cmdId) => cmdId === ${escEvalString(pluginId)} || cmdId.startsWith(${escEvalString(`${pluginId}:`)})).sort()`;
+}
+
+/** Read plugin command ids from the renderer command registry. */
+export async function listPluginCommandIds(
   router: CapabilityRouter,
-  telemetry: TelemetryStore,
   pluginId: string,
   vault?: string,
-): Promise<ToolOutcome> {
-  const info = await rendererEval<PluginHealthInfo>(
+): Promise<string[]> {
+  return rendererEval<string[]>(router, commandIdsExpression(pluginId), vault);
+}
+
+/** Read the live state that both health checks and development cycles verify. */
+export async function inspectPluginHealth(
+  router: CapabilityRouter,
+  pluginId: string,
+  vault?: string,
+): Promise<PluginHealthInfo> {
+  return rendererEval<PluginHealthInfo>(
     router,
     `(() => {
       const id = ${escEvalString(pluginId)};
@@ -59,18 +72,23 @@ export async function runPluginHealth(
         version = null;
       }
 
-      // Prefix match only. The old fallback also matched on the manifest name via
-      // String(cmd.name).includes(manifest?.name ?? ""), and for an unknown plugin
-      // that is includes("") — true for everything — so it returned the app's
-      // entire command table as "commands this plugin likely owns".
-      const commands = Object.keys(app.commands?.commands ?? {})
-        .filter((cmdId) => cmdId === id || cmdId.startsWith(id + ":"))
-        .sort();
+      // Prefix match only. A manifest-name fallback can match every command when
+      // the requested plugin does not exist and its name is therefore empty.
+      const commands = ${commandIdsExpression(pluginId)};
 
       return { id, exists: kind !== "unknown", kind, loaded, enabled, name, version, commands };
     })()`,
     vault,
   );
+}
+
+export async function runPluginHealth(
+  router: CapabilityRouter,
+  telemetry: TelemetryStore,
+  pluginId: string,
+  vault?: string,
+): Promise<ToolOutcome> {
+  const info = await inspectPluginHealth(router, pluginId, vault);
 
   const recentErrors = telemetry.query({
     plugin: pluginId,
@@ -97,6 +115,6 @@ export async function runPluginHealth(
 
   return {
     text: lines.join("\n"),
-    json: { ...info, recentErrors: recentErrors.records },
+    json: { ...info, commandCount: info.commands.length, recentErrors: recentErrors.records },
   };
 }

@@ -2,7 +2,7 @@
 
 knapper ships two separable things, and hosts install them by different mechanisms:
 
-1. **The MCP server** — the tools. Configured per host as an ordinary stdio MCP server.
+1. **The MCP server** — the tools. Configure it as an ordinary stdio MCP server.
 2. **The plugin bundle** — 4 skills, 2 slash commands, 1 subagent, 1 rules file. Installed
    through each host's plugin/marketplace system, or standalone via `npx skills add`.
 
@@ -32,12 +32,47 @@ else (`".."`, `"../.."`) points outside the repo and fails to resolve.
 
 | Host                     | Reads                                                            | Discovers bundle from             | Install                                                                                                      |
 | ------------------------ | ---------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| **Claude Code**          | `.claude-plugin/marketplace.json` → `.claude-plugin/plugin.json` | `skills/`, `commands/`, `agents/` | `claude plugin marketplace add slate-rehm/knapper` then `claude plugin install knapper@knapper`              |
+| **Claude Code**          | `.claude-plugin/marketplace.json` → `.claude-plugin/plugin.json` | `skills/`, `commands/`, `agents/` | `claude plugin marketplace add bearfire-dev/knapper` then `claude plugin install knapper@knapper`            |
 | **Cursor**               | `.cursor-plugin/plugin.json`, `rules/*.mdc`, `.mcp.json`         | `skills/`, `rules/`               | MCP: `.mcp.json` at project root or **Settings → MCP**. Bundle: clone into `~/.cursor/plugins/local/knapper` |
-| **Codex**                | `.codex-plugin/plugin.json`                                      | `skills/`, `commands/`, `agents/` | `codex plugin marketplace add slate-rehm/knapper` then `codex plugin add knapper@knapper`                    |
-| **skills.sh**            | `skills/*/SKILL.md`                                              | `skills/` only                    | `npx skills add slate-rehm/knapper`                                                                          |
-| **Any MCP client**       | —                                                                | n/a (server only)                 | `command: "knap"`, or `npx -y github:slate-rehm/knapper`                                                     |
+| **Codex**                | `.codex-plugin/plugin.json`                                      | `skills/`, `commands/`, `agents/` | `codex plugin marketplace add bearfire-dev/knapper` then `codex plugin add knapper@knapper`                  |
+| **OpenCode**             | `opencode.json`                                                  | `.agents/skills/`                 | Add the local MCP configuration below. Install skills with `npx skills add bearfire-dev/knapper`             |
+| **skills.sh**            | `skills/*/SKILL.md`                                              | `skills/` only                    | `npx skills add bearfire-dev/knapper`                                                                        |
+| **Any MCP client**       | —                                                                | n/a (server only)                 | `command: "knapper"`, or `npx -y github:bearfire-dev/knapper`                                                |
 | **`.agents` convention** | `.agents/plugins/marketplace.json`                               | `skills/`, `commands/`, `agents/` | Host-dependent                                                                                               |
+
+## OpenCode MCP configuration
+
+OpenCode uses a command array and an `environment` object. This configuration uses
+the installed `knapper` binary:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "knapper": {
+      "type": "local",
+      "command": ["knapper"],
+      "enabled": true,
+      "environment": {
+        "KNAP_TOOLSETS": "core,workspace,telemetry,plugin-dev",
+        "KNAP_SCREENSHOT_DIR": "/absolute/path/to/knapper-output"
+      }
+    }
+  }
+}
+```
+
+Both environment variables are optional. `KNAP_TOOLSETS` selects the startup
+surface. `KNAP_SCREENSHOT_DIR` must name the screenshot output root.
+
+Use this command array to track the default branch:
+
+```json
+"command": ["npx", "-y", "github:bearfire-dev/knapper"]
+```
+
+The `knap` binary remains a compatibility alias. New configurations must use
+`knapper`.
 
 ## Known limits
 
@@ -49,7 +84,7 @@ else (`".."`, `"../.."`) points outside the repo and fails to resolve.
   are different dialects, so knapper reads every setting from a plain environment variable
   instead of being expressed three ways. Set them in each client's MCP `env` block. See
   [configuration.md](configuration.md).
-- **`browser_*` tools remain visible when Obsidian is offline.** Calls that need CDP return an
+- **Enabled `browser_*` tools remain visible when Obsidian is offline.** Calls that need CDP return an
   actionable error with `obsidian_launch` as the fixing tool. Cold-start Obsidian with the debug
   port, then retry the same call. You do not need to reconnect only to refresh the tool list.
 
@@ -59,7 +94,7 @@ The bundle is loaded correctly when the host can see all four skills. A quick ch
 not require Obsidian:
 
 ```bash
-npx -y github:slate-rehm/knapper --help    # server starts
+npx -y github:bearfire-dev/knapper --help    # server starts
 npm run smoke                              # degraded-mode MCP contract, including browser tools
 ```
 

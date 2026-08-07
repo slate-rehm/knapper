@@ -16,8 +16,27 @@ import {
   vaultName,
   writePluginData,
 } from "../obsidian/helpers.js";
-import { getCompletions, cliCommandIds } from "../obsidian/completions.js";
+import { getCompletions } from "../obsidian/completions.js";
 import { launchWithCdp } from "./provisioning.js";
+import { listPluginCommandIds } from "../devcycle/plugin-health.js";
+import { renderResult } from "../util/serialize.js";
+
+export function pluginListContains(value: unknown, stdout: string, id: string): boolean {
+  const visit = (entry: unknown): boolean => {
+    if (Array.isArray(entry)) {
+      return entry.some((item) => (typeof item === "string" ? item === id : visit(item)));
+    }
+    if (typeof entry !== "object" || entry === null) return false;
+    const record = entry as Record<string, unknown>;
+    if (record.id === id) return true;
+    return Object.values(record).some((item) => (Array.isArray(item) ? visit(item) : false));
+  };
+  if (visit(value)) return true;
+  return stdout
+    .split("\n")
+    .map((line) => line.trim().split(/[\t,]/, 1)[0])
+    .some((candidate) => candidate === id);
+}
 
 export function registerObsidianTools(ctx: ServerContext): void {
   const { registry, router, config } = ctx;
@@ -37,7 +56,9 @@ export function registerObsidianTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       const filter = (args.filter as string | undefined)?.toLowerCase();
-      const map = await getCompletions(router, { force: args.refresh === true });
+      const map = await getCompletions(router, {
+        force: args.refresh === true,
+      });
       const names = Object.keys(map).sort();
       const filtered =
         filter !== undefined && filter !== ""
@@ -46,7 +67,10 @@ export function registerObsidianTools(ctx: ServerContext): void {
       const text = filtered.map((n) => `${n}: ${map[n]?.description ?? ""}`).join("\n");
       return {
         text: text === "" ? "No commands match." : text,
-        json: { count: filtered.length, commands: filtered.map((n) => ({ name: n, ...map[n] })) },
+        json: {
+          count: filtered.length,
+          commands: filtered.map((n) => ({ name: n, ...map[n] })),
+        },
       };
     },
   });
@@ -115,6 +139,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
       id: z.string().describe("Command palette id"),
       vault: z.string().optional().describe("Target vault"),
     },
+    annotations: { readOnlyHint: false, destructiveHint: true },
     handler: async (args) => {
       const { stdout } = await runCli(router, {
         command: "command",
@@ -165,14 +190,35 @@ export function registerObsidianTools(ctx: ServerContext): void {
     toolset: "plugin-dev",
     capability: "cliCommand",
     description: "Enable a plugin by id. " + CLOSED_VAULT_WARNING,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    },
     inputSchema: pluginIdSchema,
     handler: async (args) => {
+      const id = args.id as string;
+      const vault = vaultName(args, config);
+      const enabled = await runCli(router, {
+        command: "plugins:enabled",
+        vault,
+        json: true,
+      });
+      if (pluginListContains(enabled.parsed, enabled.stdout, id)) {
+        return {
+          text: `Plugin ${id} is already enabled.`,
+          json: { id, enabled: true, changed: false },
+        };
+      }
       const { stdout } = await runCli(router, {
         command: "plugin:enable",
-        args: [`id=${args.id as string}`],
-        vault: vaultName(args, config),
+        args: [`id=${id}`],
+        vault,
       });
-      return contentOutcome(stdout, "Enabled");
+      return {
+        text: stdout.trim() || `Enabled ${id}.`,
+        json: { id, enabled: true, changed: true },
+      };
     },
   });
 
@@ -181,14 +227,31 @@ export function registerObsidianTools(ctx: ServerContext): void {
     toolset: "plugin-dev",
     capability: "cliCommand",
     description: "Disable a plugin by id. " + CLOSED_VAULT_WARNING,
+    annotations: { readOnlyHint: false, idempotentHint: true },
     inputSchema: pluginIdSchema,
     handler: async (args) => {
+      const id = args.id as string;
+      const vault = vaultName(args, config);
+      const enabled = await runCli(router, {
+        command: "plugins:enabled",
+        vault,
+        json: true,
+      });
+      if (!pluginListContains(enabled.parsed, enabled.stdout, id)) {
+        return {
+          text: `Plugin ${id} is already disabled.`,
+          json: { id, enabled: false, changed: false },
+        };
+      }
       const { stdout } = await runCli(router, {
         command: "plugin:disable",
-        args: [`id=${args.id as string}`],
-        vault: vaultName(args, config),
+        args: [`id=${id}`],
+        vault,
       });
-      return contentOutcome(stdout, "Disabled");
+      return {
+        text: stdout.trim() || `Disabled ${id}.`,
+        json: { id, enabled: false, changed: true },
+      };
     },
   });
 
@@ -199,6 +262,7 @@ export function registerObsidianTools(ctx: ServerContext): void {
     description:
       "Hot-reload a plugin after rebuilding — fastest way to test code changes without restarting Obsidian. " +
       CLOSED_VAULT_WARNING,
+    annotations: { readOnlyHint: false, destructiveHint: true },
     inputSchema: pluginIdSchema,
     handler: async (args) => {
       const { stdout } = await runCli(router, {
@@ -217,6 +281,12 @@ export function registerObsidianTools(ctx: ServerContext): void {
     description:
       "Install a community plugin from the registry by id. Network access required. " +
       CLOSED_VAULT_WARNING,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: {
       id: z.string().describe("Community plugin id"),
       vault: z.string().optional().describe("Target vault name; overrides the session default"),
@@ -236,7 +306,11 @@ export function registerObsidianTools(ctx: ServerContext): void {
     toolset: "plugin-dev",
     capability: "pluginInstall",
     description: "Uninstall a community plugin. " + CLOSED_VAULT_WARNING,
-    annotations: { destructiveHint: true },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    },
     inputSchema: pluginIdSchema,
     handler: async (args) => {
       const { stdout } = await runCli(router, {
@@ -276,9 +350,10 @@ export function registerObsidianTools(ctx: ServerContext): void {
     toolset: "plugin-dev",
     capability: "evaluate",
     description:
-      "Read or write a plugin's persisted settings (data.json in memory). Write requires the plugin " +
-      "to be loaded. Prefer over obsidian_eval for typed settings access. " +
+      "Read a plugin's persisted data and conventional runtime settings, or replace its persisted " +
+      "data. Write requires the plugin to be loaded. Prefer over obsidian_eval for settings access. " +
       CLOSED_VAULT_WARNING,
+    annotations: { readOnlyHint: false, destructiveHint: true },
     inputSchema: {
       id: z.string().describe("Plugin id"),
       data: z
@@ -296,14 +371,18 @@ export function registerObsidianTools(ctx: ServerContext): void {
         return contentOutcome(`Saved settings for ${id}.`);
       }
       const value = await readPluginData(router, id, vault);
-      return { text: "Plugin settings loaded.", json: { id, data: value } };
+      const rendered = renderResult(value);
+      return {
+        text: `Plugin settings for ${id}:\n${rendered.text}`,
+        json: { id, data: value, truncated: rendered.truncated },
+      };
     },
   });
 
   registry.add({
     name: "obsidian_plugin_commands",
     toolset: "plugin-dev",
-    capability: "cliCommand",
+    capability: "evaluate",
     description:
       "List command-palette ids registered by a plugin (prefix filter). " + CLOSED_VAULT_WARNING,
     annotations: { readOnlyHint: true },
@@ -313,11 +392,10 @@ export function registerObsidianTools(ctx: ServerContext): void {
     },
     handler: async (args) => {
       const prefix = args.id as string;
-      const ids = await cliCommandIds(router, prefix, vaultName(args, config));
-      const filtered = ids.filter((c) => c.startsWith(prefix));
+      const filtered = await listPluginCommandIds(router, prefix, vaultName(args, config));
       return {
         text: filtered.join("\n") || "(no commands)",
-        json: { pluginId: prefix, commands: filtered },
+        json: { pluginId: prefix, count: filtered.length, commands: filtered },
       };
     },
   });

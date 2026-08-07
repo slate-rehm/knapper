@@ -10,10 +10,10 @@
  *  - `PlaywrightSession.page()` used to fall back to "first main window" when no
  *    window matched, so a pin at a scratch vault could drive a real one.
  *
- * Authorization is a `.knapper-managed` marker inside the vault directory, written
- * by exactly two things: `obsidian_create_vault` (disposable, `created`) and the
- * out-of-band `knapper authorize` command (`adopted`). No tool can grant it, which
- * is the property the whole design rests on — see `src/authorize.ts`.
+ * Existing-vault authorization is an external record under `KNAP_HOME`, created
+ * only by the out-of-band `knapper authorize` command. A private workspace scratch
+ * vault is authorized by its exact verified session layout. No MCP tool and no file
+ * inside a vault can grant authorization. See `src/authorize.ts`.
  */
 
 import { resolve as resolvePath } from "node:path";
@@ -50,6 +50,10 @@ export interface VaultFenceOptions {
   defaultVault?: string;
   logger: Logger;
   configPath?: string;
+  /** Environment that selects Knapper's external authorization registry. */
+  env?: NodeJS.ProcessEnv;
+  /** Exact private-session scratch vault, authorized by its verified layout. */
+  sessionVaultPath?: string;
 }
 
 /**
@@ -85,10 +89,16 @@ export class VaultFence {
 
   private async grantFor(vaultPath: string): Promise<MarkerGrant | undefined> {
     const key = resolvePath(vaultPath);
+    if (
+      this.opts.sessionVaultPath !== undefined &&
+      key === resolvePath(this.opts.sessionVaultPath)
+    ) {
+      return "created";
+    }
     const cached = this.markerCache.get(key);
     if (cached && Date.now() - cached.at < MARKER_TTL_MS) return cached.grant;
 
-    const marker = await readManagedMarker(key);
+    const marker = await readManagedMarker(key, this.opts.env ?? process.env);
     if (!marker) {
       // Deliberately not cached — see MARKER_TTL_MS.
       this.markerCache.delete(key);

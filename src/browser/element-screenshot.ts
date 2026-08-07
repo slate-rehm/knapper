@@ -12,6 +12,7 @@ import { z } from "zod";
 import type { CapabilityRouter } from "../connection/router.js";
 import type { ToolOutcome } from "../tools/registry.js";
 import { UobError } from "../util/errors.js";
+import { saveArtifact } from "../util/artifacts.js";
 
 export const elementScreenshotSchema = {
   target: z
@@ -22,6 +23,7 @@ export const elementScreenshotSchema = {
         "docs/dom-hooks.md or an obsidian_editor_widgets cssPath.",
     ),
   vault: z.string().optional().describe("Target vault name; overrides the session default"),
+  path: z.string().optional().describe("Relative output path below the artifact directory"),
 };
 
 export interface ElementMetrics {
@@ -29,6 +31,23 @@ export interface ElementMetrics {
   devicePixelRatio: number;
   viewport: { innerWidth: number; innerHeight: number };
   display: { display: string; visibility: string };
+}
+
+export interface ScreenshotClip {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The visible part of an element, expressed in viewport CSS pixels. */
+export function visibleElementClip(metrics: ElementMetrics): ScreenshotClip | undefined {
+  const left = Math.max(0, metrics.rect.x);
+  const top = Math.max(0, metrics.rect.y);
+  const right = Math.min(metrics.viewport.innerWidth, metrics.rect.x + metrics.rect.width);
+  const bottom = Math.min(metrics.viewport.innerHeight, metrics.rect.y + metrics.rect.height);
+  if (right <= left || bottom <= top) return undefined;
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 /** Renderer source for the metrics block; `null` when nothing matches. */
@@ -49,6 +68,7 @@ export function elementMetricsSource(selector: string): string {
 
 export async function captureElementScreenshot(
   router: CapabilityRouter,
+  outputDir: string,
   args: Record<string, unknown>,
 ): Promise<ToolOutcome> {
   const parsed = z.object(elementScreenshotSchema).parse(args);
@@ -76,12 +96,12 @@ export async function captureElementScreenshot(
     });
   }
 
-  const visible =
-    metrics.rect.width > 0 &&
-    metrics.rect.height > 0 &&
-    metrics.display.display !== "none" &&
-    metrics.display.visibility !== "hidden";
-  if (!visible) {
+  const clip = visibleElementClip(metrics);
+  if (
+    clip === undefined ||
+    metrics.display.display === "none" ||
+    metrics.display.visibility === "hidden"
+  ) {
     // Playwright would auto-wait for visibility and then time out with a generic
     // message; refusing with the measured geometry is faster and more actionable.
     throw new UobError(
@@ -97,7 +117,23 @@ export async function captureElementScreenshot(
     );
   }
 
-  const buffer = await page.locator(parsed.target).first().screenshot({ type: "png" });
+  // locator.screenshot auto-scrolls and waits for layout stability. A live CM6
+  // editor never becomes stable because its cursor and decorations keep changing,
+  // so the call waits for the full Playwright timeout. The measured viewport clip
+  // captures the same visible box without moving or waiting on the element.
+  const buffer = await page.screenshot({
+    type: "png",
+    clip,
+    animations: "disabled",
+    caret: "hide",
+  });
+  const file = await saveArtifact(
+    outputDir,
+    parsed.path,
+    `obsidian-element-${Date.now()}.png`,
+    buffer,
+    "image/png",
+  );
 
   const lines = [
     `Element screenshot of ${parsed.target}`,
@@ -108,7 +144,6 @@ export async function captureElementScreenshot(
 
   return {
     text: lines.join("\n"),
-    json: { target: parsed.target, ...metrics },
-    images: [{ data: buffer.toString("base64"), mimeType: "image/png" }],
+    json: { target: parsed.target, ...metrics, clip, file },
   };
 }

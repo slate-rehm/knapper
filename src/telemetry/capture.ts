@@ -59,7 +59,11 @@ async function waitForAuthorized(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     if (page.isClosed()) return false;
-    if (await session.isPageAuthorized(page)) return true;
+    try {
+      if (await session.isPageAuthorized(page)) return true;
+    } catch {
+      // Authorization lookup failures stay closed while the page initializes.
+    }
     if (Date.now() >= deadline) return false;
     await new Promise((r) => setTimeout(r, stepMs));
   }
@@ -67,11 +71,15 @@ async function waitForAuthorized(
 
 export class TelemetryCapture {
   /** Pages already wired for console/pageerror, tracked so re-arming does not double-subscribe. */
-  private readonly wired = new WeakSet<Page>();
+  private wired = new WeakSet<Page>();
   /** Pages that already have network listeners (separate so network can be enabled later). */
-  private readonly networkWired = new WeakSet<Page>();
+  private networkWired = new WeakSet<Page>();
+  /** Wired pages in the current context, retained so status can re-check the fence. */
+  private subscribedPages = new Set<Page>();
   /** Context we attached the `page` listener to; changes after CDP reconnect. */
   private subscribedContext?: BrowserContext;
+  /** Invalidates callbacks retained by pages from an old context or session binding. */
+  private generation = 0;
   private armed = false;
   private networkEnabled = false;
   private arming?: Promise<{ armed: boolean; pages: number }>;
@@ -94,6 +102,18 @@ export class TelemetryCapture {
 
   get isNetworkEnabled(): boolean {
     return this.networkEnabled;
+  }
+
+  /** Forget listeners and state after the router switches to another Obsidian. */
+  reset(): void {
+    this.generation++;
+    this.wired = new WeakSet<Page>();
+    this.networkWired = new WeakSet<Page>();
+    this.subscribedPages = new Set<Page>();
+    this.subscribedContext = undefined;
+    this.armed = false;
+    this.networkEnabled = false;
+    this.arming = undefined;
   }
 
   /**
@@ -135,8 +155,12 @@ export class TelemetryCapture {
     // After a CDP reconnect Playwright hands us a new BrowserContext. The old
     // `page` listener dies with the previous context, so we must re-subscribe.
     if (this.subscribedContext !== context) {
+      this.generation++;
       this.armed = false;
       this.subscribedContext = context;
+      this.subscribedPages = new Set<Page>();
+      this.wired = new WeakSet<Page>();
+      this.networkWired = new WeakSet<Page>();
     }
 
     // Catch windows opened after we attach (popouts, new vault windows). A window
@@ -154,76 +178,77 @@ export class TelemetryCapture {
       });
     }
 
-    let count = 0;
     let skipped = 0;
     for (const page of context.pages()) {
       if (page.isClosed()) continue;
-      if (!(await session.isPageAuthorized(page))) {
+      if (!(await this.isAuthorized(page))) {
         skipped++;
         continue;
       }
-      if (await this.wirePage(page, opts.network === true || this.networkEnabled)) count++;
+      await this.wirePage(page, opts.network === true || this.networkEnabled);
     }
 
     this.armed = true;
     if (opts.network === true) this.networkEnabled = true;
+    const pages = await this.authorizedSubscriptionCount();
     this.logger.debug("telemetry armed", {
-      pages: count,
+      pages,
       skippedUnauthorized: skipped,
       network: this.networkEnabled,
     });
-    return { armed: true, pages: count };
+    return { armed: true, pages };
   }
 
   private async wirePage(page: Page, network: boolean): Promise<boolean> {
     let changed = false;
+    this.subscribedPages.add(page);
+    const generation = this.generation;
 
     if (!this.wired.has(page)) {
       this.wired.add(page);
       changed = true;
 
       page.on("console", (msg) => {
-        const location = msg.location();
-        const url = location?.url;
-        const level = toLevel(msg.type());
-        const meta =
-          location?.lineNumber !== undefined
-            ? { line: location.lineNumber, column: location.columnNumber }
-            : undefined;
-
-        void (async () => {
+        this.captureIfAuthorized(page, generation, async () => {
+          const location = msg.location();
+          const url = location?.url;
+          const level = toLevel(msg.type());
+          const meta =
+            location?.lineNumber !== undefined
+              ? { line: location.lineNumber, column: location.columnNumber }
+              : undefined;
           const text = await consoleMessageText(msg);
-          this.store.add({
+          return {
             source: "console",
             level,
             text,
             ...(url ? { url } : {}),
             ...(meta !== undefined ? { meta } : {}),
-          });
-        })().catch((e) => this.logger.debug("console format failed", { error: String(e) }));
+          };
+        });
       });
 
       page.on("pageerror", (error) => {
-        this.store.add({
+        this.captureIfAuthorized(page, generation, () => ({
           source: "pageerror",
           level: "error",
           text: error.message,
           ...(error.stack !== undefined ? { stack: error.stack } : {}),
-        });
+        }));
       });
 
       page.on("crash", () => {
-        this.store.add({
+        this.captureIfAuthorized(page, generation, () => ({
           source: "exception",
           level: "error",
           text: "Obsidian renderer crashed.",
-        });
+        }));
       });
     }
 
     if (network && !this.networkWired.has(page)) {
       this.networkWired.add(page);
-      await this.wireNetwork(page);
+      await this.wireNetwork(page, generation);
       changed = true;
     }
 
@@ -234,28 +259,75 @@ export class TelemetryCapture {
    * Network capture is opt-in: plugin HTTP traffic is useful when debugging a sync
    * or API integration, and pure noise otherwise.
    */
-  private async wireNetwork(page: Page): Promise<void> {
+  private async wireNetwork(page: Page, generation: number): Promise<void> {
     page.on("requestfailed", (request) => {
-      this.store.add({
+      this.captureIfAuthorized(page, generation, () => ({
         source: "network",
         level: "warn",
         text: `${request.method()} ${request.url()} failed: ${request.failure()?.errorText ?? "unknown"}`,
         url: request.url(),
         meta: { method: request.method() },
-      });
+      }));
     });
 
     page.on("response", (response) => {
-      const status = response.status();
-      if (status < 400) return; // only surface failures by default
-      this.store.add({
-        source: "network",
-        level: status >= 500 ? "error" : "warn",
-        text: `${response.request().method()} ${response.url()} -> ${status}`,
-        url: response.url(),
-        meta: { status, method: response.request().method() },
+      this.captureIfAuthorized(page, generation, () => {
+        const status = response.status();
+        if (status < 400) return undefined; // only surface failures by default
+        return {
+          source: "network",
+          level: status >= 500 ? "error" : "warn",
+          text: `${response.request().method()} ${response.url()} -> ${status}`,
+          url: response.url(),
+          meta: { status, method: response.request().method() },
+        };
       });
     });
+  }
+
+  /** Re-check the fence at event time because a wired window can switch vaults. */
+  private captureIfAuthorized(
+    page: Page,
+    generation: number,
+    makeRecord: () =>
+      | Parameters<TelemetryStore["add"]>[0]
+      | undefined
+      | Promise<Parameters<TelemetryStore["add"]>[0] | undefined>,
+  ): void {
+    void (async () => {
+      if (generation !== this.generation) return;
+      if (!(await this.isAuthorized(page))) return;
+      const record = await makeRecord();
+      if (
+        generation !== this.generation ||
+        record === undefined ||
+        !(await this.isAuthorized(page))
+      )
+        return;
+      this.store.add(record);
+    })().catch((e) => this.logger.debug("telemetry event skipped", { error: String(e) }));
+  }
+
+  /** Authorization failures must never turn into permissive capture. */
+  private async isAuthorized(page: Page): Promise<boolean> {
+    try {
+      return !page.isClosed() && (await this.router.playwright.isPageAuthorized(page));
+    } catch {
+      return false;
+    }
+  }
+
+  /** Count current subscriptions without exposing page titles or vault names. */
+  private async authorizedSubscriptionCount(): Promise<number> {
+    let count = 0;
+    for (const page of this.subscribedPages) {
+      if (page.isClosed()) {
+        this.subscribedPages.delete(page);
+        continue;
+      }
+      if (await this.isAuthorized(page)) count++;
+    }
+    return count;
   }
 
   /**

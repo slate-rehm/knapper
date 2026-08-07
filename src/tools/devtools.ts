@@ -2,8 +2,7 @@
  * Developer tooling: DOM/CSS inspection, CDP passthrough, screenshots (toolset: devtools).
  */
 
-import { dirname, join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { z } from "zod";
 import type { ServerContext } from "../server.js";
 import {
@@ -21,6 +20,7 @@ import {
   captureElementScreenshot,
   elementScreenshotSchema,
 } from "../browser/element-screenshot.js";
+import { artifactFile, reserveArtifactPath } from "../util/artifacts.js";
 
 const vaultOpt = {
   vault: z.string().optional().describe("Target vault name; overrides the session default"),
@@ -183,12 +183,12 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
       "Capture the Obsidian **OS window** via Electron `capturePage()` (`dev:screenshot`), including " +
       "native chrome. This is different from browser_take_screenshot, which captures web contents only. " +
       CLOSED_VAULT_WARNING,
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true },
     inputSchema: {
       path: z
         .string()
         .optional()
-        .describe("Output path (default: a timestamped file under the configured output dir)"),
+        .describe("Relative output path below the configured artifact directory"),
       vault: z.string().optional().describe("Target vault name; overrides the session default"),
     },
     handler: async (args) => {
@@ -200,33 +200,27 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
       // derives in physical pixels would crop exactly like that. Until confirmed,
       // obsidian_element_screenshot pairs every capture with a metrics block so
       // agents can trust the numbers over the pixels.
-      const outPath =
-        (args.path as string | undefined) ??
-        join(config.outputDir, `obsidian-window-${Date.now()}.png`);
-      // Obsidian's dev:screenshot does not create the directory, so a first run in
-      // a fresh working directory failed with ENOENT on the default path — the tool
-      // was unusable out of the box until someone happened to mkdir it.
-      const { mkdir } = await import("node:fs/promises");
-      await mkdir(dirname(outPath), { recursive: true }).catch(() => undefined);
+      const outPath = await reserveArtifactPath(
+        config.outputDir,
+        args.path as string | undefined,
+        `obsidian-window-${Date.now()}.png`,
+      );
       const tokens = [`path=${cliValue(outPath)}`];
-      await runCli(router, {
-        command: "dev:screenshot",
-        args: tokens,
-        vault: vaultName(args, config),
-      });
-
-      let b64 = "";
       try {
-        b64 = (await readFile(outPath)).toString("base64");
-      } catch {
-        return contentOutcome(`Screenshot requested at ${outPath} (file not readable yet).`);
+        await runCli(router, {
+          command: "dev:screenshot",
+          args: tokens,
+          vault: vaultName(args, config),
+        });
+        const file = await artifactFile(outPath, "image/png");
+        return {
+          text: `Window screenshot saved to ${outPath}`,
+          json: file,
+        };
+      } catch (error) {
+        await rm(outPath, { force: true }).catch(() => undefined);
+        throw error;
       }
-
-      return {
-        text: `Window screenshot saved to ${outPath}`,
-        json: { path: outPath },
-        images: [{ data: b64, mimeType: "image/png" }],
-      };
     },
   });
 
@@ -244,11 +238,11 @@ export function registerDevtoolsTools(ctx: ServerContext): void {
       "display/visibility) measured in the live DOM — trust those numbers over the pixels when " +
       "display scaling is in play. Complements browser_take_screenshot (viewport) and " +
       "obsidian_screenshot (OS window).",
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: false },
     inputSchema: elementScreenshotSchema,
     handler: async (args) => {
       await router.resolve("ariaSnapshot");
-      return captureElementScreenshot(router, args);
+      return captureElementScreenshot(router, config.outputDir, args);
     },
   });
 }
