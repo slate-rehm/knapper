@@ -136,4 +136,13 @@ describe("DefaultProfileLease", () => {
       "lease write failed",
     );
   });
+
+  it("does not swallow an undefined rejection", async () => {
+    const lease = new DefaultProfileLease({ idleTimeoutMs: 30_000, env });
+
+    await expect(lease.run("obsidian_status", () => Promise.reject(undefined))).rejects.toBe(
+      undefined,
+    );
+    await lease.release();
+  });
 });
