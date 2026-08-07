@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   communityPluginsEnabledConfig,
+  formatVaultSetupResult,
   preflightVaultSetup,
   runningObsidianVersion,
 } from "../../src/tools/provisioning.js";
@@ -46,6 +47,32 @@ describe("runningObsidianVersion", () => {
 });
 
 describe("vault setup preflight", () => {
+  it("reports every setup step and its failure", () => {
+    expect(
+      formatVaultSetupResult(
+        "test-vault",
+        {
+          preflight: { status: "verified" },
+          communityPlugins: { status: "unchanged" },
+          trust: { status: "changed" },
+          pluginEnabled: { status: "unchanged" },
+          pluginLoaded: { status: "failed", error: "The plugin is not loaded." },
+        },
+        [{ step: "pluginLoaded", error: "The plugin is not loaded." }],
+      ),
+    ).toBe(
+      [
+        'Vault "test-vault" setup completed with 1 failed step(s).',
+        "Setup steps:",
+        "- Preflight: verified",
+        "- Community plugins: unchanged",
+        "- Restricted mode: changed",
+        "- Plugin enabled: unchanged",
+        "- Plugin loaded: failed — The plugin is not loaded.",
+      ].join("\n"),
+    );
+  });
+
   it("preserves every existing app setting while enabling community plugins", () => {
     expect(
       communityPluginsEnabledConfig({

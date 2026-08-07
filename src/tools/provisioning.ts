@@ -37,6 +37,41 @@ interface MutableJson<T> {
   value: T;
 }
 
+type VaultSetupStep = {
+  status: "changed" | "unchanged" | "verified" | "failed" | "skipped";
+  error?: string;
+};
+
+const VAULT_SETUP_STEP_LABELS: Record<string, string> = {
+  preflight: "Preflight",
+  communityPlugins: "Community plugins",
+  trust: "Restricted mode",
+  pluginEnabled: "Plugin enabled",
+  pluginLoaded: "Plugin loaded",
+};
+
+export function formatVaultSetupResult(
+  vault: string,
+  steps: Record<string, VaultSetupStep>,
+  failures: { step: string; error: string }[],
+): string {
+  const lines = [
+    failures.length === 0
+      ? `Vault "${vault}" is automation-ready.`
+      : `Vault "${vault}" setup completed with ${failures.length} failed step(s).`,
+    "Setup steps:",
+  ];
+
+  for (const [name, result] of Object.entries(steps)) {
+    const label = VAULT_SETUP_STEP_LABELS[name] ?? name;
+    lines.push(
+      `- ${label}: ${result.status}${result.error === undefined ? "" : ` — ${result.error}`}`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
 async function backUpInvalidJson(
   path: string,
   raw?: string,
@@ -385,6 +420,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
             };
 
       const lines = [
+        `Profile identity: ${profile.kind}${profile.sessionId === null ? "" : ` (${profile.sessionId})`}`,
         `Obsidian running: ${health.running ? "yes" : "no"}`,
         `CLI enabled (config): ${health.cliEnabled ? "yes" : "no"}`,
         `CLI reachable: ${health.cliReachable ? "yes" : "no"}`,
@@ -643,13 +679,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
       // Complete every read and shape check before the first mutation. Invalid
       // settings are backed up outside the vault and left unchanged.
       const preflight = await preflightVaultSetup(target.path, pluginId);
-      const steps: Record<
-        string,
-        {
-          status: "changed" | "unchanged" | "verified" | "failed" | "skipped";
-          error?: string;
-        }
-      > = {
+      const steps: Record<string, VaultSetupStep> = {
         preflight: { status: "verified" },
       };
 
@@ -747,10 +777,7 @@ export function registerProvisioningTools(ctx: ServerContext): void {
         }));
       const state = await vaultAutomationState(ctx, vault, config.obsidianConfigPath);
       return {
-        text:
-          failures.length === 0
-            ? `Vault "${vault}" is automation-ready.`
-            : `Vault "${vault}" setup completed with ${failures.length} failed step(s).`,
+        text: formatVaultSetupResult(vault, steps, failures),
         json: {
           ok: failures.length === 0,
           partial: failures.length > 0,
