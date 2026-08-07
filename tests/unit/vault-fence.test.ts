@@ -68,9 +68,19 @@ describe("VaultFence.resolve — refusing to guess", () => {
     const f = await fixture(["RealNotes"]);
     const fence = makeFence(f);
 
-    await expect(fence.resolve("RealNotes")).rejects.toMatchObject({
+    const failure = await fence.resolve("RealNotes").catch((error: unknown) => error);
+    expect(failure).toMatchObject({
       code: "VAULT_NOT_AUTHORIZED",
+      details: {
+        requested: "RealNotes",
+        authorizedVaults: [],
+      },
     });
+    expect(String(failure)).not.toContain(f.vaultPath("RealNotes"));
+    expect(JSON.stringify(failure)).not.toContain(f.vaultPath("RealNotes"));
+    const remediation = (failure as { remediation?: string }).remediation;
+    expect(remediation).toContain("<vault path>");
+    expect(remediation).not.toContain(f.vaultPath("RealNotes"));
   });
 
   it("REFUSES when nothing is authorized and no vault was named", async () => {

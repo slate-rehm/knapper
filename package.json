@@ -1,6 +1,6 @@
 {
   "name": "knapper",
-  "version": "0.6.0-beta.8",
+  "version": "0.6.0-beta.9",
   "description": "MCP server for Obsidian plugin development with isolated workspaces, browser automation, and debugging.",
   "keywords": [
     "automation",
